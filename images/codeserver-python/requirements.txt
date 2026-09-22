@@ -1,0 +1,8 @@
+# Kubeflow packages (CPU)
+google-cloud-storage
+jax[cpu]
+kfp==2.16.1
+kubeflow[spark]==0.4.0
+matplotlib
+numpy
+pandas

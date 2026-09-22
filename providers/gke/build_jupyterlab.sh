@@ -226,6 +226,9 @@ for v in "${VARIANTS[@]}"; do
   TMP_BUILD_DIR="$(mktemp -d)"
   cp -r "${CONTEXT_DIR}/." "${TMP_BUILD_DIR}/"
   cp -r "${EXAMPLES_DIR}" "${TMP_BUILD_DIR}/examples"
+  if [[ -d "${SCRIPT_DIR}/../../images/samples" ]]; then
+    cp -r "${SCRIPT_DIR}/../../images/samples/." "${TMP_BUILD_DIR}/examples/" 2>/dev/null || true
+  fi
   cp "${CONTEXT_DIR}/${V_DOCKERFILE}" "${TMP_BUILD_DIR}/Dockerfile"
 
   if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
