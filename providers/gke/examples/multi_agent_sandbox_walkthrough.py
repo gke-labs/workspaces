@@ -49,14 +49,14 @@ How to Observe in Kubernetes (in a separate terminal):
 
 Usage:
   # From inside the VS Code / code-server workspace pod:
-  python3 gke/examples/multi_agent_sandbox_walkthrough.py
+  python3 providers/gke/examples/multi_agent_sandbox_walkthrough.py
 
   # Or configure a custom number of parallel agents (e.g. 20, 25):
-  NUM_AGENTS=20 python3 gke/examples/multi_agent_sandbox_walkthrough.py
+  NUM_AGENTS=20 python3 providers/gke/examples/multi_agent_sandbox_walkthrough.py
 
   # Or from your local workstation (via port-forward):
   kubectl port-forward -n kubeflow-user svc/agent-sandbox-mcp-server 8000:8000
-  MCP_SERVER_URL="http://localhost:8000/mcp" python3 gke/examples/multi_agent_sandbox_walkthrough.py
+  MCP_SERVER_URL="http://localhost:8000/mcp" python3 providers/gke/examples/multi_agent_sandbox_walkthrough.py
 """
 
 import concurrent.futures

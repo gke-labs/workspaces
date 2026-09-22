@@ -16,7 +16,7 @@
 set -euo pipefail
 
 if [[ $# != 2 ]]; then
-  printf 'Usage: bash gke/scripts/plan.sh CONFIG_JSON NEW_OUTPUT_DIRECTORY\n' >&2
+  printf 'Usage: bash providers/gke/scripts/plan.sh CONFIG_JSON NEW_OUTPUT_DIRECTORY\n' >&2
   exit 2
 fi
 
@@ -32,7 +32,8 @@ command -v kubectl >/dev/null
 mkdir -p "$(dirname "$output")"
 temporary=$(mktemp -d "$(dirname "$output")/.notebooks-plan.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT
-cd "$root/gke"
+gke_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$gke_dir"
 go build -o "$temporary/render" ./cmd/render
 for stage in namespaces isolation applications edge; do
   "$temporary/render" --repo-root "$root" --config "$config" --stage "$stage" > "$temporary/$stage.json"

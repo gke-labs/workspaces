@@ -222,7 +222,7 @@ Observed end-to-end execution results (`jupyter nbconvert --to notebook --execut
 - Cluster: `ipv6-project-379110` / `us-central1-c` / `kubeflow-notebooks`, GKE `1.35.7-gke.1222000`, Dataplane V2, VPC-native networking, Workload Identity enabled.
 - Edge: Global static IP `8.233.28.206`, hostname `notebooks.8.233.28.206.sslip.io`, Certificate Manager certificate map `notebooks-gke` (`ACTIVE`).
 - Custom OAuth client ID `628944397724-a2uj76f0gd8g04asj0dtmq0qeod2kdn6.apps.googleusercontent.com` configured on GCPBackendPolicy.
-- Google login as `aojea@google.com` reached the frontend successfully. Tenant discovery returned HTTP 200 with only `team-a`. Backend workspace audit data records that verified email as the creator.
+- Google login as `pilot-user@example.com` reached the frontend successfully. Tenant discovery returned HTTP 200 with only `team-a`. Backend workspace audit data records that verified email as the creator.
 - Browser creation produced Workspace `team-a/gke-pilot` and Bound 10 GiB PVC `gke-pilot-home`.
 
 Observed acceptance results:

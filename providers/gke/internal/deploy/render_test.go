@@ -202,11 +202,17 @@ func TestConnectionLifetimeRendering(t *testing.T) {
 	}
 }
 
-func TestRenderStages(t *testing.T) {
-	root, err := filepath.Abs("../../..")
+func repoRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.Abs("../../../..")
 	if err != nil {
 		t.Fatal(err)
 	}
+	return root
+}
+
+func TestRenderStages(t *testing.T) {
+	root := repoRoot(t)
 	config := fixture()
 	for _, stage := range []string{"namespaces", "isolation", "applications", "edge"} {
 		t.Run(stage, func(t *testing.T) {
@@ -261,10 +267,7 @@ func TestRenderStages(t *testing.T) {
 }
 
 func TestPlanCommand(t *testing.T) {
-	root, err := filepath.Abs("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := repoRoot(t)
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "config.json")
 	encoded, err := json.Marshal(fixture())
@@ -276,7 +279,11 @@ func TestPlanCommand(t *testing.T) {
 	}
 	output := filepath.Join(directory, "plan")
 	run := func() error {
-		command := exec.Command("bash", filepath.Join(root, "gke/scripts/plan.sh"), configPath, output)
+		planScript := filepath.Join(root, "providers/gke/scripts/plan.sh")
+		if _, err := os.Stat(planScript); err != nil {
+			planScript = filepath.Join(root, "gke/scripts/plan.sh")
+		}
+		command := exec.Command("bash", planScript, configPath, output)
 		result, err := command.CombinedOutput()
 		if err != nil {
 			t.Log(string(result))
@@ -305,10 +312,7 @@ func TestPlanCommand(t *testing.T) {
 }
 
 func TestUpstreamContracts(t *testing.T) {
-	root, err := filepath.Abs("../../..")
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := repoRoot(t)
 	resources, err := Render(context.Background(), root, "applications", fixture(), Kustomize)
 	if err != nil {
 		t.Fatal(err)

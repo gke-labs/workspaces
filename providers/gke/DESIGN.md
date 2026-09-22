@@ -1,9 +1,8 @@
 # Design: why this integration works the way it does
 
-Status: pilot, 2026-09. Source:
-[github.com/aojea/notebooks, branch `gke`, directory `gke/`](https://github.com/aojea/notebooks/tree/gke/gke).
+Status: pilot, 2026-09.
 The dated evidence lives in the
-[codelab deployment record](https://github.com/aojea/notebooks/blob/gke/gke/CODELAB.md#deployment-record);
+[codelab deployment record](CODELAB.md);
 this document explains
 the choices. Deeper analysis is in the `gateway_api` branch's
 `istio-replacement-evaluation.md` and `design-gateway-api.md`
@@ -31,7 +30,7 @@ directory; Kubernetes RBAC remains the single authorization source of truth.
 The decisive property of IAP over every header-based scheme: the application does
 not *trust* an identity, it *verifies* one. IAP adds `x-goog-iap-jwt-assertion`,
 an ES256 JWT checked in
-[identity.go](https://github.com/aojea/notebooks/blob/gke/gke/internal/access/identity.go)
+[identity.go](internal/access/identity.go)
 against
 Google's JWKS for signature, issuer, exact audience, and lifetime, with no
 unsigned-header fallback. Google documents this verification as the defence even
@@ -60,7 +59,7 @@ Cons:
   controller already has (port resolution, prefix stripping, header injection);
   upstream changes there must be tracked by compatibility tests.
 - The namespace-list filter is a temporary application-API adapter (see the
-  [removal plan](https://github.com/aojea/notebooks/blob/gke/gke/README.md#temporary-namespace-filtering-adapter)).
+  [removal plan](README.md#temporary-namespace-filtering-adapter)).
 - A data-path proxy we own is a security- and availability-critical component.
 - Pilot-grade today: single trusted user; production and multi-tenant gates —
   enrollment, culling verification, upgrades, scale — remain open.
@@ -72,14 +71,14 @@ IAM check, strips client `x-goog-*` headers) → access proxy → upstream.
 The proxy, per request:
 
 1. Verifies the IAP assertion
-   ([identity.go](https://github.com/aojea/notebooks/blob/gke/gke/internal/access/identity.go)).
+   ([identity.go](internal/access/identity.go)).
 2. Strips inbound identity and group headers and forwards only the verified
    Google-account email as the upstream user
-   ([proxy.go](https://github.com/aojea/notebooks/blob/gke/gke/internal/access/proxy.go)).
+   ([proxy.go](internal/access/proxy.go)).
 3. For `/workspace/connect/…`, resolves the upstream-owned Service and checks
    workspace access with a `SubjectAccessReview` before proxying, WebSockets
    included
-   ([kubernetes.go](https://github.com/aojea/notebooks/blob/gke/gke/internal/access/kubernetes.go)).
+   ([kubernetes.go](internal/access/kubernetes.go)).
 4. Answers the namespace-list request with only configured tenant namespaces
    where the user may `list` workspaces, failing closed on authorization errors.
 
@@ -117,11 +116,11 @@ Costs, accepted knowingly:
 - Token expiry is not kernel lifetime: culling and idle policies act separately.
 
 Validation lives in
-[vscode_validation.ipynb](https://github.com/aojea/notebooks/blob/gke/gke/vscode_validation.ipynb)
+[vscode_validation.ipynb](vscode_validation.ipynb)
 and the
-[user guide](https://github.com/aojea/notebooks/blob/gke/gke/USER_GUIDE.md#vs-code-jupyter-extension);
+[user guide](USER_GUIDE.md#vs-code-jupyter-extension);
 acceptance evidence in the
-[codelab record](https://github.com/aojea/notebooks/blob/gke/gke/CODELAB.md#2026-09-12-kubernetes-tokens-and-vs-code).
+[codelab record](CODELAB.md#2026-09-12-kubernetes-tokens-and-vs-code).
 
 ## Future work
 
@@ -155,7 +154,7 @@ land without forking upstream:
   activity/culling verification, upgrade and cleanup automation, desktop token
   renewal ergonomics, and removal of the temporary namespace-filter adapter once
   upstream ships equivalent filtering
-  ([removal plan](https://github.com/aojea/notebooks/blob/gke/gke/README.md#temporary-namespace-filtering-adapter)).
+  ([removal plan](README.md#temporary-namespace-filtering-adapter)).
 
 Two requirements are standing, not future:
 

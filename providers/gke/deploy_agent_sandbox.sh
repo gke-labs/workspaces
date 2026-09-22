@@ -27,7 +27,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 # ------------------------------------------------------------------------------
 # 1. Configuration & Defaults
@@ -228,5 +227,5 @@ echo "  3. Run an isolated task in a sandbox:"
 echo "     gemini -p 'Create a sandbox from warmpool python-warmpool, run python3 -c \"print(2**64)\", and delete the sandbox.'"
 echo ""
 echo "To run the multi-sandbox orchestration walkthrough:"
-echo "  python3 gke/examples/multi_agent_sandbox_walkthrough.py"
+echo "  python3 providers/gke/examples/multi_agent_sandbox_walkthrough.py"
 echo "=============================================================================="
