@@ -1,0 +1,34 @@
+<!doctype html>
+<!--
+ Copyright 2026 Google LLC
+
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VS Code connections</title>
+<style>
+[hidden]{display:none!important}
+:root{color-scheme:light; font-family:"Segoe UI",sans-serif;color:#182c27;background:#f5f7fa}
+body{margin:0}main{max-width:960px;padding:32px 24px;margin:auto}header{border-bottom:2px solid #168276;padding-bottom:16px}h1{font-size:26px;letter-spacing:0}a{color:#1763a4}label{display:flex;flex-direction:column;gap:6px}form{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;padding:24px 0}input,select,button{font:inherit;padding:10px;border:1px solid #87948f;border-radius:4px;min-width:0}button{cursor:pointer;background:#116b60;color:white}button:disabled{opacity:.5;cursor:wait}#result{display:flex;gap:10px}#url{flex:1}table{border-collapse:collapse;width:100%;margin-top:24px;font-size:14px}td,th{text-align:left;padding:12px 8px;border-bottom:1px solid #cbd5d1;overflow-wrap:anywhere}#status{min-height:24px;color:#773c22}@media(max-width:640px){form{grid-template-columns:1fr}main{padding:20px 12px}td,th{padding:8px 4px}}
+</style>
+<main>
+<header><a href="/workspaces/">Workspaces</a><h1>VS Code connections</h1><div id="user"></div></header>
+<form id="connection"><label>Namespace<select id="namespace" required></select></label><label>Workspace<select id="workspace" required></select></label><label>Port<input id="port" value="jupyterlab" required></label><label>Requested duration<select id="duration" required></select></label><button type="submit" id="generate" disabled>Generate connection</button></form>
+<div id="result" hidden><input id="url" type="password" readonly aria-label="Connection URL" autocomplete="off"><button type="button" id="copy">Copy URL</button></div>
+<p id="status" role="status"></p>
+<table><thead><tr><th>Workspace</th><th>Expires</th><th>Connection</th><th></th></tr></thead><tbody id="grants"></tbody></table>
+</main><script src="/workspaces/connections/client.js" defer></script>
+</html>

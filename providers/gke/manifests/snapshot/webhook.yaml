@@ -1,0 +1,89 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: gke-snapshot-webhook-service
+spec:
+  type: ClusterIP
+  selector:
+    app: gke-workspace-snapshot-addon
+  ports:
+    - name: https
+      port: 443
+      targetPort: webhook
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: gke-snapshot-webhook-cert
+spec:
+  dnsNames:
+    - gke-snapshot-webhook-service.kubeflow-workspaces.svc
+    - gke-snapshot-webhook-service.kubeflow-workspaces.svc.cluster.local
+  issuerRef:
+    kind: Issuer
+    name: workspaces-selfsigned-issuer
+  secretName: gke-snapshot-webhook-cert
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: gke-workspace-snapshot-mutating-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: kubeflow-workspaces/gke-snapshot-webhook-cert
+webhooks:
+  # failurePolicy is Ignore on both hooks: if the addon is unavailable, Workspaces
+  # must keep starting and stopping (statelessly) rather than becoming unusable.
+  - name: mutate-workspace.podsnapshot.gke.kubeflow.org
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 10
+    clientConfig:
+      service:
+        name: gke-snapshot-webhook-service
+        namespace: kubeflow-workspaces
+        path: /mutate-workspace
+        port: 443
+    rules:
+      - apiGroups: ["kubeflow.org"]
+        apiVersions: ["v1beta1"]
+        operations: ["UPDATE"]
+        resources: ["workspaces"]
+  - name: mutate-pod.podsnapshot.gke.kubeflow.org
+    admissionReviewVersions: ["v1"]
+    sideEffects: NoneOnDryRun
+    failurePolicy: Ignore
+    reinvocationPolicy: Never
+    timeoutSeconds: 10
+    # Only Workspace Pods reach the addon; every other Pod creation in the cluster
+    # is filtered out by the API server before the webhook is called.
+    objectSelector:
+      matchExpressions:
+        - key: notebooks.kubeflow.org/workspace-name
+          operator: Exists
+    clientConfig:
+      service:
+        name: gke-snapshot-webhook-service
+        namespace: kubeflow-workspaces
+        path: /mutate-pod
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]

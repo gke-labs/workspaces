@@ -1,0 +1,25 @@
+name: License Check
+
+on:
+  push:
+    branches:
+      - main
+      - gke
+  pull_request:
+    branches:
+      - main
+      - gke
+
+jobs:
+  check-license:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: Install addlicense
+        run: go install github.com/google/addlicense@latest
+      - name: Check licenses
+        run: ~/go/bin/addlicense -check ./providers

@@ -1,0 +1,20 @@
+{
+  "controlPlaneCIDR": "10.0.0.1/32",
+  "hostname": "notebooks.example.com",
+  "desktopHostname": "",
+  "connectionTokenDefaultSeconds": 86400,
+  "connectionTokenMaxSeconds": 604800,
+  "certificateMap": "notebooks",
+  "addressName": "notebooks",
+  "iapClientID": "123-example.apps.googleusercontent.com",
+  "iapSecretName": "iap-oauth",
+  "iapAudience": "",
+  "tenants": ["team-a"],
+  "images": {
+    "controller": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
+    "backend": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
+    "frontend": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
+    "proxy": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
+    "snapshot": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST"
+  }
+}

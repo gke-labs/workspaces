@@ -1,0 +1,173 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-a
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gke-notebook
+  namespace: team-a
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+rules:
+  - apiGroups: [kubeflow.org]
+    resources: [workspaces, workspaces/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [trainer.kubeflow.org]
+    resources: [trainjobs, trainjobs/status, trainingruntimes]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [jobset.x-k8s.io]
+    resources: [jobsets, jobsets/status]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications, scheduledsparkapplications, sparkconnects]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [apps]
+    resources: [deployments, deployments/scale, replicasets, statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - pods/exec
+      - services
+      - endpoints
+      - configmaps
+      - events
+      - persistentvolumeclaims
+      - serviceaccounts
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+subjects:
+  - kind: User
+    name: aojea@google.com
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: gke-notebook
+    namespace: team-a
+  - kind: ServiceAccount
+    name: default
+    namespace: team-a
+  - kind: Group
+    name: system:serviceaccounts:team-a
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: notebooks-gke-pilot
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: notebooks-gke-pilot-discovery
+rules:
+  - apiGroups: [kubeflow.org]
+    resources: [workspacekinds]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get, list, watch]
+  - apiGroups: [trainer.kubeflow.org]
+    resources: [clustertrainingruntimes]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: notebooks-gke-pilot-discovery
+subjects:
+  - kind: User
+    name: aojea@google.com
+    apiGroup: rbac.authorization.k8s.io
+  - kind: ServiceAccount
+    name: gke-notebook
+    namespace: team-a
+  - kind: Group
+    name: system:serviceaccounts:team-a
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: notebooks-gke-pilot-discovery
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: notebooks-gke-pilot
+  namespace: team-a
+spec:
+  hard:
+    count/workspaces.kubeflow.org: "5"
+    pods: "30"
+    persistentvolumeclaims: "10"
+    requests.storage: 200Gi
+    # requests.cpu: "64"
+    # requests.memory: 256Gi
+    # limits.cpu: "128"
+    # limits.memory: 512Gi
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: notebooks-gke-rwo
+  labels:
+    notebooks.kubeflow.org/can-use: "true"
+  annotations:
+    notebooks.kubeflow.org/display-name: "Standard RWO (Persistent Disk)"
+    notebooks.kubeflow.org/description: "Compute Engine persistent disk storage on GKE."
+provisioner: pd.csi.storage.gke.io
+parameters:
+  type: pd-balanced
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+---
+# Allow non-workspace workload pods in team-a (Spark driver/executors, multi-host TPU
+# TrainJobs, and inference deployments) to accept connections from pods in team-a
+# (such as the Workspace pod or peer worker pods), while strictly excluding Workspace pods
+# (notebooks.kubeflow.org/workspace-name) so Workspace pods remain reachable ONLY via gke-access-proxy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gke-tenant-workloads-ingress
+  namespace: team-a
+spec:
+  podSelector:
+    matchExpressions:
+      - key: notebooks.kubeflow.org/workspace-name
+        operator: DoesNotExist
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}

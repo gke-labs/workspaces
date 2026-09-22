@@ -1,0 +1,86 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fashion-mnist-inference
+  labels:
+    app: fashion-mnist-inference
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: fashion-mnist-inference
+  template:
+    metadata:
+      labels:
+        app: fashion-mnist-inference
+    spec:
+      containers:
+      - name: inference
+        image: python:3.12-slim
+        command:
+        - /bin/sh
+        - -c
+        - pip install --no-cache-dir --quiet numpy google-cloud-storage && python3 /app/serve.py
+        env:
+        - name: BUCKET_NAME
+          value: "BUCKET_NAME_PLACEHOLDER"
+        - name: PORT
+          value: "8080"
+        ports:
+        - containerPort: 8080
+          name: http
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /livez
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+        - name: serve-code
+          mountPath: /app
+      volumes:
+      - name: serve-code
+        configMap:
+          name: ml-demo-serve-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fashion-mnist-inference
+  labels:
+    app: fashion-mnist-inference
+spec:
+  selector:
+    app: fashion-mnist-inference
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+    protocol: TCP

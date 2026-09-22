@@ -1,0 +1,98 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kubeflow-workspaces
+resources:
+  - ../../../workspaces/controller/manifests/kustomize/base
+  - ../../../workspaces/backend/manifests/kustomize/base
+  - ../../../workspaces/frontend/manifests/kustomize/base
+components:
+  - ../../../workspaces/controller/manifests/kustomize/components/certmanager
+patches:
+  - target:
+      kind: Deployment
+      name: workspaces-frontend
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+        value: /health
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/path
+        value: /health
+  - target:
+      kind: CustomResourceDefinition
+    patch: |-
+      - op: replace
+        path: /metadata/annotations/cert-manager.io~1inject-ca-from
+        value: kubeflow-workspaces/workspaces-serving-cert
+  - target:
+      kind: Certificate
+      name: workspaces-serving-cert
+    patch: |-
+      - op: replace
+        path: /spec/dnsNames
+        value:
+          - workspaces-webhook-service.kubeflow-workspaces.svc
+          - workspaces-webhook-service.kubeflow-workspaces.svc.cluster.local
+  - target:
+      kind: ValidatingWebhookConfiguration
+    patch: |-
+      apiVersion: admissionregistration.k8s.io/v1
+      kind: ValidatingWebhookConfiguration
+      metadata:
+        name: ignored
+        annotations:
+          cert-manager.io/inject-ca-from: kubeflow-workspaces/workspaces-serving-cert
+  - target:
+      kind: Deployment
+      name: workspaces-controller
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: workspaces-controller
+      spec:
+        template:
+          spec:
+            containers:
+              - name: manager
+                env:
+                  - name: USE_ISTIO
+                    value: "false"
+  - target:
+      kind: Deployment
+      name: workspaces-backend
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: workspaces-backend
+      spec:
+        template:
+          spec:
+            containers:
+              - name: workspaces-backend
+                env:
+                  - name: DISABLE_AUTH
+                    value: "false"
+                  - name: USERID_HEADER
+                    value: kubeflow-userid
+                  - name: USERID_PREFIX
+                    value: ""
+                  - name: GROUPS_HEADER
+                    value: kubeflow-groups
+                  - name: PROXY_URL_PREFIX
+                    value: /workspaces

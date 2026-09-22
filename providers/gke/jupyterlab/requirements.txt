@@ -1,0 +1,27 @@
+# Kubeflow packages (CPU)
+#
+# Versions are pinned to the ones currently deployed and working, so a rebuild
+# reproduces that stack rather than whatever pip resolves on the day it runs.
+#
+# Only packages this layer actually adds are pinned. This layer shares a single
+# site-packages with the base image, so a pin here is not just a floor -- it is also
+# a ceiling that pip will happily downgrade a base-supplied package to reach. Control
+# base-supplied packages by pinning the base image in Dockerfile.fast; this file
+# cannot do it safely.
+#
+# Pins cover direct dependencies only; transitive dependencies still float.
+
+# Added by this layer (absent from the base image).
+jax[cpu]==0.11.1
+
+# Already present in the base at these exact versions; declared so the dependency is
+# explicit, and so the kubeflow[spark] extra pulls in its Spark dependencies. Keep in
+# step with the base when bumping it -- a stale pin here silently downgrades it.
+kfp==2.16.1
+kubeflow[spark]==0.4.0
+
+# Base-supplied. Intentionally unpinned -- read the note above before adding a version.
+google-cloud-storage
+matplotlib
+numpy
+pandas

@@ -1,0 +1,4 @@
+/bin/
+/local.env
+/deployment.local.json
+/rendered/

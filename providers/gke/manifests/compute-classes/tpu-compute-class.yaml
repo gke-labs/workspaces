@@ -1,0 +1,72 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# single host TPU slice
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-8-single-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 8
+      topology: 2x4
+  nodePoolAutoCreation:
+    enabled: true
+---
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-4-single-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x2
+  nodePoolAutoCreation:
+    enabled: true
+---
+# multihost (2 hosts) TPU slice
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-8-multi-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x4
+  nodePoolAutoCreation:
+    enabled: true
+---
+# multihost (8 hosts) TPU 4x8 slice
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: tpu-v5-32-multi-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 4x8
+  nodePoolAutoCreation:
+    enabled: true

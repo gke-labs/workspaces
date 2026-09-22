@@ -1,0 +1,43 @@
+#
+# Custom Spark 4.0.1 Image with Python 3.12, NumPy, Pandas, PyArrow, and GCS client
+# Compatible with Kubeflow Workspaces jupyterlab and codeserver-python (Python 3.12)
+#
+
+# Pinned by digest, not just by tag, for the same reason as the jupyterlab variants:
+# upstream can republish a tag in place, and we have already caught
+# notebook-servers/jupyter-scipy:v1.11.0 doing exactly that. The tag is kept alongside
+# the digest for readability only -- Docker resolves the digest and ignores it.
+#
+# To move up, resolve the new digest and update it here:
+#   docker buildx imagetools inspect apache/spark:4.0.1
+FROM apache/spark:4.0.1@sha256:acfe7e06e95dd13aa32ee03c464766900d52fba15f58e421f8e1213ec041bb94
+
+USER root
+
+# Pinning the base digest above does NOT make this layer reproducible, and this build
+# has three remaining sources of drift, in rough order of how much they can bite:
+#
+#   1. numpy, pandas, pyarrow and google-cloud-storage below are unpinned, so each
+#      rebuild takes whatever is current on PyPI. numpy in particular has to stay
+#      compatible with pyspark/pyarrow's expectations.
+#   2. python3.12 comes from the deadsnakes PPA, whose patch version moves.
+#   3. get-pip.py is fetched from the network at build time.
+#
+# These are not pinned yet because, unlike the jupyterlab variants, there is no built
+# Spark image in the registry to read known-good versions off -- this image has never
+# been built here. Build it once, record what it resolves to, then pin.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common curl ca-certificates && \
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3.12 python3.12-dev python3.12-venv && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.12 && \
+    python3.12 -m pip install --no-cache-dir numpy pandas pyarrow google-cloud-storage pyspark==4.0.1 pyspark-connect==4.0.1 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PYSPARK_PYTHON=/usr/bin/python3.12
+ENV PYSPARK_DRIVER_PYTHON=/usr/bin/python3.12
+
+USER 185

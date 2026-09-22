@@ -1,0 +1,354 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Template rendered with envsubst. Required variables:
+#
+#   REGION, PROJECT_ID, REPO_NAME, IMAGE_NAME   registry coordinates
+#   CPU_IMAGE_TAG, GPU_IMAGE_TAG                exact image tag per variant
+#   GCS_BUCKET                                  shared bucket for notebooks
+#
+# The image tags are pinned rather than floating on :latest-* so a Workspace restarts
+# onto the image it was created with, and so a rebuild cannot change the runtime under
+# a running Workspace. build_jupyterlab.sh and deploy_standalone.sh set them for you.
+#
+# Because the tags are now immutable, imagePullPolicy is IfNotPresent rather than
+# Always. Always only earned its keep while these pointed at :latest-*, where the
+# contents could change behind a fixed tag. A pinned tag cannot, so Always just adds a
+# registry round-trip to every Pod start -- worth avoiding when the GPU image is ~7.5GB
+# and the node may already have it. If you ever repoint one of these at a mutable tag,
+# put Always back for that entry.
+#
+# Beware when rendering by hand: envsubst substitutes an unset variable with the empty
+# string, which yields `image: ".../jupyterlab:"` and a WorkspaceKind that cannot start
+# a Pod. Prefer the scripts, which print the tags they pin.
+apiVersion: kubeflow.org/v1beta1
+kind: WorkspaceKind
+metadata:
+  name: jupyterlab-resumable
+  annotations:
+    # enable pod snapshot and resume for all workspaces (all CPU and GPU podconfigs are resumable)
+    podsnapshot.gke.kubeflow.org/enabled: "true"
+    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+spec:
+  spawner:
+    displayName: "JupyterLab Notebook (Resumable)"
+    description: "A Workspace which runs JupyterLab in a Pod with stateful pause and resume support"
+    icon:
+      url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
+    logo:
+      url: "https://upload.wikimedia.org/wikipedia/commons/3/38/Jupyter_logo.svg"
+
+  filterRules:
+    # --------------------------------------------------------------------------
+    # IMAGE_CONFIG scope: Filter images based on selected PodConfig accelerator
+    # --------------------------------------------------------------------------
+    # When a CPU pod is selected, hide GPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image requires an accelerator (GPU) pod, but a CPU pod was selected."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: cpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["cpu"]
+
+    # When a GPU pod is selected, hide non-GPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image is not built for CUDA GPUs; please select a GPU-enabled image."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: gpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["gpu"]
+
+    # --------------------------------------------------------------------------
+    # POD_CONFIG scope: Filter podConfigs based on selected ImageConfig accelerator
+    # --------------------------------------------------------------------------
+    # When a CPU image is selected, hide GPU pod configs
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A CPU image cannot be scheduled on an accelerator (GPU) pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: cpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["cpu"]
+
+    # When a GPU image is selected, hide non-GPU pod configs
+    - scope: POD_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A GPU image requires a GPU pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: gpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["gpu"]
+
+  activityRules:
+    - config:
+        secondsSinceActive: 86400
+      match: {}
+      effect:
+        pauseWorkspace: true
+
+  podTemplate:
+    podMetadata:
+      labels: {}
+      annotations: {}
+    serviceAccount:
+      clusterRoles:
+        - name: "kubeflow-edit"
+    activityProbe:
+      minProbeIntervalSeconds: 100
+      probeIntervalSeconds: 300
+      jupyter:
+        lastActivity: true
+        portId: "jupyterlab"
+    probes:
+      startupProbe:
+        tcpSocket:
+          port: 8888
+        periodSeconds: 5
+        failureThreshold: 60
+      readinessProbe:
+        tcpSocket:
+          port: 8888
+        periodSeconds: 5
+    volumeMounts:
+      home: "/home/jovyan"
+    ports:
+      - id: "jupyterlab"
+        defaultDisplayName: "JupyterLab"
+        protocol: "HTTP"
+        httpProxy:
+          removePathPrefix: false
+          requestHeaders: {}
+    extraEnv:
+      - name: "NB_PREFIX"
+        value: |-
+          {{ httpPathPrefix "jupyterlab" }}
+      - name: "LD_LIBRARY_PATH"
+        value: "/usr/local/nvidia/lib64"
+      - name: "PATH"
+        value: "/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      - name: "REGISTRY"
+        value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+      - name: "GCS_BUCKET"
+        value: "${GCS_BUCKET}"
+    extraVolumeMounts:
+      - name: "dshm"
+        mountPath: "/dev/shm"
+    extraVolumes:
+      - name: "dshm"
+        emptyDir:
+          medium: "Memory"
+    securityContext:
+      fsGroup: 100
+      seccompProfile:
+        type: RuntimeDefault
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      runAsNonRoot: true
+      seccompProfile:
+        type: RuntimeDefault
+    options:
+      imageConfig:
+        spawner:
+          default: "jupyterlab-cpu"
+        values:
+          - id: "jupyterlab-cpu"
+            spawner:
+              displayName: "jupyterlab (CPU)"
+              description: "JupyterLab with SciPy, JAX (CPU), and Kubeflow Spark SDK"
+              labels:
+                - key: "python_version"
+                  value: "3.12.9"
+                - key: "accelerator"
+                  value: "cpu"
+            spec:
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${CPU_IMAGE_TAG}"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+          - id: "jupyterlab-gpu"
+            spawner:
+              displayName: "jupyterlab (GPU)"
+              description: "JupyterLab with PyTorch (CUDA 13.0), JAX (CUDA), Transformers, and Kubeflow Spark SDK"
+              labels:
+                - key: "python_version"
+                  value: "3.12.13"
+                - key: "pytorch_version"
+                  value: "2.12.0"
+                - key: "cuda_version"
+                  value: "13.0"
+                - key: "nccl_version"
+                  value: "2.29.7"
+                - key: "accelerator"
+                  value: "gpu"
+            spec:
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${GPU_IMAGE_TAG}"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+          - id: "jupyter-scipy:v1.10.0"
+            spawner:
+              displayName: "jupyter-scipy:v1.10.0 (Upstream)"
+              description: "Upstream JupyterLab with SciPy Packages"
+              labels:
+                - key: "python_version"
+                  value: "3.12.9"
+                - key: "accelerator"
+                  value: "cpu"
+            spec:
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+      podConfig:
+        spawner:
+          default: "small_cpu"
+        values:
+          - id: "tiny_cpu"
+            spawner:
+              displayName: "Tiny CPU"
+              description: "Pod with 0.1 CPU, 128 Mb RAM"
+              labels:
+                - key: "accelerator"
+                  value: "cpu"
+                - key: "cpu"
+                  value: "100m"
+                - key: "memory"
+                  value: "128Mi"
+            spec:
+              affinity: {}
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+          - id: "medium_cpu"
+            spawner:
+              displayName: "Medium CPU"
+              description: "Pod with 2 CPU, 4 GB RAM"
+              labels:
+                - key: "accelerator"
+                  value: "cpu"
+                - key: "cpu"
+                  value: "2"
+                - key: "memory"
+                  value: "4Gi"
+            spec:
+              resources:
+                requests:
+                  cpu: 2
+                  memory: 4Gi
+                limits:
+                  cpu: 2
+                  memory: 4Gi
+          - id: "small_cpu"
+            spawner:
+              displayName: "Small CPU"
+              description: "Pod with 1 CPU, 4 GB RAM"
+              labels:
+                - key: "accelerator"
+                  value: "cpu"
+                - key: "cpu"
+                  value: "1000m"
+                - key: "memory"
+                  value: "4Gi"
+            spec:
+              resources:
+                requests:
+                  cpu: 1000m
+                  memory: 2Gi
+                limits:
+                  cpu: 2000m
+                  memory: 4Gi
+          - id: "gpu_t4_spot"
+            spawner:
+              displayName: "GPU T4 Spot"
+              description: "Pod with 1 T4 GPU (16 GB VRAM), 12 CPU, 40 GB RAM"
+              labels:
+                - key: "accelerator"
+                  value: "gpu"
+                - key: "cpu"
+                  value: "12"
+                - key: "memory"
+                  value: "40Gi"
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "gpu-t4-spot"
+              # Sized to land on n1-standard-16 (16 vCPU / 60 GB, ~51 GiB allocatable),
+              # the T4-capable N1 shape. The generous memory is not just for the model:
+              # GKE copies GPU state through the pod's process memory while taking and
+              # restoring a PodSnapshot, so peak pod memory during a pause exceeds what
+              # the workload uses at rest.
+              resources:
+                requests:
+                  cpu: 12
+                  memory: 40Gi
+                limits:
+                  cpu: 12
+                  memory: 40Gi
+                  nvidia.com/gpu: 1

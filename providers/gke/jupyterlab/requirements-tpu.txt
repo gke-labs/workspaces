@@ -1,0 +1,38 @@
+# Kubeflow packages (TPU)
+#
+# Versions are pinned to the ones currently deployed and working, so a rebuild
+# reproduces that stack rather than whatever pip resolves on the day it runs.
+#
+# Only packages this layer actually adds are pinned. This layer shares a single
+# site-packages with the base image, so a pin here is not just a floor -- it is also
+# a ceiling that pip will happily downgrade a base-supplied package to reach. Control
+# base-supplied packages by pinning the base image in Dockerfile.fast.tpu; this file
+# cannot do it safely.
+#
+# Note that jax is held a minor version behind the CPU variant (0.10.2 vs 0.11.1).
+# That is what the deployed, working TPU image runs, and it is paired with
+# libtpu 0.0.42.1. Do not raise it to match the CPU file without rebuilding and
+# running a real TPU workload against the result -- the TPU plugin and libtpu are
+# version-locked to jax in a way the CPU build is not.
+#
+# Pins cover direct dependencies only; transitive dependencies still float.
+
+# Added by this layer (absent from the base image).
+jax[tpu]==0.10.2
+
+# Already present in the base at these exact versions; declared so the dependency is
+# explicit, and so the kubeflow[spark] extra pulls in its Spark dependencies. Keep in
+# step with the base when bumping it -- a stale pin here silently downgrades it.
+kfp==2.16.1
+kubeflow[spark]==0.4.0
+
+# Base-supplied. Intentionally unpinned -- read the note above before adding a version.
+#
+# google-cloud-storage in particular: the deployed TPU image carries 2.19.0 while the
+# base now ships 3.11.0. That gap is not a TPU constraint -- jax[tpu]==0.10.2 was
+# verified not to touch google-cloud-storage at all -- it is just an older base. So
+# there is nothing to preserve here, and pinning 2.19.0 would force a real downgrade.
+google-cloud-storage
+matplotlib
+numpy
+pandas
