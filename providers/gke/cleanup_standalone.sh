@@ -65,7 +65,7 @@ if [[ -d "${DIST_DIR}" ]]; then
 fi
 
 # 3. Remove WorkspaceKinds and ComputeClasses
-kubectl --context="${CONTEXT}" delete workspacekind jupyterlab gke-jupyterlab jupyterlab-resumable --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete workspacekind jupyterlab gke-jupyterlab jupyterlab-resumable codeserver --ignore-not-found || true
 if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then
   kubectl --context="${CONTEXT}" delete -f "${SCRIPT_DIR}/manifests/compute-classes/" --ignore-not-found || true
 fi

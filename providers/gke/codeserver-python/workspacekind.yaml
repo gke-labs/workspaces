@@ -15,12 +15,12 @@
 # Template rendered with envsubst. Required variables:
 #
 #   REGION, PROJECT_ID, REPO_NAME, IMAGE_NAME   registry coordinates
-#   CPU_IMAGE_TAG, GPU_IMAGE_TAG                exact image tag per variant
+#   CPU_IMAGE_TAG, GPU_IMAGE_TAG, TPU_IMAGE_TAG exact image tag per variant
 #   GCS_BUCKET                                  shared bucket for notebooks
 #
 # The image tags are pinned rather than floating on :latest-* so a Workspace restarts
 # onto the image it was created with, and so a rebuild cannot change the runtime under
-# a running Workspace. build_jupyterlab.sh and deploy_standalone.sh set them for you.
+# a running Workspace. build_codeserver_python.sh and deploy_standalone.sh set them for you.
 #
 # Because the tags are now immutable, imagePullPolicy is IfNotPresent rather than
 # Always. Always only earned its keep while these pointed at :latest-*, where the
@@ -30,30 +30,26 @@
 # put Always back for that entry.
 #
 # Beware when rendering by hand: envsubst substitutes an unset variable with the empty
-# string, which yields `image: ".../jupyterlab:"` and a WorkspaceKind that cannot start
+# string, which yields `image: ".../codeserver-python:"` and a WorkspaceKind that cannot start
 # a Pod. Prefer the scripts, which print the tags they pin.
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
-  name: jupyterlab-resumable
-  annotations:
-    # enable pod snapshot and resume for all workspaces (all CPU and GPU podconfigs are resumable)
-    podsnapshot.gke.kubeflow.org/enabled: "true"
-    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+  name: codeserver
 spec:
   spawner:
-    displayName: "JupyterLab Notebook (Resumable)"
-    description: "A Workspace which runs JupyterLab in a Pod with stateful pause and resume support"
+    displayName: "VS Code (code-server)"
+    description: "A Workspace which runs VS Code (code-server) in a Pod"
     icon:
-      url: "https://jupyter.org/assets/favicons/apple-touch-icon-152x152.png"
+      url: "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg"
     logo:
-      url: "https://upload.wikimedia.org/wikipedia/commons/3/38/Jupyter_logo.svg"
+      url: "https://upload.wikimedia.org/wikipedia/commons/9/9a/Visual_Studio_Code_1.35_icon.svg"
 
   filterRules:
     # --------------------------------------------------------------------------
     # IMAGE_CONFIG scope: Filter images based on selected PodConfig accelerator
     # --------------------------------------------------------------------------
-    # When a CPU pod is selected, hide GPU images
+    # When a CPU pod is selected, hide GPU and TPU images
     - scope: IMAGE_CONFIG
       effect:
         ui:
@@ -61,7 +57,7 @@ spec:
         api:
           deny: true
           denyMessage:
-            text: "This image requires an accelerator (GPU) pod, but a CPU pod was selected."
+            text: "This image requires an accelerator (GPU or TPU) pod, but a CPU pod was selected."
       match:
         - matchPodConfig:
             selector:
@@ -95,10 +91,31 @@ spec:
                   operator: NotIn
                   values: ["gpu"]
 
+    # When a TPU pod is selected, hide non-TPU images
+    - scope: IMAGE_CONFIG
+      effect:
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "This image is not built for TPUs (missing libtpu); please select a TPU-enabled image."
+      match:
+        - matchPodConfig:
+            selector:
+              matchLabels:
+                accelerator: tpu
+        - matchImageConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["tpu"]
+
     # --------------------------------------------------------------------------
     # POD_CONFIG scope: Filter podConfigs based on selected ImageConfig accelerator
     # --------------------------------------------------------------------------
-    # When a CPU image is selected, hide GPU pod configs
+    # When a CPU image is selected, hide GPU and TPU pod configs
     - scope: POD_CONFIG
       effect:
         ui:
@@ -106,7 +123,7 @@ spec:
         api:
           deny: true
           denyMessage:
-            text: "A CPU image cannot be scheduled on an accelerator (GPU) pod."
+            text: "A CPU image cannot be scheduled on an accelerator (GPU or TPU) pod."
       match:
         - matchImageConfig:
             selector:
@@ -140,12 +157,26 @@ spec:
                   operator: NotIn
                   values: ["gpu"]
 
-  activityRules:
-    - config:
-        secondsSinceActive: 86400
-      match: {}
+    # When a TPU image is selected, hide non-TPU pod configs
+    - scope: POD_CONFIG
       effect:
-        pauseWorkspace: true
+        ui:
+          hide: true
+        api:
+          deny: true
+          denyMessage:
+            text: "A TPU image requires a TPU pod."
+      match:
+        - matchImageConfig:
+            selector:
+              matchLabels:
+                accelerator: tpu
+        - matchPodConfig:
+            selector:
+              matchExpressions:
+                - key: accelerator
+                  operator: NotIn
+                  values: ["tpu"]
 
   podTemplate:
     podMetadata:
@@ -154,39 +185,21 @@ spec:
     serviceAccount:
       clusterRoles:
         - name: "kubeflow-edit"
-    activityProbe:
-      minProbeIntervalSeconds: 100
-      probeIntervalSeconds: 300
-      jupyter:
-        lastActivity: true
-        portId: "jupyterlab"
-    probes:
-      startupProbe:
-        tcpSocket:
-          port: 8888
-        periodSeconds: 5
-        failureThreshold: 60
-      readinessProbe:
-        tcpSocket:
-          port: 8888
-        periodSeconds: 5
     volumeMounts:
       home: "/home/jovyan"
     ports:
-      - id: "jupyterlab"
-        defaultDisplayName: "JupyterLab"
+      - id: "codeserver"
+        defaultDisplayName: "VS Code (code-server)"
         protocol: "HTTP"
         httpProxy:
-          removePathPrefix: false
+          removePathPrefix: true
           requestHeaders: {}
     extraEnv:
-      - name: "NB_PREFIX"
-        value: |-
-          {{ httpPathPrefix "jupyterlab" }}
       - name: "LD_LIBRARY_PATH"
         value: "/usr/local/nvidia/lib64"
       - name: "PATH"
         value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
       - name: "REGISTRY"
         value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
       - name: "GCS_BUCKET"
@@ -213,80 +226,72 @@ spec:
     options:
       imageConfig:
         spawner:
-          default: "jupyterlab-cpu"
+          default: "codeserver-python-cpu"
         values:
-          - id: "jupyterlab-cpu"
+          - id: "codeserver-python-cpu"
             spawner:
-              displayName: "jupyterlab (CPU)"
-              description: "JupyterLab with SciPy, JAX (CPU), and Kubeflow Spark SDK"
+              displayName: "codeserver-python (CPU)"
+              description: "code-server with Conda Python"
               labels:
                 - key: "python_version"
-                  value: "3.12.9"
+                  value: "3.12"
                 - key: "accelerator"
                   value: "cpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${CPU_IMAGE_TAG}"
               imagePullPolicy: "IfNotPresent"
               ports:
-                - id: "jupyterlab"
+                - id: "codeserver"
                   port: 8888
-          - id: "jupyterlab-gpu"
+          - id: "codeserver-python-gpu"
             spawner:
-              displayName: "jupyterlab (GPU)"
-              description: "JupyterLab with PyTorch (CUDA 13.0), JAX (CUDA), Transformers, and Kubeflow Spark SDK"
+              displayName: "codeserver-python (GPU)"
+              description: "code-server with Conda Python, CUDA, PyTorch, and GPU JAX"
               labels:
                 - key: "python_version"
-                  value: "3.12.13"
-                - key: "pytorch_version"
-                  value: "2.12.0"
-                - key: "cuda_version"
-                  value: "13.0"
-                - key: "nccl_version"
-                  value: "2.29.7"
+                  value: "3.12"
                 - key: "accelerator"
                   value: "gpu"
             spec:
               image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${GPU_IMAGE_TAG}"
               imagePullPolicy: "IfNotPresent"
               ports:
-                - id: "jupyterlab"
+                - id: "codeserver"
                   port: 8888
-          - id: "jupyter-scipy:v1.10.0"
+          - id: "codeserver-python-tpu"
             spawner:
-              displayName: "jupyter-scipy:v1.10.0 (Upstream)"
-              description: "Upstream JupyterLab with SciPy Packages"
+              displayName: "codeserver-python (TPU)"
+              description: "code-server with Conda Python, and TPU JAX (libtpu)"
               labels:
                 - key: "python_version"
-                  value: "3.12.9"
+                  value: "3.12"
+                - key: "accelerator"
+                  value: "tpu"
+            spec:
+              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${TPU_IMAGE_TAG}"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "codeserver"
+                  port: 8888
+          - id: "codeserver-python:v1.11.0"
+            spawner:
+              displayName: "codeserver-python:v1.11.0 (Upstream)"
+              description: "Upstream Kubeflow code-server with Conda Python"
+              labels:
+                - key: "python_version"
+                  value: "3.12"
                 - key: "accelerator"
                   value: "cpu"
             spec:
-              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
+              image: "ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0"
               imagePullPolicy: "IfNotPresent"
               ports:
-                - id: "jupyterlab"
+                - id: "codeserver"
                   port: 8888
       podConfig:
         spawner:
           default: "small_cpu"
         values:
-          - id: "tiny_cpu"
-            spawner:
-              displayName: "Tiny CPU"
-              description: "Pod with 0.1 CPU, 128 Mb RAM"
-              labels:
-                - key: "accelerator"
-                  value: "cpu"
-                - key: "cpu"
-                  value: "100m"
-                - key: "memory"
-                  value: "128Mi"
-            spec:
-              affinity: {}
-              resources:
-                requests:
-                  cpu: 100m
-                  memory: 128Mi
           - id: "medium_cpu"
             spawner:
               displayName: "Medium CPU"
@@ -303,28 +308,22 @@ spec:
                 requests:
                   cpu: 2
                   memory: 4Gi
-                limits:
-                  cpu: 2
-                  memory: 4Gi
           - id: "small_cpu"
             spawner:
               displayName: "Small CPU"
-              description: "Pod with 1 CPU, 4 GB RAM"
+              description: "Pod with 1 CPU, 2 GB RAM"
               labels:
                 - key: "accelerator"
                   value: "cpu"
                 - key: "cpu"
                   value: "1000m"
                 - key: "memory"
-                  value: "4Gi"
+                  value: "2Gi"
             spec:
               resources:
                 requests:
                   cpu: 1000m
                   memory: 2Gi
-                limits:
-                  cpu: 2000m
-                  memory: 4Gi
           - id: "gpu_t4_spot"
             spawner:
               displayName: "GPU T4 Spot"
@@ -352,3 +351,19 @@ spec:
                   cpu: 12
                   memory: 40Gi
                   nvidia.com/gpu: 1
+          - id: "tpu"
+            spawner:
+              displayName: "TPU v5 2x2"
+              description: "Pod with 4 TPU v5 lite chips"
+              labels:
+                - key: "accelerator"
+                  value: "tpu"
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "tpu-v5-4-single-host"
+              resources:
+                requests:
+                  cpu: 12
+                  memory: 24Gi
+                limits:
+                  google.com/tpu: 4

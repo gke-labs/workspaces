@@ -26,10 +26,17 @@ ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
 USER $NB_UID
 
+ENV PATH="${HOME}/.local/bin:${PATH}"
+
+# Configure Conda to persist environments and package caches on the persistent home volume (~/.conda)
+RUN conda config --system --prepend envs_dirs '~/.conda/envs' \
+ && conda config --system --prepend pkgs_dirs '~/.conda/pkgs'
+
 # Install additional Python requirements for GPU (including jax[cuda12], kubeflow[spark], google-cloud-storage)
 COPY --chown=${NB_USER}:${NB_GID} requirements-gpu.txt /tmp/requirements.txt
 RUN PIP_NO_CACHE_DIR=off python3 -m pip install -r /tmp/requirements.txt --quiet --no-cache-dir \
- && rm -f /tmp/requirements.txt
+ && rm -f /tmp/requirements.txt \
+ && pip config --site set install.user true
 
 # Pre-populate home with custom README and examples, and sync to $HOME_TMP for s6 01-copy-tmp-home
 COPY --chown=${NB_USER}:${NB_GID} home/. ${HOME}/

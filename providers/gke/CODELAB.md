@@ -269,3 +269,92 @@ A public token-based kernel test assigned `lifetime_value = 42`, disconnected, a
 
 - Repository branch `gke`, HEAD `24ce51e5b19adcef194aa989e9df6bbee3b3c1f9`.
 - Latest deployed image and complete plan are the configurable-lifetime versions recorded above: `rendered/desktop-lifetimes-v1`, image digest `sha256:2470150446b3e87644d851fe1b2817db5db1f56a5d1738a13632ddbc8d0c5e32`.
+
+## 2026-09-18 Deep-Dive: JupyterLab vs. VS Code Pause/Resume & gVisor CRIU Limitations
+
+### 1. Investigation Context & Observed Issue
+When evaluating pause and resume on a VS Code workspace (`ws-vscode-cpu` using `codeserver-python`), restarting the workspace after pausing left the container wedged and unresponsive:
+- Browser requests to port 8888 hung indefinitely.
+- The pod CPU utilization spiked to 100% on one core.
+- In-memory variables in running interactive notebooks were not retained.
+
+### 2. Root Cause Analysis: gVisor CRIU Pseudoterminal (`/dev/pts/*`) Desynchronization
+1. **gVisor CRIU Limitation**:
+   - Checkpoint/Restore In Userspace (CRIU) running under the gVisor sandbox (`--sandbox type=gvisor`, `runtimeClassName: gvisor`) does not support serializing or deserializing open pseudoterminals across save and restore ([gvisor.dev/issue/1663](https://github.com/google/gvisor/issues/1663), `b/532629571`).
+2. **VS Code (code-server) Epoll Busy-Spin**:
+   - VS Code maintains active background terminal host processes (`node-pty`, `ptyHost`, `shellIntegration-bash`).
+   - Upon gVisor memory restore, the invalid/broken PTY file descriptors cause the Node.js `libuv` epoll event loop to desynchronize.
+   - `epoll_wait` continuously returns with error flags without blocking, consuming 100% CPU in an infinite busy-spin loop and starving the HTTP/WebSocket request handlers on port 8888.
+3. **Why JupyterLab Succeeds Where VS Code Fails**:
+   - JupyterLab uses Unix domain socket IPC transport (`c.KernelManager.transport = 'ipc'`) and `asyncio` `selectors.PollSelector()` via `/etc/jupyter/jupyter_server_config.py` (mounted by `ConfigMap/jupyter-ipc-config`).
+   - JupyterLab does not rely on open pseudoterminal descriptors for kernel execution, so its Python kernels and in-memory variables survive CRIU restore cleanly.
+
+### 3. Process Recycling vs. In-Memory Notebook State
+- While an external supervisor or watchdog can detect restore wall-clock discontinuities and recycle the `code-server` process to unwedge the epoll loop, recycling `code-server` terminates child processes—including the Python extension host and all child interactive notebook kernels.
+- Consequently, in-memory notebook variables cannot be preserved in VS Code across process restarts.
+
+### 4. Architectural Decision & Scoping
+- **Memory-Recoverable Pause/Resume**: Only supported for **JupyterLab notebook workspaces (`jupyterlab`) on CPU/GPU hardware**, where the runtime stack natively supports gVisor CRIU checkpointing without process recycling.
+- **Stateless Pause/Resume for VS Code (`codeserver`)**:
+  - VS Code workspaces do not use GKE Pod Snapshots.
+  - Pausing a VS Code workspace cleanly scales down the Pod to 0, immediately freeing GKE compute nodes.
+  - Resuming starts a fresh container where `/dev/pts` and `libuv` epoll initialize cleanly without any desynchronization or busy-loop issues.
+  - No background watchdog or supervisor daemon is required in the container.
+
+### 5. Durable Package & Environment Persistence on PVC
+To allow developers to install custom Python packages and maintain multiple isolated Conda environments that survive pod restarts without needing memory snapshots:
+
+#### A. System Conda Configuration
+Configured `/opt/conda/.condarc` system-wide during Docker build:
+```yaml
+envs_dirs:
+  - ~/.conda/envs
+  - /opt/conda/envs
+pkgs_dirs:
+  - ~/.conda/pkgs
+  - /opt/conda/pkgs
+```
+- Running `conda create -n <env_name> python=3.X` automatically creates the environment in `/home/jovyan/.conda/envs/<env_name>` on the persistent home volume (PVC `vpc-*`).
+- Running `pip install` inside that environment writes packages to `/home/jovyan/.conda/envs/<env_name>/lib/python3.X/site-packages/`.
+- Packages across different environments remain strictly isolated.
+
+#### B. The Base Environment Challenge: Cross-Device Links (`EXDEV`) & PVC Quota
+A developer working in a container typically wants to use the pre-baked base image packages (e.g. PyTorch, CUDA, JAX, SciPy, pandas, ipykernel) and simply add a few missing dependencies (`pip install extra-pkg`).
+
+However, two architectural constraints make Conda environment cloning or installing directly into base challenging:
+1. **Indivisible Conda Prefixes**: A Conda environment prefix is a single, indivisible directory tree (`/opt/conda/`). Conda cannot split an environment across multiple paths or write new packages for `base` into `/home/jovyan`.
+2. **Cross-Device Hard Link Failure (`EXDEV`)**: `/opt/conda` resides on the container root filesystem (an ephemeral overlayfs), while `/home/jovyan` resides on a mounted block volume (`/dev/sdb`, `ext4`). Conda manages packages by hard-linking from its cache (`pkgs_dirs`) to the target environment (`envs_dirs`). Linux does not allow hard links across distinct filesystem devices (`EXDEV: Invalid cross-device link`).
+3. **Storage Exhaustion from Cloning**: Attempting `conda create --clone base /home/jovyan/.conda/envs/my_base` forces Conda to fall back to a full file copy of all 4–6 GB of base packages across devices. On a standard 2 GiB to 10 GiB user PVC, this immediately exhausts the PVC quota.
+
+#### C. The Solution: Python Site-Level User Scheme Configuration (`/opt/conda/pip.conf`)
+Python provides native support for layered package directories via `sys.path` using `USER_SITE` (`~/.local/lib/python3.X/site-packages`).
+
+To deliver a seamless developer experience with zero disk duplication:
+1. **Site-Level Pip Configuration**:
+   During Docker build, the base environment is configured with:
+   ```bash
+   pip config --site set install.user true
+   ```
+   This generates `/opt/conda/pip.conf`:
+   ```ini
+   [install]
+   user = true
+   ```
+2. **Zero Baseline Storage Overhead**:
+   When a user runs plain `pip install <package>` in the `base` environment:
+   - `pip` automatically directs the installation into `/home/jovyan/.local/lib/python3.12/site-packages` on the PVC.
+   - The user does **not** need to specify `--user`.
+   - The developer inherits 100% of the pre-baked base packages in `/opt/conda` with **0 MB baseline storage overhead**.
+   - Only the delta packages are written to the persistent volume.
+3. **Environment Isolation Protection**:
+   Because `install.user = true` is set at the **site** level (`/opt/conda/pip.conf`) rather than globally (`~/.config/pip/pip.conf`):
+   - It only applies when invoking `/opt/conda/bin/pip`.
+   - Sub-environments (virtualenvs created with `python3 -m venv` or custom Conda environments created with `conda create`) ignore `/opt/conda/pip.conf` and use their own isolated site-packages without failing with `ERROR: Can not perform a '--user' install`.
+4. **Lightweight Project Environments via Virtualenv**:
+   Developers needing strict per-project dependency isolation without duplicating base packages can create lightweight virtual environments:
+   ```bash
+   python3 -m venv --system-site-packages /home/jovyan/envs/project_a
+   ```
+   This consumes only ~15 MB on the PVC while retaining full access to container-level PyTorch/CUDA/JAX packages.
+
+

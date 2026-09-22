@@ -28,8 +28,8 @@ spec:
         operations: [CREATE, UPDATE]
         resources: [workspaces]
   validations:
-    - expression: object.spec.kind in ['gke-jupyterlab', 'jupyterlab', 'jupyterlab-resumable']
-      message: The pilot permits only the reviewed gke-jupyterlab, jupyterlab, or jupyterlab-resumable WorkspaceKind.
+    - expression: object.spec.kind in ['gke-jupyterlab', 'jupyterlab', 'jupyterlab-resumable', 'codeserver']
+      message: The pilot permits only the reviewed gke-jupyterlab, jupyterlab, jupyterlab-resumable, or codeserver WorkspaceKind.
     - expression: "!has(object.spec.podTemplate.volumes.secrets) || size(object.spec.podTemplate.volumes.secrets) == 0"
       message: Secret mounts are disabled for the pilot.
     - expression: "!has(object.spec.podTemplate.podMetadata) || ((!has(object.spec.podTemplate.podMetadata.labels) || size(object.spec.podTemplate.podMetadata.labels) == 0) && (!has(object.spec.podTemplate.podMetadata.annotations) || size(object.spec.podTemplate.podMetadata.annotations) == 0))"

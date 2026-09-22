@@ -1,0 +1,51 @@
+# Fast Layer Dockerfile for Custom Kubeflow Code-Server Python Image with Gemini Code Assist
+# Extends upstream ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0
+#
+
+ARG BASE_IMG=ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0
+FROM $BASE_IMG
+
+ARG TARGETARCH=amd64
+
+# Extension version (from Open VSX)
+ARG GEMINICODEASSIST_VERSION=2.100.0
+
+# Install Node.js & Gemini CLI
+USER root
+ARG NODE_VERSION=22.14.0
+RUN case "${TARGETARCH}" in \
+      amd64) NODE_ARCH="x64" ;; \
+      arm64) NODE_ARCH="arm64" ;; \
+      *) echo "Unsupported architecture: ${TARGETARCH}"; exit 1 ;; \
+    esac \
+ && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" | tar -xJ -C /usr/local --strip-components=1 \
+ && npm install -g @google/gemini-cli@nightly \
+ && gemini --version
+
+USER $NB_UID
+
+ENV PATH="${HOME}/.local/bin:${PATH}"
+
+# Configure Conda to persist environments and package caches on the persistent home volume (~/.conda)
+RUN conda config --system --prepend envs_dirs '~/.conda/envs' \
+ && conda config --system --prepend pkgs_dirs '~/.conda/pkgs'
+
+# Install additional Python requirements
+COPY --chown=${NB_USER}:${NB_GID} requirements.txt /tmp/requirements.txt
+RUN PIP_NO_CACHE_DIR=off python3 -m pip install -r /tmp/requirements.txt --quiet --no-cache-dir \
+ && rm -f /tmp/requirements.txt \
+ && pip config --site set install.user true
+
+
+# Install additional VS Code extension (Gemini Code Assist)
+# NOTE: XDG_DATA_HOME in Kubeflow codeserver is set to /tmp/data-${NB_USER} (non-PVC)
+RUN code-server --install-extension "Google.geminicodeassist@${GEMINICODEASSIST_VERSION}" --force \
+ && code-server --list-extensions --show-versions
+
+# Pre-populate home with custom README and examples, and sync to $HOME_TMP for s6 01-copy-tmp-home
+COPY --chown=${NB_USER}:${NB_GID} home/. ${HOME}/
+COPY --chown=${NB_USER}:${NB_GID} examples/. ${HOME}/
+RUN cp -p -r -T "${HOME}" "${HOME_TMP}" \
+ && chmod -R g=u "${HOME_TMP}"
+
+

@@ -1,0 +1,8 @@
+# Kubeflow packages (TPU)
+google-cloud-storage
+jax[tpu]
+kfp==2.16.1
+kubeflow[spark]==0.4.0
+matplotlib
+numpy
+pandas

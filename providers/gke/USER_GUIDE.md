@@ -31,6 +31,7 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 To streamline the entire installation, use the scripts in this directory:
 - **[`deploy_standalone.sh`](deploy_standalone.sh)**: Automates API enablement, Gateway controller setup, `cert-manager` installation, core image builds, Certificate Manager setup (with automatic `sslip.io` fallback if you don't have a domain), IAP audience discovery, Kubeflow Trainer + Spark Operator installation, tenant RBAC, and GCS Workload Identity IAM bindings.
 - **[`build_jupyterlab.sh`](build_jupyterlab.sh)**: Builds and pushes custom JupyterLab (CPU, GPU, TPU) and Spark 4.0.1 images (bundled with `examples/distributed_tpu_example.ipynb`) and registers the `jupyterlab` `WorkspaceKind` and GPU/TPU `ComputeClasses`.
+- **[`deploy_agent_sandbox.sh`](deploy_agent_sandbox.sh)**: Deploys the Kubernetes Agent Sandbox operator, aggregated RBAC, Vertex AI / Gemini Workload Identity, tenant `SandboxWarmPool`, and in-cluster MCP server for autonomous AI coding agents in VS Code.
 - **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Cleanly tears down deployed resources.
 
 ---
@@ -822,6 +823,53 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
      - Kubelet restores the container memory and live Jupyter kernels from GCS (`Normal GKEPodSnapshotting: Successfully restored the pod from PodSnapshot ...`).
      - Once restored, `gke-workspace-snapshot-addon` sets `podsnapshot.gke.kubeflow.org/active = True` (`READINESS GATES: 1/1`), transitions the Workspace back to **Running**, clears the checkpoint annotations, and deletes the consumed `PodSnapshot` and `PodSnapshotManualTrigger` resources.
 
+### Step 7.5: Hardware & Workspace Support for Pause & Resume
+
+> [!IMPORTANT]
+> **Memory-Recoverable Pause & Resume**:
+> - **Supported**: Memory-recoverable pause and resume (preserving in-memory variables and execution state via GKE Pod Snapshots) is **only supported for JupyterLab notebook workspaces (`jupyterlab`) on CPU/GPU hardware**.
+> - **VS Code & Other Workspaces (Stateless Pause & Resume)**: For VS Code (`codeserver`) or other workspace kinds, pause and resume is stateless: pausing scales down the Pod to release compute resources, and resuming starts a fresh Pod. All files and custom Conda environments located on the persistent home volume (`/home/jovyan`) are preserved, but in-memory process execution state and live notebook variables are not saved across restarts.
+> - For in-depth technical analysis, gVisor CRIU constraints, and pilot records, see [CODELAB.md](CODELAB.md).
+
+### Step 7.6: Package Management & Persistence Across Restarts
+
+When a workspace Pod restarts, is rescheduled, or resumes from a stateless pause, the ephemeral container root filesystem (`/`) is recreated, while the user home volume (`/home/jovyan` mounted via PVC) is preserved.
+
+To ensure your Python packages survive restarts and do not consume unnecessary PVC disk quota, the workspace images provide two recommended workflows:
+
+#### 1. Quick Installs in the Base Environment (Zero Baseline Overhead)
+The pre-installed base environment (`/opt/conda`) includes full ML stacks (PyTorch, CUDA, JAX, SciPy, pandas, ipykernel).
+- Running `pip install <package>` in the base environment automatically installs the package into `/home/jovyan/.local/lib/python3.12/site-packages` on your persistent home volume (pre-configured via `/opt/conda/pip.conf`).
+- You do **not** need to pass `--user` manually.
+- Packages installed this way persist across restarts, seamlessly layer on top of the pre-baked base packages, and require **0 MB baseline overhead** (only newly added packages occupy PVC disk space).
+- Executables are placed into `/home/jovyan/.local/bin`, which is pre-configured in `PATH`.
+
+#### 2. Isolated Project Environments Inheriting Base Packages
+If a project needs isolated dependencies without reinstalling or duplicating multi-gigabyte PyTorch/CUDA base packages:
+```bash
+# Create a lightweight virtualenv (~15 MB) that inherits all base packages read-only
+python3 -m venv --system-site-packages /home/jovyan/envs/my_project
+
+# Activate the environment
+source /home/jovyan/envs/my_project/bin/activate
+
+# Install project-specific packages into /home/jovyan/envs/my_project
+pip install <package>
+
+# Optional: Register as a Jupyter kernel for notebooks
+python -m ipykernel install --user --name=my_project --display-name="Python (my_project)"
+```
+
+#### 3. Fully Isolated Conda Environments
+For completely separate Python versions or standalone native Conda packages:
+```bash
+# Note: Always use `conda create` (not `conda install`) to initialize a new environment
+conda create -n my_conda_env python=3.11 -y
+conda activate my_conda_env
+pip install <package>
+```
+All Conda environments are automatically created under `/home/jovyan/.conda/envs` and persist across Pod restarts.
+
 ---
 
 ## 8. VS Code Jupyter Extension (Desktop Endpoint)
@@ -871,7 +919,218 @@ root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TL
 
 ---
 
-## 9. Enrolling Additional Users
+## 9. Integrating Kubernetes Agent Sandbox with Gemini (VS Code & Gemini CLI)
+
+This section demonstrates how to combine the standalone Kubeflow VS Code development environment on GKE with the **Kubernetes Agent Sandbox (`agent-sandbox`)** operator as the execution backbone.
+
+When developers interact with AI agents in their VS Code code-server environment—such as **Gemini Code Assist** in Agent Mode or **Gemini CLI (`gemini`)** in the integrated terminal—the agents can dynamically provision, execute untrusted or resource-heavy workloads inside, and tear down disposable Kubernetes sandboxes. This guarantees that untrusted scripts, test executions, and package installations are isolated from both the developer's primary workspace pod and the cluster control plane.
+
+```mermaid
+flowchart TD
+    subgraph K8s["GKE Cluster: kubeflow-notebooks"]
+        subgraph Tenant["Tenant Namespace: ${TENANT_NAMESPACE}"]
+            CS["Any Workspace Pod<br/>(VS Code, JupyterLab)"]
+            CLI["Gemini CLI (gemini)<br/>v0.60.0+"]
+            EXT["Gemini Code Assist<br/>Agent Mode"]
+            MCP_SVC["Agent Sandbox MCP Server<br/>(SA: agent-sandbox-mcp-server)"]
+            CLAIM["SandboxClaim<br/>(sandbox-claim-*)"]
+            WARM["SandboxWarmPool<br/>(python-warmpool)"]
+            SBX["Isolated Sandbox Pod<br/>(python-runtime-sandbox :8888)"]
+        end
+
+        subgraph Sys["System Namespace: agent-sandbox-system"]
+            CTRL["Agent Sandbox Controller<br/>(agents.x-k8s.io reconcilers)"]
+        end
+
+        CS --> CLI
+        CS --> EXT
+        CLI -- "MCP JSON-RPC (HTTP)" --> MCP_SVC
+        EXT -- "MCP JSON-RPC (HTTP)" --> MCP_SVC
+        MCP_SVC -- "K8s API" --> CLAIM
+        CTRL -- "Reconciles" --> CLAIM
+        CTRL -- "Reconciles" --> WARM
+        WARM -- "Pre-provisions" --> SBX
+        CLAIM -- "Adopts / Binds" --> SBX
+        MCP_SVC -- "In-Cluster HTTP (:8888)" --> SBX
+    end
+```
+
+### Architecture Highlights
+- **Model Context Protocol (MCP)**: The agent communicates with `agent-sandbox-mcp-server` over in-cluster streamable HTTP (`http://agent-sandbox-mcp-server.${TENANT_NAMESPACE}.svc.cluster.local:8000/mcp`).
+- **Dedicated MCP Server ServiceAccount**: The MCP server runs with its own dedicated ServiceAccount (`agent-sandbox-mcp-server`) bound directly to `agent-sandbox-kubeflow-edit`, completely decoupled from any developer workspace.
+- **Universal RBAC via `WorkspaceKind`**: Instead of hardcoding permissions to a single workspace, `agent-sandbox-kubeflow-edit` is attached under `spec.podTemplate.serviceAccount.clusterRoles` across `WorkspaceKind` definitions (`codeserver`, `jupyterlab`). The Kubeflow `workspaces-controller` dynamically provisions and maintains namespaced `RoleBinding`s (`ws-<name>-<hash>`) for every workspace created in the cluster.
+- **Aggregated Kubernetes RBAC**: The `agent-sandbox-kubeflow-edit` ClusterRole carries the label `rbac.authorization.kubeflow.org/aggregate-to-kubeflow-edit: "true"`, automatically aggregating sandbox and pod management permissions into `kubeflow-edit`.
+- **Namespace-Wide Workload Identity Federation**: Google Cloud Workload Identity binds `roles/iam.workloadIdentityUser` to the entire tenant namespace via `principalSet://.../namespace/${TENANT_NAMESPACE}`, enabling any workspace in the tenant namespace to authenticate with Vertex AI Gemini models.
+- **Sub-Second Sandbox Provisioning**: `SandboxWarmPool` maintains standby pre-warmed pods (`python-warmpool`), allowing an agent to claim and begin executing inside a sandbox in under 300ms.
+- **Dataplane V2 & In-Cluster Routing**: The tenant network policy `gke-tenant-workloads-ingress` permits pod-to-pod communication between any workspace, the MCP server, and sandbox pods while denying unauthorized ingress from outside the namespace.
+
+---
+
+### Step 9.1: Automated Deployment (`deploy_agent_sandbox.sh`)
+
+A dedicated script [`gke/deploy_agent_sandbox.sh`](deploy_agent_sandbox.sh) automates the installation and configuration of all components:
+
+```bash
+# Export standard environment variables (matching deploy_standalone.sh)
+export PROJECT="your-gcp-project-id"
+export CLUSTER="kubeflow-notebooks"
+export LOCATION="us-west1"
+export REGION="us-west1"
+export TENANT_NAMESPACE="kubeflow-user"
+export REPOSITORY="kubeflow-repo"
+
+# Deploy Agent Sandbox operator, RBAC, MCP server, and warm pool
+./gke/deploy_agent_sandbox.sh
+```
+
+**What the script configures automatically**:
+1. **Official Release Manifests**: Deploys the official `sandbox-with-extensions.yaml` release artifact from `https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.3/sandbox-with-extensions.yaml` (controller image `registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.3`).
+2. **Official Sandbox Release Image**: Configures `SandboxTemplate` to directly use the official upstream release image **`registry.k8s.io/agent-sandbox/python-runtime-sandbox:v1.0.3`**—no manual container builds required for the sandbox execution layer.
+3. **Workspace-Agnostic RBAC via `WorkspaceKind`**: Applies `gke/manifests/agent-sandbox/clusterrole.yaml` and updates `WorkspaceKind` manifests so `agent-sandbox-kubeflow-edit` is automatically bound to every current and future workspace ServiceAccount by the Kubeflow controller.
+4. **Dedicated MCP Server Identity**: Provisions `ServiceAccount/agent-sandbox-mcp-server` and binds it to `agent-sandbox-kubeflow-edit` for isolated in-cluster MCP operations.
+5. **Namespace-Wide Workload Identity & Vertex AI**: Grants `roles/aiplatform.user` on the GCP project to `${TENANT_NAMESPACE}-sa@${PROJECT}.iam.gserviceaccount.com` and binds it to the entire `${TENANT_NAMESPACE}` namespace via IAM `principalSet` federation for seamless Vertex AI Gemini access.
+6. **Tenant Templates**: Deploys `SandboxTemplate` (`python-runtime-template`) and `SandboxWarmPool` (`python-warmpool`, 1 standby replica) in `${TENANT_NAMESPACE}`.
+7. **In-Cluster MCP Server**: Deploys `Deployment/agent-sandbox-mcp-server` and `Service/agent-sandbox-mcp-server` exposing port 8000.
+8. **Workspace Tooling**: Injects MCP server connection settings (`~/.gemini/settings.json`) and folder trust (`~/.gemini/trustedFolders.json`) into running VS Code workspace pods.
+
+---
+
+### Step 9.2: Using Gemini CLI Directly with the Sandbox
+
+All custom VS Code (`codeserver-python`) Docker images come pre-installed with Node.js and `@google/gemini-cli@nightly` (for native Gemini 3.8 support).
+
+#### How Gemini CLI Discovers and Uses the Sandbox
+1. **MCP Discovery (`~/.gemini/settings.json`)**: When `gemini` launches, it loads configured MCP servers and registers the 8 tools exposed by `agent-sandbox-mcp-server`. Run `gemini mcp list` to check connectivity:
+   ```text
+   Configured MCP servers:
+   ✓ agent-sandbox: http://agent-sandbox-mcp-server.kubeflow-user.svc.cluster.local:8000/mcp (http) - Connected
+   ```
+2. **Contextual Instructions (`~/.gemini/GEMINI.md`)**: `deploy_agent_sandbox.sh` provisions `~/.gemini/GEMINI.md` instructing Gemini to route code execution, testing, and benchmark tasks into isolated Kubernetes sandboxes via `mcp_agent-sandbox_*` tools using namespace `${TENANT_NAMESPACE}` and warmpool `python-warmpool`.
+3. **Authentication via `GEMINI_API_KEY`**: Authenticate Gemini CLI in the workspace terminal by providing your API key:
+   ```bash
+   export GEMINI_API_KEY="your-gemini-api-key"
+   ```
+   Add this to your `~/.bashrc` in the workspace to persist it across terminal sessions.
+
+#### 1. Gemini CLI in the Terminal (Autonomous Tool Execution)
+In the VS Code terminal (`/home/jovyan`), run natural language prompts with `--yolo` (auto-approval mode):
+
+```bash
+# Example 1: Compute using an isolated sandbox
+gemini -p 'Compute the first 5 prime numbers larger than 10000 by executing a python script in a sandbox. Output only the final list of primes.' --yolo -m gemini-3.8-flash
+```
+
+What Gemini CLI does autonomously under the hood:
+1. Calls `mcp_agent-sandbox_create_sandbox` with `warmpool="python-warmpool"` and `namespace="kubeflow-user"`.
+2. Adopts a pre-warmed pod (`python-warmpool-*`) in under 200ms.
+3. Calls `mcp_agent-sandbox_upload_file` to stage `primes.py` inside the sandbox pod.
+4. Calls `mcp_agent-sandbox_execute_command` to execute `python3 primes.py` and captures stdout:
+   ```text
+   [10007, 10009, 10037, 10039, 10061]
+   ```
+5. Calls `mcp_agent-sandbox_delete_sandbox` to tear down the sandbox pod and release resources.
+
+```bash
+# Example 2: Run an autonomous test suite inside an isolated sandbox
+gemini -p 'We want to test a python function in an isolated environment. In the kubeflow-user namespace: 1) create a sandbox from warmpool python-warmpool, 2) upload a python script fib_test.py that defines fib(n) and asserts fib(10) == 55 and prints "FIBONACCI TEST PASSED", 3) execute python3 fib_test.py in the sandbox, 4) clean up and delete the sandbox, 5) tell me the execution result.' --yolo -m gemini-3.8-flash
+```
+
+Output:
+```text
+The python script `fib_test.py` was executed successfully in the sandbox. The script output was:
+```
+FIBONACCI TEST PASSED
+```
+The sandbox has been cleaned up and deleted.
+```
+
+#### 2. Gemini Code Assist Extension (Agent Mode)
+1. Open the **Gemini Code Assist** panel from the VS Code activity bar.
+2. Toggle the mode selector to **Agent Mode**.
+3. Prompt Gemini:
+   > *"Run the test suite in an isolated Kubernetes sandbox and summarize any failures."*
+   Gemini will automatically invoke the `agent-sandbox` MCP tools to create the sandbox, sync code files, execute tests, capture stdout/stderr, and tear down the sandbox.
+
+---
+
+### Step 9.3: Multi-Sandbox Distributed Walkthrough (20 Parallel Agents)
+
+To see a distributed, high-scale scenario where a main coordinator orchestrates **20 parallel autonomous agents**, each commanding its own dedicated Kubernetes Agent Sandbox pod concurrently, run the bundled walkthrough:
+
+```bash
+# Run the automated 20-agent coordinator script inside the workspace pod:
+python3 gke/examples/multi_agent_sandbox_walkthrough.py
+```
+*(You can also open [`gke/examples/multi_agent_sandbox_walkthrough.ipynb`](examples/multi_agent_sandbox_walkthrough.ipynb) in JupyterLab or VS Code to step through cell-by-cell).*
+
+#### Walkthrough Scenario: Enterprise Global Portfolio Risk & Stress-Testing
+The walkthrough models a **$1,000,000,000 Enterprise Multi-Asset Portfolio** divided across **20 distinct market sectors** (AI & Cloud, Semiconductors, Biotech, Clean Energy, Aerospace, Fintech, Shipping, Robotics, Critical Metals, Sovereign Debt, Digital Assets, etc.):
+
+1. **Autonomous Worker Agents**: The coordinator launches 20 concurrent threads. Each agent instantiates an independent MCP session (`FastMCPHttpClient(client_name=f"Worker-{sector_id}")`) to guarantee complete thread-safe session isolation.
+2. **Dynamic Sandbox Allocation (20 Concurrent Pods)**:
+   - Each worker agent calls `create_sandbox` with `warmpool="python-warmpool"`.
+   - The first agent claims the pre-warmed pod in ~0.3s; the remaining 19 dynamically provision on-demand pods across the GKE node pool while the `SandboxWarmPool` operator reconciles replacements in the background.
+3. **Merton Jump-Diffusion Simulation**:
+   - Each agent generates a sector-specific quantitative modeling pipeline (`simulate.py`) modeling compound Poisson jump processes ($dS_t = (\mu - \lambda k) S_t dt + \sigma S_t dW_t + J_t S_t dN_t$) and uploads it via `upload_file`.
+   - All 20 sandboxes execute 15,000 Monte Carlo paths in parallel (300,000 total paths cluster-wide) via `execute_command`.
+4. **Tail-Risk Analysis & Artifact Retrieval**:
+   - Each sandbox computes empirical 95% & 99% Value-at-Risk (VaR), 99% Conditional VaR (Expected Shortfall / CVaR), and systemic crash stress loss, writing `risk_report.json`.
+   - Agents download results via `download_file` and terminate their individual sandbox claims via `delete_sandbox`.
+5. **Executive Portfolio Matrix Synthesis**:
+   - The coordinator aggregates the sector outputs into an **Enterprise Global Risk Matrix**, ranking tail-risk exposures across the portfolio.
+6. **Cluster Reclamation & Warmpool Verification**:
+   - Confirms that all 20 dynamic sandbox pods are terminated, releasing cluster resources, and the warmpool automatically restores its standby replica.
+
+---
+
+### Step 9.4: How to Observe Sandbox Execution in Kubernetes
+
+While an agent or walkthrough script is running, open a separate terminal to observe what is happening under the hood:
+
+#### 1. Watch Custom Resource Lifecycle
+```bash
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get sandboxes,sandboxclaims,sandboxwarmpools -w
+```
+- When `create_sandbox` is called, a `SandboxClaim` appears in `Pending`, then flips to `Bound` as it adopts a pod.
+- `SandboxWarmPool` shows `readyReplicas` drop from `1` to `0`, followed immediately by the operator spinning up a new replacement warm pod to maintain the desired capacity.
+
+#### 2. Inspect Sandbox Pods & Labels
+```bash
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get pods \
+  -l agents.x-k8s.io/sandbox-claim-name -o wide
+```
+Each active sandbox pod is tagged with tracking labels:
+- `agents.x-k8s.io/sandbox-claim-name`: The unique claim ID.
+- `agents.x-k8s.io/sandbox-template-ref-hash`: Hash of the template configuration.
+- `mcp.k8s-agent-sandbox/session-id`: MCP session identifier.
+
+#### 3. Tail MCP Server Tool Invocation Logs
+```bash
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" logs \
+  -l app=agent-sandbox-mcp-server -f
+```
+Observe real-time JSON-RPC tool dispatches:
+```text
+INFO: 10.32.3.23:54320 - "POST /mcp HTTP/1.1" 200 OK  # initialize
+INFO: Calling tool: create_sandbox with {'warmpool': 'python-warmpool'}
+INFO: Calling tool: upload_file with {'sandbox_claim_name': 'sandbox-claim-10ddced5'}
+INFO: Calling tool: execute_command with {'command': 'python3 matrix_pipeline.py'}
+INFO: Calling tool: delete_sandbox with {'sandbox_claim_name': 'sandbox-claim-10ddced5'}
+```
+
+#### 4. Tail Sandbox Runtime Container Logs
+```bash
+# Find active sandbox pod name
+SANDBOX_POD=$(kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get pods \
+  -l agents.x-k8s.io/sandbox-claim-name -o jsonpath='{.items[0].metadata.name}')
+
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" logs "${SANDBOX_POD}" -c sandbox-runtime -f
+```
+Shows incoming HTTP operations executed inside the container environment on port 8888.
+
+---
+
+## 10. Enrolling Additional Users
 
 IAP admission and Kubernetes RBAC are configured as independent layers:
 1. **Grant IAP Admission (Google Group or Individual User)**:
@@ -891,7 +1150,7 @@ IAP admission and Kubernetes RBAC are configured as independent layers:
 
 ---
 
-## 10. Teardown & Cleanup
+## 11. Teardown & Cleanup
 
 To remove all deployed components (including the `gke-workspace-snapshot-mutating-webhook`, `PodSnapshot*` custom resources, and tenant `ConfigMap/jupyter-ipc-config`) cleanly using the automated cleanup script:
 
@@ -905,7 +1164,7 @@ DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Resolution |
 | --- | --- |
@@ -920,16 +1179,20 @@ DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.
 | Notebook remains `Pending` | Check node resources, image pull permissions, PVC provisioning, quota, Pod Security, and pod events. |
 | Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update. |
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |
+| In-memory variables or kernel state lost after pause/resume | Memory-recoverable pause and resume is only supported for JupyterLab notebook workspaces on CPU/GPU hardware; other workspaces (such as VS Code) use stateless pause and resume where files on `/home/jovyan` persist but in-memory execution state does not (Step 7.5). |
+| Custom Python packages or Conda environments missing after restart | Packages installed into ephemeral container rootfs (`/opt/conda`) are lost on Pod recreation. In the base environment, `pip` is pre-configured to automatically install into persistent storage (`/home/jovyan/.local/`) so packages persist without flags. For isolated project environments inheriting base packages, use `python3 -m venv --system-site-packages /home/jovyan/envs/<name>` (Step 7.6). |
 | VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
 | Spark or TPU pods fail to create in `${TENANT_NAMESPACE}` | Verify `gke/manifests/pilot/access.yaml` has been applied to `${TENANT_NAMESPACE}` (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
 | GCS permission denied (`403`) during Spark ETL, TPU training, or `PodSnapshotPolicy` `_perm_check` | Verify both `roles/storage.objectUser` and `roles/storage.bucketViewer` are granted on `gs://${GCS_BUCKET}` to `principalSet://.../namespace/${TENANT_NAMESPACE}` (Sections 6.1 and 7.1). |
+| Gemini CLI reports `Permission 'aiplatform.endpoints.predict' denied` | Ensure Google Service Account `${TENANT_NAMESPACE}-sa@${PROJECT}.iam.gserviceaccount.com` has `roles/aiplatform.user` granted on `${PROJECT}`, or provide `GEMINI_API_KEY` (Step 9.1). |
+| Agent Sandbox MCP tool calls fail with connection refused or 404 | Verify `agent-sandbox-mcp-server` Deployment and Service are running in `${TENANT_NAMESPACE}` on port 8000 (`kubectl get pods -n ${TENANT_NAMESPACE} -l app=agent-sandbox-mcp-server`), and verify `mcpServers.agent-sandbox.url` in `/home/jovyan/.gemini/settings.json`. |
 
 Inspect conditions and error messages without printing Secrets, access tokens,
 OAuth state values, or cookies. Keep notebook data when investigating failures.
 
 ---
 
-## 12. Security and Operational Limits
+## 13. Security and Operational Limits
 
 The pilot has verified browser login, kernel and terminal WebSockets, file
 persistence across pause/resume, selected cross-tenant/forged-header denials,

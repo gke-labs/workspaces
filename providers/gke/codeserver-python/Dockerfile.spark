@@ -1,11 +1,11 @@
-#
 # Custom Spark 4.0.1 Image with Python 3.12, NumPy, Pandas, PyArrow, and GCS client
-# Compatible with Kubeflow Workspaces jupyterlab and codeserver-python (Python 3.12)
+# Compatible with Kubeflow Workspaces codeserver-python (Python 3.12)
 #
 
 FROM apache/spark:4.0.1
 
 USER root
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends software-properties-common curl ca-certificates && \
     add-apt-repository ppa:deadsnakes/ppa -y && \
