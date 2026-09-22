@@ -16,11 +16,11 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: kubeflow-workspaces
 resources:
-  - ../../../workspaces/controller/manifests/kustomize/base
-  - ../../../workspaces/backend/manifests/kustomize/base
-  - ../../../workspaces/frontend/manifests/kustomize/base
+  - ../../../../workspaces/controller/manifests/kustomize/base
+  - ../../../../workspaces/backend/manifests/kustomize/base
+  - ../../../../workspaces/frontend/manifests/kustomize/base
 components:
-  - ../../../workspaces/controller/manifests/kustomize/components/certmanager
+  - ../../../../workspaces/controller/manifests/kustomize/components/certmanager
 patches:
   - target:
       kind: Deployment

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -135,6 +136,20 @@ func (config Config) snapshotBucket() string {
 	return ""
 }
 
+func manifestsDir(root string) string {
+	candidates := []string{
+		filepath.Join(root, "providers/gke/manifests"),
+		filepath.Join(root, "gke/manifests"),
+		filepath.Join(root, "manifests"),
+	}
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err == nil && fi.IsDir() {
+			return c
+		}
+	}
+	return filepath.Join(root, "providers/gke/manifests")
+}
+
 func Kustomize(ctx context.Context, directory string) ([]unstructured.Unstructured, error) {
 	command := exec.CommandContext(ctx, "kubectl", "kustomize", directory)
 	var stderr bytes.Buffer
@@ -176,6 +191,7 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 		return nil, err
 	}
 	var result []unstructured.Unstructured
+	manifests := manifestsDir(root)
 	switch stage {
 	case "namespaces":
 		for _, namespace := range append([]string{systemNamespace}, config.Tenants...) {
@@ -208,7 +224,7 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 		// isolation instead of sharing the access proxy's.
 		result = append(result, webhookIngress("gke-snapshot-webhook-ingress", snapshotAddonName))
 		for _, overlay := range []string{"upstream", "proxy", "snapshot"} {
-			resources, err := build(ctx, filepath.Join(root, "gke/manifests", overlay))
+			resources, err := build(ctx, filepath.Join(manifests, overlay))
 			if err != nil {
 				return nil, err
 			}
@@ -225,7 +241,7 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 			}
 		}
 		for _, tenant := range config.Tenants {
-			resources, err := build(ctx, filepath.Join(root, "gke/manifests/tenant"))
+			resources, err := build(ctx, filepath.Join(manifests, "tenant"))
 			if err != nil {
 				return nil, err
 			}
@@ -236,7 +252,7 @@ func Render(ctx context.Context, root, stage string, config Config, build Builde
 		}
 	case "applications":
 		for _, overlay := range []string{"upstream", "proxy", "snapshot"} {
-			resources, err := build(ctx, filepath.Join(root, "gke/manifests", overlay))
+			resources, err := build(ctx, filepath.Join(manifests, overlay))
 			if err != nil {
 				return nil, err
 			}

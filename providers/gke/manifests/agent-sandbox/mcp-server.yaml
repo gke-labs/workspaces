@@ -1,0 +1,124 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-sandbox-mcp-server
+  namespace: ${TENANT_NAMESPACE}
+  labels:
+    app: agent-sandbox-mcp-server
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-sandbox-mcp-server
+  namespace: ${TENANT_NAMESPACE}
+  labels:
+    app: agent-sandbox-mcp-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-sandbox-kubeflow-edit
+subjects:
+- kind: ServiceAccount
+  name: agent-sandbox-mcp-server
+  namespace: ${TENANT_NAMESPACE}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-sandbox-mcp-server
+  namespace: ${TENANT_NAMESPACE}
+  labels:
+    app: agent-sandbox-mcp-server
+spec:
+  type: ClusterIP
+  ports:
+  - name: mcp-http
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  selector:
+    app: agent-sandbox-mcp-server
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-sandbox-mcp-server
+  namespace: ${TENANT_NAMESPACE}
+  labels:
+    app: agent-sandbox-mcp-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-sandbox-mcp-server
+  template:
+    metadata:
+      labels:
+        app: agent-sandbox-mcp-server
+    spec:
+      serviceAccountName: agent-sandbox-mcp-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: mcp-server
+        image: ${AGENT_SANDBOX_MCP_IMAGE}
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: mcp-http
+          containerPort: 8000
+          protocol: TCP
+        env:
+        - name: K8S_SANDBOX_CONNECTION__TYPE
+          value: "in-cluster"
+        - name: K8S_SANDBOX_CONNECTION__USE_POD_IP
+          value: "true"
+        - name: K8S_SANDBOX_CONNECTION__SERVER_PORT
+          value: "8888"
+        - name: K8S_SANDBOX_PROBE_NAMESPACE
+          value: "${TENANT_NAMESPACE}"
+        - name: K8S_SANDBOX_SESSION_ID_LABEL_KEY
+          value: "mcp.k8s-agent-sandbox/session-id"
+        readinessProbe:
+          httpGet:
+            path: /readyz
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 250m
+            memory: 256Mi
+          limits:
+            cpu: 1000m
+            memory: 1Gi

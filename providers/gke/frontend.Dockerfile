@@ -23,6 +23,6 @@ RUN npm run build:prod
 
 FROM nginxinc/nginx-unprivileged:1.28-alpine
 COPY --from=builder /src/dist /usr/share/nginx/html/workspaces
-COPY --chmod=644 gke/frontend-nginx.conf /etc/nginx/conf.d/default.conf
+COPY --chmod=644 providers/gke/frontend-nginx.conf /etc/nginx/conf.d/default.conf
 USER 101:101
 EXPOSE 8080

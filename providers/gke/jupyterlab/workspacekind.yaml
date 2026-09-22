@@ -224,7 +224,7 @@ spec:
       - name: "LD_LIBRARY_PATH"
         value: "/usr/local/nvidia/lib64"
       - name: "PATH"
-        value: "/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       - name: "REGISTRY"
         value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
       - name: "GCS_BUCKET"

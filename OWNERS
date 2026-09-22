@@ -1,7 +1,10 @@
 labels:
   - area/v2
 approvers:
-  - andyatmiami
-  - thesuperzapper
-emeritus_approvers:
-  - kimwnasptd
+  - aojea
+  - siyuanfoundation
+reviewers:
+  - gangli113
+  - Jefftree
+  - richabanker
+  - YoyinZyc

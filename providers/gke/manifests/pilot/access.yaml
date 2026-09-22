@@ -71,7 +71,7 @@ metadata:
   namespace: team-a
 subjects:
   - kind: User
-    name: aojea@google.com
+    name: user1@example.com
     apiGroup: rbac.authorization.k8s.io
   - kind: ServiceAccount
     name: gke-notebook
@@ -108,7 +108,7 @@ metadata:
   name: notebooks-gke-pilot-discovery
 subjects:
   - kind: User
-    name: aojea@google.com
+    name: user1@example.com
     apiGroup: rbac.authorization.k8s.io
   - kind: ServiceAccount
     name: gke-notebook

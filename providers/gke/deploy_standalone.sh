@@ -20,7 +20,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DIST_DIR="${DIST_DIR:-/tmp/kubeflow-community-distribution}"
 
 # ==============================================================================
@@ -68,6 +68,8 @@ export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
 export BUILD_IMAGES="${BUILD_IMAGES:-true}"
 # Optional: Build custom JupyterLab (CPU/GPU/TPU) and Spark images for distributed_tpu_example.ipynb
 export BUILD_JUPYTERLAB_IMAGES="${BUILD_JUPYTERLAB_IMAGES:-true}"
+# Optional: Build custom VS Code (codeserver-python) images (CPU/GPU/TPU)
+export BUILD_CODESERVER_IMAGES="${BUILD_CODESERVER_IMAGES:-true}"
 
 # Optional: Kubernetes client QPS & Burst for gke-access-proxy
 export KUBE_CLIENT_QPS="${KUBE_CLIENT_QPS:-100}"
@@ -101,6 +103,8 @@ echo "  GCS_BUCKET:          ${GCS_BUCKET}"
 echo "  SNAPSHOT_GCS_BUCKET: ${SNAPSHOT_GCS_BUCKET}"
 echo "  INSTALL_TRAINER:     ${INSTALL_TRAINER}"
 echo "  INSTALL_SPARK:       ${INSTALL_SPARK_OPERATOR}"
+echo "  BUILD_JUPYTERLAB:    ${BUILD_JUPYTERLAB_IMAGES}"
+echo "  BUILD_CODESERVER:    ${BUILD_CODESERVER_IMAGES}"
 echo "=================================================================="
 
 # ==============================================================================
@@ -211,6 +215,20 @@ if [[ "${BUILD_JUPYTERLAB_IMAGES}" == "true" ]]; then
     PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
       TENANT_NAMESPACE="${TENANT_NAMESPACE}" GCS_BUCKET="${GCS_BUCKET}" \
       bash "${SCRIPT_DIR}/build_jupyterlab.sh"
+  fi
+fi
+
+if [[ "${BUILD_CODESERVER_IMAGES}" == "true" ]]; then
+  echo "=================================================================="
+  echo "Step 3c: Checking Custom VS Code (codeserver-python) Images..."
+  echo "=================================================================="
+  if [[ "${FORCE_BUILD_CODESERVER_IMAGES:-false}" != "true" ]] && \
+     gcloud artifacts docker images describe "${REGISTRY}/codeserver-python:latest-cpu" --project="${PROJECT}" >/dev/null 2>&1; then
+    echo "Custom codeserver-python images already exist in ${REGISTRY}; skipping rebuild."
+  else
+    PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
+      TENANT_NAMESPACE="${TENANT_NAMESPACE}" GCS_BUCKET="${GCS_BUCKET}" \
+      bash "${SCRIPT_DIR}/build_codeserver_python.sh" --variant "${CODESERVER_VARIANT:-cpu}" --fast
   fi
 fi
 
@@ -513,18 +531,51 @@ kubectl kustomize --load-restrictor=LoadRestrictionsNone "${SCRIPT_DIR}/manifest
 kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke-pilot \
   -f "${SCRIPT_DIR}/rendered/ready/customer-pilot.json"
 
+# Helper: Resolve the latest image tag for a variant from Artifact Registry,
+# falling back to any existing rendered tags file, and finally to latest-${variant}.
+resolve_latest_tag() {
+  local image="$1"
+  local variant="$2"
+  local env_file="${3:-}"
+  local default_tag="latest-${variant}"
+
+  local tag=""
+  tag=$(gcloud artifacts docker tags list "${REGISTRY}/${image}" \
+    --project="${PROJECT}" --format="value(tag)" 2>/dev/null | grep -E "^v[0-9]{8}-[0-9]{6}-${variant}$" | sort -V | tail -n 1 || true)
+
+  if [[ -n "${tag}" ]]; then
+    echo "${tag}"
+    return
+  fi
+
+  if [[ -n "${env_file}" && -f "${env_file}" ]]; then
+    local var_key="$(echo "${variant}" | tr '[:lower:]' '[:upper:]')_IMAGE_TAG"
+    local saved_tag
+    saved_tag=$(grep -E "^${var_key}=" "${env_file}" 2>/dev/null | head -n1 | cut -d'"' -f2 || true)
+    if [[ -n "${saved_tag}" ]]; then
+      echo "${saved_tag}"
+      return
+    fi
+  fi
+
+  echo "${default_tag}"
+}
+
 if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]]; then
   echo "Registering WorkspaceKind 'jupyterlab' for distributed_tpu_example.ipynb..."
-  # The WorkspaceKind pins an exact image tag per variant. build_jupyterlab.sh records
-  # the tags it produced; if it has never run here, fall back to the floating tags so a
-  # deploy without locally built images still resolves to something that exists.
-  CPU_IMAGE_TAG="latest-cpu"
-  GPU_IMAGE_TAG="latest-gpu"
-  TPU_IMAGE_TAG="latest-tpu"
-  if [[ -f "${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env" ]]; then
-    # shellcheck source=/dev/null
-    source "${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env"
-  fi
+  JL_TAGS_FILE="${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env"
+  CPU_IMAGE_TAG="${CPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "cpu" "${JL_TAGS_FILE}")}"
+  GPU_IMAGE_TAG="${GPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "gpu" "${JL_TAGS_FILE}")}"
+  TPU_IMAGE_TAG="${TPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "tpu" "${JL_TAGS_FILE}")}"
+
+  mkdir -p "$(dirname "${JL_TAGS_FILE}")"
+  cat > "${JL_TAGS_FILE}" <<EOF
+# Updated by deploy_standalone.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+CPU_IMAGE_TAG="${CPU_IMAGE_TAG}"
+GPU_IMAGE_TAG="${GPU_IMAGE_TAG}"
+TPU_IMAGE_TAG="${TPU_IMAGE_TAG}"
+EOF
+
   echo "  pinning cpu=${CPU_IMAGE_TAG} gpu=${GPU_IMAGE_TAG} tpu=${TPU_IMAGE_TAG}"
   PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
     IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
@@ -538,6 +589,28 @@ if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]]; then
       CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
       envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind-resumable.yaml" | kubectl --context="${CONTEXT}" apply -f -
   fi
+fi
+
+if [[ -f "${SCRIPT_DIR}/codeserver-python/workspacekind.yaml" ]]; then
+  echo "Registering WorkspaceKind 'codeserver'..."
+  CS_TAGS_FILE="${SCRIPT_DIR}/rendered/codeserver-image-tags.env"
+  CS_CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "cpu" "${CS_TAGS_FILE}")}"
+  CS_GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "gpu" "${CS_TAGS_FILE}")}"
+  CS_TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "tpu" "${CS_TAGS_FILE}")}"
+
+  mkdir -p "$(dirname "${CS_TAGS_FILE}")"
+  cat > "${CS_TAGS_FILE}" <<EOF
+# Updated by deploy_standalone.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG}"
+GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG}"
+TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG}"
+EOF
+
+  echo "  pinning cpu=${CS_CPU_IMAGE_TAG} gpu=${CS_GPU_IMAGE_TAG} tpu=${CS_TPU_IMAGE_TAG}"
+  PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
+    IMAGE_NAME="codeserver-python" GCS_BUCKET="${GCS_BUCKET}" \
+    CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG}" \
+    envsubst < "${SCRIPT_DIR}/codeserver-python/workspacekind.yaml" | kubectl --context="${CONTEXT}" apply -f -
 fi
 
 if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then

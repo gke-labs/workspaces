@@ -47,7 +47,7 @@ if ! git rebase "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"; then
     echo "Conflicts detected. Attempting automatic resolution for compliance files..."
     
     # List of files to keep from OUR custom branch (which is 'theirs' in rebase context)
-    COMPLIANCE_FILES=("README.md" "LICENSE" "CONTRIBUTING.md" "docs/contributing.md")
+    COMPLIANCE_FILES=("README.md" "LICENSE" "CONTRIBUTING.md" "docs/contributing.md" "OWNERS")
     
     for file in "${COMPLIANCE_FILES[@]}"; do
         if git status --porcelain | grep -q "^UU $file"; then
