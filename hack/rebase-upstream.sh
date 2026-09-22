@@ -42,7 +42,30 @@ echo "Fetching from ${UPSTREAM_REMOTE}..."
 git fetch "${UPSTREAM_REMOTE}"
 
 echo "Rebasing against ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}..."
-git rebase "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"
+# We try to rebase, but if it fails due to conflicts, we can try to resolve them
+if ! git rebase "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"; then
+    echo "Conflicts detected. Attempting automatic resolution for compliance files..."
+    
+    # List of files to keep from OUR custom branch (which is 'theirs' in rebase context)
+    COMPLIANCE_FILES=("README.md" "LICENSE" "CONTRIBUTING.md" "docs/contributing.md")
+    
+    for file in "${COMPLIANCE_FILES[@]}"; do
+        if git status --porcelain | grep -q "^UU $file"; then
+            echo "Resolving conflict in $file keeping custom version..."
+            git checkout --theirs "$file"
+            git add "$file"
+        fi
+    done
+    
+    # If there are still conflicts, let the user resolve them
+    if git status --porcelain | grep -q "^UU"; then
+        echo "Error: Unresolved conflicts remaining. Please resolve them manually and run 'git rebase --continue'."
+        exit 1
+    else
+        echo "Automatic resolution successful. Continuing rebase..."
+        git rebase --continue
+    fi
+fi
 
 echo "Rebase complete."
 echo "Please verify that custom code in providers/ still works and run all tests."
