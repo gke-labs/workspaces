@@ -2,7 +2,7 @@
 
 Status: pilot, 2026-09.
 The dated evidence lives in the
-[codelab deployment record](CODELAB.md);
+[codelab deployment record](../../docs/gke-pilot-codelab.md);
 this document explains
 the choices. Deeper analysis is in the `gateway_api` branch's
 `istio-replacement-evaluation.md` and `design-gateway-api.md`
@@ -88,6 +88,11 @@ webhook certificate.
 
 ## How the desktop (VS Code) path works
 
+"Desktop" here means the VS Code application installed on a user's laptop, talking
+to a Jupyter kernel inside a running workspace in the cluster. It is unrelated to
+the `codeserver` WorkspaceKind, which runs VS Code (code-server) inside the Pod and
+is reached through the browser path above.
+
 The unmodified Microsoft Jupyter extension cannot complete IAP's browser login —
 tested and failed at authentication — so a second, dedicated hostname on the same
 Gateway serves token-authenticated requests with IAP off *for that backend only*.
@@ -115,12 +120,10 @@ Costs, accepted knowingly:
   validation gate.
 - Token expiry is not kernel lifetime: culling and idle policies act separately.
 
-Validation lives in
-[vscode_validation.ipynb](vscode_validation.ipynb)
-and the
-[user guide](USER_GUIDE.md#vs-code-jupyter-extension);
+Validation lives in the
+[user guide](USER_GUIDE.md#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint);
 acceptance evidence in the
-[codelab record](CODELAB.md#2026-09-12-kubernetes-tokens-and-vs-code).
+[codelab record](../../docs/gke-pilot-codelab.md#2026-09-12-kubernetes-tokens-and-vs-code).
 
 ## Future work
 
@@ -158,7 +161,7 @@ land without forking upstream:
 
 Two requirements are standing, not future:
 
-- **Independence of this folder.** Everything lands under `gke/`; upstream
+- **Independence of this folder.** Everything lands under `providers/gke/`; upstream
   rebases must never conflict with the integration. Behavioral drift is caught
   by compatibility tests against pinned upstream revisions, not by textual merge
   conflicts.

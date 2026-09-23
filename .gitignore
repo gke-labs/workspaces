@@ -41,3 +41,10 @@ Sessionx.vim
 .AppleDouble
 .LSOverride
 ._*
+
+## Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ipynb_checkpoints/

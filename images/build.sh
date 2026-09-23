@@ -30,10 +30,16 @@ SAMPLES_DIR="${SCRIPT_DIR}/samples"
 CODESERVER_DIR="${SCRIPT_DIR}/codeserver-python"
 JUPYTERLAB_DIR="${SCRIPT_DIR}/jupyterlab"
 SPARK_DIR="${SCRIPT_DIR}/spark"
+MCP_SERVER_DIR="${SCRIPT_DIR}/agent-sandbox-mcp-server"
 
 # Default Configuration & Environment Variables
 REGISTRY_PATH="${REGISTRY_PATH:-${REGISTRY:-}}"
 IMAGE_TAG="${IMAGE_TAG:-}"
+# Upstream kubernetes-sigs/agent-sandbox release used for the MCP server image.
+# Forwarded to the Dockerfile's AGENT_SANDBOX_VERSION build arg. Keep this in
+# step with AGENT_SANDBOX_VERSION in examples/agent-sandbox/deploy_agent_sandbox.sh,
+# which selects the matching sandbox runtime image.
+AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.3}"
 
 TARGET_IMAGES=()
 TARGET_HARDWARE=()
@@ -51,29 +57,45 @@ Images and Hardware Variants:
   codeserver   VS Code (codeserver-python) [cpu, gpu, tpu]
   jupyterlab   JupyterLab (jupyterlab)     [cpu, gpu, tpu]
   spark        Apache Spark (spark-py312)  [generic/cpu]
+  mcp-server   Agent Sandbox MCP server (agent-sandbox-mcp-server) [generic/cpu]
 
 Target Selection Options:
-  --image, -i <name>        Select target image: codeserver, jupyterlab, spark, or all (default: all)
+  --image, -i <name>        Select target image: codeserver, jupyterlab, spark, mcp-server, or all
+                            (default: all, which excludes mcp-server)
   --codeserver              Shorthand to build codeserver-python
+                            (alias: --codeserver-python)
   --jupyterlab              Shorthand to build jupyterlab
   --spark                   Shorthand to build spark-py312
-  --all                     Build all images (default)
+  --mcp-server              Shorthand to build the Agent Sandbox MCP server
+                            (alias: --agent-sandbox-mcp-server)
+                            (needed by examples/agent-sandbox; not built by --all)
+  --all                     Build codeserver, jupyterlab and spark (default)
 
 Hardware Accelerator Options:
-  --hardware, --hw,         Select accelerator variant: cpu, gpu, tpu, or all (default: all)
+  --hardware, --hw, -hw,    Select accelerator variant: cpu, gpu, tpu, or all (default: all)
   --variant, -v <variant>
   --cpu                     Shorthand for hardware variant 'cpu'
   --gpu                     Shorthand for hardware variant 'gpu'
   --tpu                     Shorthand for hardware variant 'tpu'
 
 Registry & Tag Options:
-  --registry-path, -r <path> Container registry path (or pass as positional argument or REGISTRY env var)
+  --registry-path, -r <path> Container registry path (aliases: --registry; or pass as a
+                             positional argument, or set REGISTRY_PATH or REGISTRY).
+                             The flag wins over the environment.
                              Example: us-central1-docker.pkg.dev/my-proj/notebooks
                              Images produced:
                                <registry-path>/codeserver-python:<tag>
                                <registry-path>/jupyterlab:<tag>
                                <registry-path>/spark-py312:<tag>
-  --tag, -t <tag>            Image tag prefix (default: timestamp, e.g. v20260922-120000)
+                               <registry-path>/agent-sandbox-mcp-server:<tag>
+  --tag, -t <tag>            Image tag prefix (env var: IMAGE_TAG; default: timestamp,
+                             e.g. v20260922-120000). The hardware suffix -cpu/-gpu/-tpu
+                             is appended automatically; do not include one here.
+  --agent-sandbox-version <v> Upstream kubernetes-sigs/agent-sandbox release to build the
+                             MCP server from (env var: AGENT_SANDBOX_VERSION;
+                             default: v1.0.3). Only affects --mcp-server. Keep in step
+                             with AGENT_SANDBOX_VERSION in
+                             examples/agent-sandbox/deploy_agent_sandbox.sh.
 
 Execution Options:
   --no-push                  Build locally only; do not push to container registry
@@ -94,6 +116,9 @@ Examples:
 
   # 4. Build Apache Spark:
   ./build.sh --spark --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
+
+  # 4b. Build the Agent Sandbox MCP server (for examples/agent-sandbox):
+  ./build.sh --mcp-server --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
 
   # 5. Build locally without pushing (local testing):
   ./build.sh --codeserver --cpu --no-push my-local-repo
@@ -120,6 +145,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --spark)
       TARGET_IMAGES+=("spark")
+      shift
+      ;;
+    --mcp-server|--agent-sandbox-mcp-server)
+      TARGET_IMAGES+=("mcp-server")
       shift
       ;;
     --all)
@@ -149,6 +178,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tag|-t)
       IMAGE_TAG="$2"
+      shift 2
+      ;;
+    --agent-sandbox-version)
+      AGENT_SANDBOX_VERSION="$2"
       shift 2
       ;;
     --cloud-build)
@@ -231,8 +264,13 @@ else
           RESOLVED_IMAGES+=("spark")
         fi
         ;;
+      mcp-server|agent-sandbox-mcp-server)
+        if [[ ! " ${RESOLVED_IMAGES[*]} " =~ " mcp-server " ]]; then
+          RESOLVED_IMAGES+=("mcp-server")
+        fi
+        ;;
       *)
-        echo "ERROR: Unknown target image '${img}'. Allowed: codeserver, jupyterlab, spark, all" >&2
+        echo "ERROR: Unknown target image '${img}'. Allowed: codeserver, jupyterlab, spark, mcp-server, all" >&2
         exit 1
         ;;
     esac
@@ -281,6 +319,9 @@ get_target_image_base() {
     spark)
       base_name="spark-py312"
       ;;
+    mcp-server)
+      base_name="agent-sandbox-mcp-server"
+      ;;
   esac
 
   # If user already included the image name at the end of REGISTRY_PATH when building a single target, avoid duplicating
@@ -318,6 +359,17 @@ build_and_tag_image() {
   local desc="$5"
   local is_cpu_primary="${6:-false}"
   local is_spark="${7:-false}"
+  # 8th arg: space-separated KEY=VALUE pairs forwarded as docker --build-arg.
+  local build_args_raw="${8:-}"
+  local build_args=()
+  local docker_build_args=()
+  if [[ -n "${build_args_raw}" ]]; then
+    read -r -a build_args <<< "${build_args_raw}"
+    local kv
+    for kv in "${build_args[@]}"; do
+      docker_build_args+=(--build-arg "${kv}")
+    done
+  fi
 
   local v_tag="${IMAGE_TAG}${tag_suffix}"
   local v_latest_tag="latest${tag_suffix}"
@@ -337,21 +389,44 @@ build_and_tag_image() {
     if [[ "${is_spark}" != "true" && -d "${SAMPLES_DIR}" ]]; then
       echo "[DRY-RUN] Copying samples from ${SAMPLES_DIR} to build context samples/"
     fi
+    local dry_build_args=""
+    if [[ ${#docker_build_args[@]} -gt 0 ]]; then
+      dry_build_args="${docker_build_args[*]} "
+    fi
     if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
-      echo "[DRY-RUN] gcloud builds submit <context> --tag=${v_image_uri}"
+      if [[ -z "${dry_build_args}" ]]; then
+        echo "[DRY-RUN] gcloud builds submit <context> --tag=${v_image_uri}"
+      else
+        echo "[DRY-RUN] gcloud builds submit <context> --config=<generated cloudbuild.yaml> (${dry_build_args% })"
+      fi
       if [[ "${v_image_uri}" != "${v_latest_uri}" ]]; then
         echo "[DRY-RUN] gcloud container images add-tag ${v_image_uri} ${v_latest_uri} --quiet"
       fi
+      if [[ "${is_cpu_primary}" == "true" ]]; then
+        echo "[DRY-RUN] gcloud container images add-tag ${v_image_uri} ${base_image_uri}:${IMAGE_TAG} --quiet"
+        echo "[DRY-RUN] gcloud container images add-tag ${v_image_uri} ${base_image_uri}:latest --quiet"
+      fi
     else
-      echo "[DRY-RUN] docker build --platform linux/amd64 -f <context>/Dockerfile -t ${v_image_uri} -t ${v_latest_uri} <context>"
+      echo "[DRY-RUN] docker build --platform linux/amd64 ${dry_build_args}-f <context>/Dockerfile -t ${v_image_uri} -t ${v_latest_uri} <context>"
       if [[ "${PUSH_IMAGE}" == "true" ]]; then
         echo "[DRY-RUN] docker push ${v_image_uri}"
         if [[ "${v_image_uri}" != "${v_latest_uri}" ]]; then
           echo "[DRY-RUN] docker push ${v_latest_uri}"
         fi
       fi
+      if [[ "${is_cpu_primary}" == "true" ]]; then
+        echo "[DRY-RUN] docker tag ${v_image_uri} ${base_image_uri}:${IMAGE_TAG}"
+        echo "[DRY-RUN] docker tag ${v_image_uri} ${base_image_uri}:latest"
+        if [[ "${PUSH_IMAGE}" == "true" ]]; then
+          echo "[DRY-RUN] docker push ${base_image_uri}:${IMAGE_TAG}"
+          echo "[DRY-RUN] docker push ${base_image_uri}:latest"
+        fi
+      fi
     fi
     BUILT_IMAGES+=("${v_image_uri}" "${v_latest_uri}")
+    if [[ "${is_cpu_primary}" == "true" ]]; then
+      BUILT_IMAGES+=("${base_image_uri}:${IMAGE_TAG}" "${base_image_uri}:latest")
+    fi
     return
   fi
 
@@ -371,7 +446,30 @@ build_and_tag_image() {
 
   if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
     echo "Submitting build to Google Cloud Build..."
-    gcloud builds submit "${tmp_build_dir}" --tag="${v_image_uri}"
+    if [[ ${#docker_build_args[@]} -eq 0 ]]; then
+      gcloud builds submit "${tmp_build_dir}" --tag="${v_image_uri}"
+    else
+      # `gcloud builds submit --tag` accepts no build args, so emit a minimal
+      # build config that forwards them rather than silently dropping them.
+      {
+        echo "steps:"
+        echo "- name: gcr.io/cloud-builders/docker"
+        echo "  args:"
+        echo "  - build"
+        local kv
+        for kv in "${build_args[@]}"; do
+          echo "  - --build-arg"
+          echo "  - ${kv}"
+        done
+        echo "  - -t"
+        echo "  - ${v_image_uri}"
+        echo "  - ."
+        echo "images:"
+        echo "- ${v_image_uri}"
+      } > "${tmp_build_dir}/cloudbuild.generated.yaml"
+      gcloud builds submit "${tmp_build_dir}" \
+        --config="${tmp_build_dir}/cloudbuild.generated.yaml"
+    fi
     rm -rf "${tmp_build_dir}"
 
     if [[ "${v_image_uri}" != "${v_latest_uri}" ]]; then
@@ -388,6 +486,7 @@ build_and_tag_image() {
     echo "Building locally with Docker..."
     docker build \
       --platform linux/amd64 \
+      ${docker_build_args[@]+"${docker_build_args[@]}"} \
       -f "${tmp_build_dir}/Dockerfile" \
       -t "${v_image_uri}" \
       -t "${v_latest_uri}" \
@@ -416,6 +515,9 @@ build_and_tag_image() {
   fi
 
   BUILT_IMAGES+=("${v_image_uri}" "${v_latest_uri}")
+  if [[ "${is_cpu_primary}" == "true" ]]; then
+    BUILT_IMAGES+=("${base_image_uri}:${IMAGE_TAG}" "${base_image_uri}:latest")
+  fi
 }
 
 # ==============================================================================
@@ -462,6 +564,13 @@ fi
 if [[ " ${RESOLVED_IMAGES[*]} " =~ " spark " ]]; then
   spark_base="$(get_target_image_base "spark")"
   build_and_tag_image "${SPARK_DIR}" "Dockerfile" "${spark_base}" "" "Spark 4.0.1 (Python 3.12)" "false" "true"
+fi
+
+# D. Build the Agent Sandbox MCP server (not part of --all; opt in with --mcp-server)
+if [[ " ${RESOLVED_IMAGES[*]} " =~ " mcp-server " ]]; then
+  mcp_base="$(get_target_image_base "mcp-server")"
+  build_and_tag_image "${MCP_SERVER_DIR}" "Dockerfile" "${mcp_base}" "" "Agent Sandbox MCP server ${AGENT_SANDBOX_VERSION}" "false" "true" \
+    "AGENT_SANDBOX_VERSION=${AGENT_SANDBOX_VERSION}"
 fi
 
 echo ""

@@ -214,23 +214,27 @@ spec:
     ## standard probes to determine Container health (MUTABLE)
     ##  - spec for Probe:
     ##    https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.27/#probe-v1-core
+    ##  - NOTE: `probes` is optional. Leave the key commented out when no probes are
+    ##    defined; an empty `probes:` key parses as YAML null and is rejected by the
+    ##    WorkspaceKind CRD with:
+    ##      spec.podTemplate.probes in body must be of type object: "null"
     ##
-    probes:
-
-      ## startup probe for the "main" container
-      ##
-      #startupProbe:
-      #  ...
-
-      ## liveness probe for the "main" container
-      ##
-      #livenessProbe:
-      #  ...
-
-      ## readiness probe for the "main" container
-      ##
-      #readinessProbe:
-      #  ...
+    #probes:
+    #
+    #  ## startup probe for the "main" container
+    #  ##
+    #  startupProbe:
+    #    ...
+    #
+    #  ## liveness probe for the "main" container
+    #  ##
+    #  livenessProbe:
+    #    ...
+    #
+    #  ## readiness probe for the "main" container
+    #  ##
+    #  readinessProbe:
+    #    ...
 
     ## volume mount paths
     ##

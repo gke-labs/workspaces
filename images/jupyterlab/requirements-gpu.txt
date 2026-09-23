@@ -30,7 +30,7 @@ accelerate==1.15.0
 # A cuda13 extra over a CUDA 12 base would be the same mistake in the other direction.
 jax[cuda13]==0.11.1
 # transformers 5 renamed from_pretrained's torch_dtype argument to dtype, and
-# examples/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
+# examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
 transformers==5.17.0
 
 # Already present in the base at these exact versions; declared so the dependency is

@@ -24,6 +24,5 @@ RUN PIP_NO_CACHE_DIR=off python3 -m pip install -r /tmp/requirements.txt --quiet
 
 # Pre-populate home with samples, and sync to $HOME_TMP for s6 01-copy-tmp-home
 COPY --chown=${NB_USER}:${NB_GID} samples/. ${HOME}/samples/
-RUN ln -s -f ${HOME}/samples/* ${HOME}/ 2>/dev/null || true \
- && cp -p -r -T "${HOME}" "${HOME_TMP}" \
+RUN cp -p -r -T "${HOME}" "${HOME_TMP}" \
  && chmod -R g=u "${HOME_TMP}"
