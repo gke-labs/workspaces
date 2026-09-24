@@ -18,7 +18,7 @@
 #   <YOUR_CPU_IMAGE>: e.g. "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-cpu"
 #                     or upstream "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
 #   <YOUR_GPU_IMAGE>: e.g. "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-gpu"
-#   <YOUR_GCS_BUCKET>: e.g. "team-a-bucket" (shared GCS bucket for workspace data)
+#   <YOUR_GCS_BUCKET>: e.g. "kubeflow-user-bucket" (shared GCS bucket for workspace data)
 #
 # You can edit the placeholders directly in this file, or apply with sed (run from
 # the repository root):
@@ -136,7 +136,7 @@ spec:
 
   activityRules:
     - config:
-        secondsSinceActive: 86400
+        secondsSinceActive: 14400 # auto pauses the notebook after 4h of inactivity
       match: {}
       effect:
         pauseWorkspace: true

@@ -155,7 +155,7 @@ something to launch straight away.
 #### Deployment Options
 
 * **Are these the only required env vars to begin with?**
-  In `deploy_standalone.sh`, only `PROJECT_ID` and `PILOT_USERS` are strictly required with no defaults. `CLUSTER_NAME`, `LOCATION`, `REGION`, `TENANT_NAMESPACE`, and `REPO_NAME` have built-in defaults (`kubeflow-notebooks`, `us-central1-c`, `us-central1`, `team-a`, `notebooks`), but defining them explicitly avoids unexpected locations or collisions.
+  In `deploy_standalone.sh`, only `PROJECT_ID` and `PILOT_USERS` are strictly required with no defaults. `CLUSTER_NAME`, `LOCATION`, `REGION`, `TENANT_NAMESPACE`, and `REPO_NAME` have built-in defaults (`kubeflow-notebooks`, `us-central1-c`, `us-central1`, `kubeflow-user`, `notebooks`), but defining them explicitly avoids unexpected locations or collisions.
 * **What if you have a custom domain name?**
   * **No custom domain:** Leave `WORKSPACES_HOST` unset. `deploy_standalone.sh` automatically generates a domain using `sslip.io` (`notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io`) and provisions a Google-managed SSL certificate via Certificate Manager with zero DNS configuration needed.
   * **With a custom domain:** Set `export WORKSPACES_HOST="workspaces.example.com"` (and optionally `export DESKTOP_HOST="connect.example.com"`). The script configures the GKE Gateway and Certificate Manager for your host. After deployment finishes, add a DNS `A` record pointing `workspaces.example.com` to the static external IP printed by the script.

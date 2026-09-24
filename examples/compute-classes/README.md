@@ -5,6 +5,9 @@ This folder contains the GKE **ComputeClass** objects that make those
 accelerators available to your cluster — *without* you having to create node
 pools by hand.
 
+> [!TIP]
+> **Already completed the one-time platform setup?** Applying these manifests is **step 6** of the [one-time setup in Examples README](../README.md#6-apply-the-computeclasses-gpu--tpu-examples-only). If you already ran `kubectl apply -f examples/compute-classes/` during platform setup, they are already applied and you can jump straight to verifying them under [Apply them](#apply-them) or proceed to your GPU/TPU example.
+
 ---
 
 ## What is a ComputeClass, in plain terms?
@@ -81,14 +84,14 @@ ComputeClass name.
 ## Prerequisites
 
 > [!NOTE]
-> The commands on this page use `${CLUSTER}`, `${LOCATION}`, `${REGION}` and
-> `${PROJECT}`. Nothing here sets them — export them yourself first, with the
+> The commands on this page use `${CLUSTER_NAME}`, `${LOCATION}`, `${REGION}` and
+> `${PROJECT_ID}`. Nothing here sets them — export them yourself first, with the
 > same values you used for the platform deployment (see
-> [`../README.md`](../README.md#2-deploy-the-standalone-platform)):
+> [`../README.md`](../README.md#1-set-environment-variables--create-a-gke-cluster)):
 >
 > ```bash
-> export PROJECT="my-project"
-> export CLUSTER="kubeflow-notebooks"
+> export PROJECT_ID="my-project"
+> export CLUSTER_NAME="kubeflow-notebooks"
 > export LOCATION="us-west1"   # the cluster's zone or region
 > export REGION="us-west1"
 > ```
@@ -99,8 +102,8 @@ ComputeClass name.
    cluster. Check your version:
 
    ```bash
-   gcloud container clusters describe "${CLUSTER}" \
-     --location="${LOCATION}" --project="${PROJECT}" \
+   gcloud container clusters describe "${CLUSTER_NAME}" \
+     --location="${LOCATION}" --project="${PROJECT_ID}" \
      --format='value(currentMasterVersion)'
    ```
 
@@ -109,7 +112,7 @@ ComputeClass name.
 
    ```bash
    # GPU quota (example: T4 Spot in us-west1)
-   gcloud compute regions describe "${REGION}" --project="${PROJECT}" \
+   gcloud compute regions describe "${REGION}" --project="${PROJECT_ID}" \
      --format="table(quotas.metric,quotas.limit,quotas.usage)" \
      | grep -i -E "preemptible|tpu|gpu"
    ```
@@ -122,8 +125,8 @@ ComputeClass name.
 3. **`kubectl` pointed at your cluster:**
 
    ```bash
-   gcloud container clusters get-credentials "${CLUSTER}" \
-     --location="${LOCATION}" --project="${PROJECT}"
+   gcloud container clusters get-credentials "${CLUSTER_NAME}" \
+     --location="${LOCATION}" --project="${PROJECT_ID}"
    ```
 
 ---

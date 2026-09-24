@@ -21,7 +21,7 @@
 # 2. Aggregated RBAC ClusterRole (agent-sandbox-kubeflow-edit)
 # 3. Tenant SandboxTemplate (official release image) and SandboxWarmPool
 # 4. Tenant Agent Sandbox MCP Server (streamable HTTP on port 8000)
-# 5. Workspace configuration for Gemini CLI and Gemini Code Assist
+# Note: Gemini in the workspace is configured separately via setup_gemini.sh
 # ==============================================================================
 set -euo pipefail
 
@@ -37,20 +37,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # when deploying the platform; if you changed any of them there, change them here
 # too (or, more simply, export them once and run both scripts from that shell).
 export PROJECT_ID="${PROJECT_ID:-${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}}"
-export PROJECT="${PROJECT_ID}"
 export CLUSTER_NAME="${CLUSTER_NAME:-${CLUSTER:-kubeflow-notebooks}}"
-export CLUSTER="${CLUSTER_NAME}"
 export LOCATION="${LOCATION:-us-central1-c}"
 export REGION="${REGION:-us-central1}"
-export TENANT_NAMESPACE="${TENANT_NAMESPACE:-team-a}"
+export TENANT_NAMESPACE="${TENANT_NAMESPACE:-kubeflow-user}"
 export REPO_NAME="${REPO_NAME:-${REPOSITORY:-notebooks}}"
-export REPOSITORY="${REPO_NAME}"
 export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
 export REGISTRY="${REGISTRY:-${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}}"
 
 export AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.3}"
 export WARMPOOL_REPLICAS="${WARMPOOL_REPLICAS:-1}"
-export CONFIGURE_WORKSPACE="${CONFIGURE_WORKSPACE:-true}"
 
 # Use official release container image from https://github.com/kubernetes-sigs/agent-sandbox/releases#release-v1.0.3
 export SANDBOX_RUNTIME_IMAGE="${SANDBOX_RUNTIME_IMAGE:-registry.k8s.io/agent-sandbox/python-runtime-sandbox:${AGENT_SANDBOX_VERSION}}"
@@ -74,9 +70,9 @@ echo "==========================================================================
 # 2. Cluster Authentication
 # ------------------------------------------------------------------------------
 echo "==> Verifying GKE cluster credentials..."
-gcloud container clusters get-credentials "${CLUSTER}" \
+gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --location="${LOCATION}" \
-  --project="${PROJECT}"
+  --project="${PROJECT_ID}"
 
 kubectl config use-context "${CONTEXT}" || true
 
@@ -173,73 +169,22 @@ kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" exec "${MCP_POD}" -- pyt
 echo "  MCP Server /healthz check passed!"
 
 # ------------------------------------------------------------------------------
-# 7. Configure Running Workspace (VS Code / code-server)
-# ------------------------------------------------------------------------------
-if [[ "${CONFIGURE_WORKSPACE}" == "true" ]]; then
-  echo "==> Checking for running VS Code / code-server pods in ${TENANT_NAMESPACE}..."
-  WORKSPACE_POD=$(kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get pods \
-    -l "notebooks.kubeflow.org/workspace-name" \
-    --field-selector=status.phase=Running \
-    -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
-
-  if [[ -n "${WORKSPACE_POD}" ]]; then
-    echo "==> Configuring workspace pod: ${WORKSPACE_POD}..."
-    kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" exec "${WORKSPACE_POD}" -c main -- bash -c "
-      mkdir -p /home/jovyan/.gemini
-      cat <<'EOF' > /home/jovyan/.gemini/settings.json
-{
-  \"mcpServers\": {
-    \"agent-sandbox\": {
-      \"url\": \"http://agent-sandbox-mcp-server.${TENANT_NAMESPACE}.svc.cluster.local:8000/mcp\",
-      \"type\": \"http\",
-      \"trust\": true
-    }
-  }
-}
-EOF
-      cat <<'EOF' > /home/jovyan/.gemini/trustedFolders.json
-{
-  \"/\": \"TRUST_PARENT\",
-  \"/home/jovyan\": \"TRUST_FOLDER\"
-}
-EOF
-      cat <<'EOF' > /home/jovyan/.gemini/GEMINI.md
-# Kubernetes Agent Sandbox Execution Rules
-
-You have access to the Kubernetes Agent Sandbox MCP server (\`agent-sandbox\`).
-Whenever the user asks to run Python code, execute test suites, run benchmarks, or perform untrusted shell operations:
-1. Provision an isolated execution environment using \`mcp_agent-sandbox_create_sandbox\`:
-   - \`namespace\`: \"${TENANT_NAMESPACE}\"
-   - \`warmpool\`: \"python-warmpool\"
-2. Upload any necessary files or scripts using \`mcp_agent-sandbox_upload_file\`.
-3. Execute the workload using \`mcp_agent-sandbox_execute_command\`.
-4. Retrieve results or artifacts using \`mcp_agent-sandbox_download_file\`.
-5. Always clean up and release cluster resources when done using \`mcp_agent-sandbox_delete_sandbox\`.
-EOF
-      chown -R 1000:100 /home/jovyan/.gemini
-    "
-    echo "  Workspace .gemini/settings.json, trustedFolders.json, and GEMINI.md successfully updated!"
-  else
-    echo "INFO: No running workspace pod found. Configurations will apply on next workspace launch."
-  fi
-fi
-
-# ------------------------------------------------------------------------------
-# Summary & Next Steps
+# 7. Summary & Next Steps
 # ------------------------------------------------------------------------------
 echo ""
 echo "=============================================================================="
-echo "Kubernetes Agent Sandbox Successfully Deployed & Configured!"
+echo "Kubernetes Agent Sandbox & MCP Server Successfully Deployed!"
 echo "=============================================================================="
 echo "MCP Server Endpoint: http://agent-sandbox-mcp-server.${TENANT_NAMESPACE}.svc.cluster.local:8000/mcp"
 echo ""
-echo "Quick Verification from your Workspace Terminal:"
-echo "  1. Open VS Code terminal in ${TENANT_NAMESPACE}."
-echo "  2. Test Gemini CLI tool discovery:"
-echo "     gemini -p 'List the tools available from the agent-sandbox MCP server.'"
-echo "  3. Run an isolated task in a sandbox:"
-echo "     gemini -p 'Create a sandbox from warmpool python-warmpool, run python3 -c \"print(2**64)\", and delete the sandbox.'"
-echo ""
-echo "To run the multi-sandbox orchestration walkthrough:"
-echo "  python3 examples/agent-sandbox/multi_agent_sandbox_walkthrough.py"
+echo "Next Steps (from your VS Code Workspace):"
+echo "  1. Start a VS Code workspace in the UI (WorkspaceKind 'codeserver', image 'codeserver-python-cpu')."
+echo "  2. Open the workspace terminal and configure Gemini:"
+echo "       bash examples/agent-sandbox/setup_gemini.sh"
+echo "  3. Set your GEMINI_API_KEY and prompt Gemini:"
+echo "       export GEMINI_API_KEY=\"your-gemini-api-key\""
+echo "       gemini -p 'List the tools available from the agent-sandbox MCP server.'"
+echo "  4. Run the multi-agent walkthrough notebook or script:"
+echo "       Open examples/agent-sandbox/multi_agent_sandbox_walkthrough.ipynb"
+echo "       (or: python3 examples/agent-sandbox/multi_agent_sandbox_walkthrough.py)"
 echo "=============================================================================="

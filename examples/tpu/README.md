@@ -15,6 +15,9 @@ This example demonstrates interactive, multi-device neural network training with
 | **Parallelism** | Data-parallel training across all 4 TPU chips using `jax.pmap` and `jax.lax.pmean` |
 | **Workflow** | Self-contained notebook (`jax_tpu_training.ipynb`) executed remotely via VS Code or in-browser JupyterLab |
 
+> [!TIP]
+> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClass, TPU image, and `jupyterlab` WorkspaceKind are already configured. You can skip the prerequisites checklist and jump straight to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
+
 ### Architecture Flow
 
 ```mermaid
@@ -71,9 +74,12 @@ Work through this checklist before launching the workspace.
 
 ```bash
 export PROJECT_ID="$(gcloud config get-value project)"
+export CLUSTER_NAME="kubeflow-notebooks"
+export LOCATION="us-west1"
 export REGION="us-west1"               # Region where you have TPU v5e quota
-export NAMESPACE="kubeflow-user"       # Your tenant namespace
-export NS="${NAMESPACE}"
+export TENANT_NAMESPACE="kubeflow-user" # Your tenant namespace
+export REPO_NAME="kubeflow-repo"
+export NS="${TENANT_NAMESPACE}"
 ```
 
 ### 1. Check TPU v5e Spot Quota
@@ -101,7 +107,7 @@ kubectl get computeclass tpu-v5-4-single-host
 Ensure the custom TPU JupyterLab image is built and pushed (it includes `jax[tpu]` and `libtpu`):
 
 ```bash
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/kubeflow-repo"
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
 ./images/build.sh --jupyterlab --tpu --registry-path "${REGISTRY}"
 ```
@@ -151,8 +157,8 @@ In the Kubeflow Workspaces UI (`https://${WORKSPACES_HOST}/workspaces/`):
 Confirm from your terminal:
 
 ```bash
-kubectl get workspaces -n "${NAMESPACE}"
-kubectl get pods -n "${NAMESPACE}" -l notebooks.kubeflow.org/workspace-name=tpu-workspace
+kubectl get workspaces -n "${TENANT_NAMESPACE}"
+kubectl get pods -n "${TENANT_NAMESPACE}" -l notebooks.kubeflow.org/workspace-name=tpu-workspace
 ```
 
 ---
@@ -175,7 +181,7 @@ Run the notebook directly from your local machine without uploading any files:
    - Choose a token duration (e.g. 8 hours), click **Generate connection**, and click **Copy URL**.
    - The copied URL has the format:
      ```
-     https://${DESKTOP_HOST}/workspace/connect/<namespace>/tpu-workspace/jupyterlab/?token=<token>
+     https://${DESKTOP_HOST}/workspace/connect/<tenant-namespace>/tpu-workspace/jupyterlab/?token=<token>
      ```
 
 3. **Connect to the remote kernel in VS Code**:
@@ -272,7 +278,7 @@ Saves the trained weights to `/home/jovyan/jax_tpu_model_params.npz` and verifie
    - In the Kubeflow Workspaces UI, click **Stop** or **Delete** on `tpu-workspace`.
    - Or from the CLI:
      ```bash
-     kubectl delete workspace tpu-workspace -n "${NAMESPACE}"
+     kubectl delete workspace tpu-workspace -n "${TENANT_NAMESPACE}"
      ```
 
 2. **Verify Node Pool Removal**:

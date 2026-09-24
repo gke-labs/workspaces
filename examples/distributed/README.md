@@ -29,6 +29,9 @@ All three stages exchange data through a single **GCS bucket**, using the
 network disk** — every read and write is an ordinary object-storage call,
 authorized by Workload Identity.
 
+> [!TIP]
+> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, GCS bucket, custom images, `jupyterlab` WorkspaceKind, and TPU ComputeClass are already set up. You can skip the setup prerequisites and jump straight to [Create the Workspace](#7-create-the-workspace-with-the-right-options) or [Running it](#running-it).
+
 ### Flow
 
 ```mermaid
@@ -121,9 +124,12 @@ Set these first:
 ```bash
 export PROJECT_ID="$(gcloud config get-value project)"
 export PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
-export NAMESPACE="kubeflow-user"       # the namespace your Workspace runs in
+export CLUSTER_NAME="kubeflow-notebooks"
+export LOCATION="us-west1"
 export REGION="us-west1"
-export NS="${NAMESPACE}"               # shorthand used below
+export TENANT_NAMESPACE="kubeflow-user"       # the namespace your Workspace runs in
+export REPO_NAME="kubeflow-repo"
+export NS="${TENANT_NAMESPACE}"               # shorthand used below
 ```
 
 > [!NOTE]
@@ -184,7 +190,7 @@ Build with [`../../images/build.sh`](../../images/build.sh); details in
 [`../../images/README.md`](../../images/README.md).
 
 ```bash
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/kubeflow-repo"
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
 ./images/build.sh --spark      --registry-path "${REGISTRY}"   # REQUIRED for Stage 1
 ./images/build.sh --jupyterlab --cpu --registry-path "${REGISTRY}"  # the Workspace image
@@ -299,17 +305,17 @@ reports above; the default `<namespace>-bucket` is what the WorkspaceKind inject
 so if you have not customised anything, this just works.
 
 ```bash
-export GCS_BUCKET="${NAMESPACE}-bucket"
+export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
 
 gcloud storage buckets create "gs://${GCS_BUCKET}" \
   --location="${REGION}" --project="${PROJECT_ID}"
 
 gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${NAMESPACE}" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
   --role="roles/storage.objectUser"
 ```
 
-The `principalSet://…/namespace/${NAMESPACE}` form grants **every** ServiceAccount
+The `principalSet://…/namespace/${TENANT_NAMESPACE}` form grants **every** ServiceAccount
 in the namespace. That is what you want here: four different identities touch the
 bucket (the Workspace pod, the Spark driver/executors, the TrainJob pods, and the
 inference pods), and binding them individually is fragile.
@@ -540,7 +546,8 @@ Service, and prints predicted vs. true labels with ✅/❌.
 > of this. Run these commands.
 
 ```bash
-NS=<your-namespace>
+TENANT_NAMESPACE=<your-namespace>
+NS="${TENANT_NAMESPACE}"
 GCS_BUCKET=<your-bucket>          # same value as $GCS_BUCKET inside the Workspace
 
 # --- Stage 3: inference ---
@@ -573,9 +580,9 @@ gone. Confirm, and only intervene if it lingers:
 
 ```bash
 kubectl get nodes -l cloud.google.com/compute-class=tpu-v5-8-multi-host
-gcloud container node-pools list --cluster="${CLUSTER}" --location="${LOCATION}" --project="${PROJECT_ID}"
+gcloud container node-pools list --cluster="${CLUSTER_NAME}" --location="${LOCATION}" --project="${PROJECT_ID}"
 gcloud container node-pools delete <auto-created-pool> \
-  --cluster="${CLUSTER}" --location="${LOCATION}" --project="${PROJECT_ID}"
+  --cluster="${CLUSTER_NAME}" --location="${LOCATION}" --project="${PROJECT_ID}"
 ```
 
 Deleting the ComputeClass itself is not necessary — it costs nothing when idle.

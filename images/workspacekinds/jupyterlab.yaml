@@ -180,7 +180,7 @@ spec:
 
   activityRules:
     - config:
-        secondsSinceActive: 86400
+        secondsSinceActive: 86400  # auto pauses the notebook after 24h of inactivity
       match: {}
       effect:
         pauseWorkspace: true

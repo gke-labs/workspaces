@@ -51,12 +51,8 @@ Usage:
   # From inside the VS Code / code-server workspace pod:
   python3 examples/agent-sandbox/multi_agent_sandbox_walkthrough.py
 
-  # Or configure a custom number of parallel agents (e.g. 20, 25):
+  # Or configure a custom number of parallel agents (e.g. 5, 20):
   NUM_AGENTS=20 python3 examples/agent-sandbox/multi_agent_sandbox_walkthrough.py
-
-  # Or from your local workstation (via port-forward):
-  kubectl port-forward -n kubeflow-user svc/agent-sandbox-mcp-server 8000:8000
-  MCP_SERVER_URL="http://localhost:8000/mcp" python3 examples/agent-sandbox/multi_agent_sandbox_walkthrough.py
 """
 
 import concurrent.futures
@@ -679,8 +675,8 @@ def main():
         log_info(f"Discovered {len(tools)} tools: {[t['name'] for t in tools]}")
     except Exception as e:
         print(f"{RED}Failed to connect to MCP server: {e}{RESET}")
-        print(f"{YELLOW}Hint: If running from outside GKE, ensure port-forward is active:{RESET}")
-        print(f"  kubectl port-forward -n {TENANT_NAMESPACE} svc/agent-sandbox-mcp-server 8000:8000")
+        print(f"{YELLOW}Hint: Verify that the MCP server is deployed and running in namespace '{TENANT_NAMESPACE}':{RESET}")
+        print(f"  kubectl get deploy agent-sandbox-mcp-server -n {TENANT_NAMESPACE}")
         sys.exit(1)
 
     # --------------------------------------------------------------------------

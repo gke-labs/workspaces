@@ -26,6 +26,9 @@ Two self-contained verification notebooks are provided:
 | [`cpu_checkpoint_restore_example.ipynb`](cpu_checkpoint_restore_example.ipynb) | A ~160 MB NumPy array is bit-identical, the PID is unchanged, a 1 Hz ticker thread resumes, and wall-clock shows the freeze | CPU only |
 | [`gpu_checkpoint_restore_example.ipynb`](gpu_checkpoint_restore_example.ipynb) | A 3-billion-parameter LLM (`Qwen/Qwen2.5-3B-Instruct`, ~6 GB fp16) stays resident in GPU VRAM with bit-identical weights and reproducible greedy decoding | 1 × NVIDIA T4 |
 
+> [!TIP]
+> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your cluster, storage, images, and ComputeClasses are already in place. You can skip the prerequisites and jump straight to [Registering the `jupyterlab-resumable` WorkspaceKind](#registering-the-jupyterlab-resumable-workspacekind) (or [Running the Examples](#running-the-examples) if already registered).
+
 ### What survives a pause (and what does not)
 
 The checkpoint captures the container's **init process tree** — everything under
@@ -83,8 +86,8 @@ For the GPU notebook the node must also be a **T4** that supports gVisor
 (GKE 1.29.2+ provides the required nvproxy support).
 
 ```bash
-gcloud container clusters describe "${CLUSTER}" \
-  --location="${LOCATION}" --project="${PROJECT}" \
+gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
   --format='value(podAutoscaling,currentMasterVersion)'
 
 # The Pod Snapshot CRDs must exist:
@@ -118,7 +121,7 @@ Build and push the JupyterLab CPU and GPU images with
 
 ```bash
 cd images
-./build.sh --jupyterlab --cpu --gpu --registry-path "${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}"
+./build.sh --jupyterlab --cpu --gpu --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 ```
 
 See [`../../images/README.md`](../../images/README.md) for the full reference.
@@ -162,13 +165,14 @@ It contains three placeholders you must replace. Run this from the repository
 root:
 
 ```bash
-export PROJECT="my-project"
+export PROJECT_ID="my-project"
 export REGION="us-west1"
-export REPOSITORY="kubeflow-repo"
-export GCS_BUCKET="kubeflow-user-bucket"
+export REPO_NAME="kubeflow-repo"
+export TENANT_NAMESPACE="kubeflow-user"
+export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
 
-export CPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/jupyterlab:latest-cpu"
-export GPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}/jupyterlab:latest-gpu"
+export CPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-cpu"
+export GPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-gpu"
 
 sed -e "s|<YOUR_CPU_IMAGE>|${CPU_IMAGE}|g" \
     -e "s|<YOUR_GPU_IMAGE>|${GPU_IMAGE}|g" \
@@ -259,26 +263,26 @@ This allows different teams, tenants, or workspaces to use dedicated GCS buckets
 Ensure the custom bucket exists and has the required IAM bindings for both identities:
 
 ```bash
-export CUSTOM_SNAPSHOT_BUCKET="my-team-snapshots"
 export REGION="us-central1"
-export PROJECT="my-gcp-project"
-export TENANT_NAMESPACE="team-a"
+export PROJECT_ID="my-gcp-project"
+export TENANT_NAMESPACE="kubeflow-user"
+export CUSTOM_SNAPSHOT_BUCKET="my-team-snapshots"
 
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
 
 # 1. Create the bucket
 gcloud storage buckets create "gs://${CUSTOM_SNAPSHOT_BUCKET}" \
   --location="${REGION}" \
-  --project="${PROJECT}" \
+  --project="${PROJECT_ID}" \
   --uniform-bucket-level-access || true
 
 # 2. Grant node-level Workload Identity access (checkpoint & restore)
 gcloud storage buckets add-iam-policy-binding "gs://${CUSTOM_SNAPSHOT_BUCKET}" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
   --role="roles/storage.objectUser"
 
 gcloud storage buckets add-iam-policy-binding "gs://${CUSTOM_SNAPSHOT_BUCKET}" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
   --role="roles/storage.bucketViewer"
 
 # 3. Grant GKE Service Agent robot access (automatic snapshot deletion & cleanup)
@@ -293,7 +297,7 @@ cat <<EOF > /tmp/snapshot-lifecycle.json
 }
 EOF
 gcloud storage buckets update "gs://${CUSTOM_SNAPSHOT_BUCKET}" \
-  --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT}"
+  --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT_ID}"
 rm -f /tmp/snapshot-lifecycle.json
 ```
 
@@ -340,7 +344,7 @@ apiVersion: kubeflow.org/v1beta1
 kind: Workspace
 metadata:
   name: my-workspace
-  namespace: team-a
+  namespace: kubeflow-user
   annotations:
     podsnapshot.gke.kubeflow.org/enabled: "true"
     podsnapshot.gke.kubeflow.org/storage-config: "my-team-storage-config"
@@ -351,7 +355,7 @@ spec:
 Or patch an existing workspace from the CLI:
 
 ```bash
-kubectl -n team-a patch workspace my-workspace --type=merge -p '{
+kubectl -n kubeflow-user patch workspace my-workspace --type=merge -p '{
   "metadata": {
     "annotations": {
       "podsnapshot.gke.kubeflow.org/enabled": "true",
@@ -368,7 +372,7 @@ If you are creating a dedicated `WorkspaceKind` for your team, annotate the kind
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
-  name: jupyterlab-team-a
+  name: jupyterlab-resumable
   annotations:
     podsnapshot.gke.kubeflow.org/enabled: "true"
     podsnapshot.gke.kubeflow.org/storage-config: "my-team-storage-config"
