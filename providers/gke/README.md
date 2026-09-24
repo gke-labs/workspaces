@@ -2,20 +2,25 @@
 
 This directory contains the standalone deployment and access integration for **Kubeflow Workspaces (Notebooks v2)**, **Kubeflow Trainer (v2)**, and **Kubeflow Spark Operator** on Google Kubernetes Engine (GKE) **without depending on Istio**.
 
+> [!NOTE]
+> **Terminology & Scope: "Workspaces" and "Notebooks"**
+> The terms **workspaces** and **notebooks** are used interchangeably throughout this directory, scripts, manifests, and upstream Kubeflow. Legacy defaults and upstream API contracts retain the "notebooks" prefix (e.g. `CLUSTER_NAME="kubeflow-notebooks"`, `REPO_NAME="notebooks"`, `notebooks-gke-global`, and the upstream CRD label `notebooks.kubeflow.org/workspace-name`).
+>
+> Importantly, **the platform is not limited to Jupyter notebooks**. Through customizable `WorkspaceKind` resources, it natively supports browser-based VS Code (`codeserver`), remote desktop VS Code via token-minted connection URLs, autonomous AI agent sandboxes (with Model Context Protocol / MCP tooling), and distributed ML/data workloads (Kubeflow Trainer v2 and Apache Spark) across CPU, GPU, and TPU environments.
+
 ## Documentation & Quickstart Guide
 
 | Document | Purpose |
 | --- | --- |
-| **[USER_GUIDE.md](USER_GUIDE.md)** | **Step-by-Step Deployment Guide**: Complete manual & automated instructions with configuration options (custom domain vs. automatic `sslip.io` zero-DNS setup, Google-managed OAuth vs. custom OAuth), Kubeflow Trainer + Spark Operator installation, and running [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb). |
-| **[CODELAB.md](CODELAB.md)** | **Automated Quickstart & Pilot Record**: 5-step quickstart using the automation scripts (`deploy_standalone.sh`, `build_jupyterlab.sh`, `cleanup_standalone.sh`) plus the historical maintainer acceptance test record. |
+| **[USER_GUIDE.md](USER_GUIDE.md)** | **Step-by-Step Deployment Guide**: Complete manual & automated instructions with configuration options (custom domain vs. automatic `sslip.io` zero-DNS setup, Google-managed OAuth vs. custom OAuth), Kubeflow Trainer + Spark Operator installation, and running the distributed ML examples (see [`../../examples/README.md`](../../examples/README.md)). |
+| **[docs/gke-pilot-codelab.md](../../docs/gke-pilot-codelab.md)** | **Automated Quickstart & Pilot Record**: 5-step quickstart using the automation scripts (`deploy_standalone.sh` and `cleanup_standalone.sh`) plus the historical maintainer acceptance test record. |
 | **[DESIGN.md](DESIGN.md)** | **Architecture & Design**: Explains why this Istio-free approach was chosen, how the access proxy and signed IAP assertions work, and how browser and VS Code desktop endpoints are isolated. |
 
 ### Streamlined Automation Scripts
 - **[`deploy_standalone.sh`](deploy_standalone.sh)**: End-to-end deployment script that enables GKE APIs and standard Gateway API, installs `cert-manager`, builds/pushes core images, configures Google Certificate Manager (with automatic `sslip.io` fallback when no domain is provided), discovers the IAP backend audience, deploys Kubeflow Trainer (v2) and Kubeflow Spark Operator, configures tenant RBAC and baseline Pod Security, and sets up GCS Workload Identity IAM bindings.
-- **[`build_jupyterlab.sh`](build_jupyterlab.sh)**: Builds and pushes custom JupyterLab (CPU, GPU, TPU) and Spark 4.0.1 images (pre-bundled with `examples/distributed_tpu_example.ipynb`, `jax[tpu]`, `kubeflow[spark]`, and `google-cloud-storage`) and registers the `jupyterlab` `WorkspaceKind` and GPU/TPU `ComputeClasses`.
 - **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Tears down deployed tenant workloads, controllers, and optional edge resources.
 
-Browser JupyterLab works out-of-the-box with Google IAP authentication. An optional separate desktop endpoint supports Kubernetes-minted connection tokens for the standard VS Code Jupyter extension; see [VS Code Jupyter Extension](USER_GUIDE.md#7-vs-code-jupyter-extension-desktop-endpoint).
+Browser JupyterLab works out-of-the-box with Google IAP authentication. Optionally, a second `connect.*` endpoint lets the **VS Code app on your laptop** run notebooks against a kernel inside a running workspace, authorised by short-lived Kubernetes-minted tokens; see [Remote Jupyter kernels from desktop VS Code](USER_GUIDE.md#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint). (This is distinct from the `codeserver` WorkspaceKind, which runs VS Code *in the browser*.)
 
 ## Integration boundary
 
@@ -90,7 +95,7 @@ behavior based only on a version number. When upgrading the pinned upstream revi
   changing visibility. Do not silently fall back to listing all namespaces.
 
 Until then, the temporary endpoint, its tests, and this compatibility record belong
-entirely under `gke/`; no upstream source changes are required.
+entirely under `providers/gke/`; no upstream source changes are required.
 
 ## Local implementation
 
@@ -112,23 +117,26 @@ HTTP and WebSocket checks passed. Pin its base images by digest as part of relea
 packaging.
 
 The executable is `bin/access-proxy`; its command-line flags also accept these
-environment variables:
+environment variables. In a deployment nothing exports them by hand: the renderer
+writes them into the `gke-access-proxy` ConfigMap described under
+[Packaging and deployment gates](#packaging-and-deployment-gates), and
+`deploy_standalone.sh` supplies the values.
 
 | Variable | Required value |
 | --- | --- |
 | `PUBLIC_URL` | Exact public HTTPS origin, for example `https://notebooks.example.com`; no path |
-| `IAP_AUDIENCE` | `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`; both IDs numeric |
+| `IAP_AUDIENCE` | `/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`, with `PROJECT_NUMBER` and `SERVICE_ID` replaced by the numeric IDs discovered after the Gateway exists (see [Fail-closed IAP bootstrap](#fail-closed-iap-bootstrap)) |
 | `FRONTEND_URL` | Internal frontend HTTP(S) origin without a path |
 | `BACKEND_URL` | Internal backend HTTP(S) origin without a path |
 | `TENANT_NAMESPACES` | Explicit comma-separated namespace allowlist; no duplicates |
-| `DESKTOP_URL` | Optional separate HTTPS origin for connection-token access |
+| `DESKTOP_URL` | Optional separate HTTPS origin for connection-token access — the origin form of the hostname `deploy_standalone.sh` and the user guide call `DESKTOP_HOST`. Used by VS Code on a laptop, not by the in-browser `codeserver` WorkspaceKind |
 | `CONNECTION_TOKEN_DEFAULT_SECONDS` | Default requested lifetime; defaults to 86400 (24 hours) |
 | `CONNECTION_TOKEN_MAX_SECONDS` | Maximum requested lifetime; defaults to 604800 (7 days), configurable up to 2592000 (30 days) |
 
 Connection lifetimes are bounded by both administrator policy and Kubernetes'
 returned expiration. The tested GKE cluster shortened requests above two days to
 48 hours. Existing grants are not extended by configuration changes. See
-[lifetime configuration and kernel reconnection](USER_GUIDE.md#configure-connection-lifetimes)
+[lifetime configuration and kernel reconnection](USER_GUIDE.md#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint)
 before planning days- or weeks-long sessions.
 
 Use in-cluster credentials by default, or `--kubeconfig` for local integration
@@ -230,7 +238,7 @@ tags. Keep local configuration in the ignored `deployment.local.json` file.
 Neither the configuration nor the generated plan contains private keys or OAuth
 client secrets. Unknown JSON fields and invalid tenant/image values are rejected.
 
-From `gke/`, generate a new plan directory:
+From `providers/gke/`, generate a new plan directory:
 
 ```sh
 make plan CONFIG=deployment.local.json OUTPUT=rendered/initial
@@ -295,9 +303,9 @@ Before application, operators must provision or confirm:
   custom client ID and an existing Secret named by `iapSecretName` in
   `kubeflow-workspaces`, with the `client_secret` key. Use an approved
   secret-management workflow; never pass the secret through chat or commit it.
-  See [OAuth setup](CODELAB.md#4-prepare-google-login).
-4. Published images. Build the proxy from the `gke/` context and the frontend from
-  the repository root with `docker build -f gke/frontend.Dockerfile ...`.
+  See [OAuth setup](USER_GUIDE.md#option-b2-custom-oauth-client-external--cross-organization-users).
+4. Published images. Build the proxy from the `providers/gke/` context and the frontend from
+  the repository root with `docker build -f providers/gke/frontend.Dockerfile ...`.
   Build controller and backend from unchanged upstream sources. Review base-image
   digests and scan all images before publishing a release.
 5. Explicit IAP admission and least-privilege Kubernetes tenant bindings. Review
@@ -351,10 +359,10 @@ At upstream revision `24ce51e5`:
 - The frontend has a build-time `standalone` mode for use without the Kubeflow
   dashboard. Image packaging must select it without editing upstream files.
 
-References: [controller configuration](../workspaces/controller/cmd/main.go),
-[backend authentication](../workspaces/backend/internal/auth/authentication.go),
-[namespace endpoint](../workspaces/backend/api/namespaces_handler.go), and
-[frontend configuration](../workspaces/frontend/config/dotenv.js).
+References: [controller configuration](../../workspaces/controller/cmd/main.go),
+[backend authentication](../../workspaces/backend/internal/auth/authentication.go),
+[namespace endpoint](../../workspaces/backend/api/namespaces_handler.go), and
+[frontend configuration](../../workspaces/frontend/config/dotenv.js).
 
 ## Architecture choices
 

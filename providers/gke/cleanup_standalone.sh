@@ -19,23 +19,23 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DIST_DIR="${DIST_DIR:-/tmp/kubeflow-community-distribution}"
 
-export PROJECT="${PROJECT:-${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}}"
-export CLUSTER="${CLUSTER:-kubeflow-notebooks}"
+export PROJECT_ID="${PROJECT_ID:-${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}}"
+export CLUSTER_NAME="${CLUSTER_NAME:-${CLUSTER:-kubeflow-notebooks}}"
 export LOCATION="${LOCATION:-us-central1-c}"
 export TENANT_NAMESPACE="${TENANT_NAMESPACE:-team-a}"
 export ADDRESS_NAME="${ADDRESS_NAME:-notebooks-gke-global}"
 export CERTIFICATE_NAME="${CERTIFICATE_NAME:-notebooks-gke}"
 export CERTIFICATE_MAP="${CERTIFICATE_MAP:-notebooks-gke}"
-export CONTEXT="${CONTEXT:-gke_${PROJECT}_${LOCATION}_${CLUSTER}}"
-export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
+export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
 export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
 export DELETE_EDGE_RESOURCES="${DELETE_EDGE_RESOURCES:-false}"
 export DELETE_SNAPSHOT_BUCKET="${DELETE_SNAPSHOT_BUCKET:-false}"
 
 echo "=================================================================="
-echo "Cleaning up Standalone Kubeflow Workspaces on GKE (${CLUSTER})..."
+echo "Cleaning up Standalone Kubeflow Workspaces on GKE (${CLUSTER_NAME})..."
 echo "=================================================================="
 
 # 0. Remove Snapshot Mutating Webhook first so Workspace/Pod teardown is never intercepted
@@ -64,10 +64,10 @@ if [[ -d "${DIST_DIR}" ]]; then
   kubectl --context="${CONTEXT}" delete -k "${DIST_DIR}/applications/trainer/overlays" --ignore-not-found || true
 fi
 
-# 3. Remove WorkspaceKinds and ComputeClasses
+# 3. Remove WorkspaceKinds and example ComputeClasses
 kubectl --context="${CONTEXT}" delete workspacekind jupyterlab gke-jupyterlab jupyterlab-resumable codeserver --ignore-not-found || true
-if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then
-  kubectl --context="${CONTEXT}" delete -f "${SCRIPT_DIR}/manifests/compute-classes/" --ignore-not-found || true
+if [[ -d "${REPO_ROOT}/examples/compute-classes" ]]; then
+  kubectl --context="${CONTEXT}" delete -f "${REPO_ROOT}/examples/compute-classes/" --ignore-not-found || true
 fi
 
 # 4. Remove standalone edge and application resources
@@ -83,17 +83,19 @@ kubectl --context="${CONTEXT}" delete namespace notebooks-connections --ignore-n
 
 if [[ "${DELETE_SNAPSHOT_BUCKET}" == "true" ]]; then
   echo "Deleting GKE Pod Snapshot GCS bucket gs://${SNAPSHOT_GCS_BUCKET}..."
-  gcloud storage rm --recursive "gs://${SNAPSHOT_GCS_BUCKET}" --project="${PROJECT}" --quiet || true
+  gcloud storage rm --recursive "gs://${SNAPSHOT_GCS_BUCKET}" --project="${PROJECT_ID}" --quiet || true
 fi
 
 if [[ "${DELETE_EDGE_RESOURCES}" == "true" ]]; then
   echo "Deleting Certificate Manager certificate map and Global IP (${ADDRESS_NAME})..."
-  gcloud certificate-manager maps entries delete notebooks --map="${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
-  gcloud certificate-manager maps entries delete notebooks-desktop --map="${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
-  gcloud certificate-manager maps delete "${CERTIFICATE_MAP}" --project="${PROJECT}" --quiet || true
-  gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}" --project="${PROJECT}" --quiet || true
-  gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}-desktop" --project="${PROJECT}" --quiet || true
-  gcloud compute addresses delete "${ADDRESS_NAME}" --global --project="${PROJECT}" --quiet || true
+  for entry in $(gcloud certificate-manager maps entries list --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --format='value(name)' 2>/dev/null || true); do
+    entry_id=$(basename "${entry}")
+    gcloud certificate-manager maps entries delete "${entry_id}" --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --quiet || true
+  done
+  gcloud certificate-manager maps delete "${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --quiet || true
+  gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}" --project="${PROJECT_ID}" --quiet || true
+  gcloud certificate-manager certificates delete "${CERTIFICATE_NAME}-desktop" --project="${PROJECT_ID}" --quiet || true
+  gcloud compute addresses delete "${ADDRESS_NAME}" --global --project="${PROJECT_ID}" --quiet || true
 fi
 
 echo "=================================================================="

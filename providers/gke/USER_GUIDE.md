@@ -13,7 +13,7 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 
 ## Architecture Comparison & Document Guide
 
-| Feature | Standalone GKE Deployment (`gke-notebook/gke`) | Community Distribution (`kubeflow-notebooks/gke`) |
+| Feature | Standalone GKE Deployment (`providers/gke`) | Community Distribution (`kubeflow/community-distribution`) |
 | --- | --- | --- |
 | **Service Mesh / Ingress** | **No Istio** — Native GKE Gateway API (`gke-l7-global-external-managed`) | Istio IngressGateway + Istio CNI + mTLS sidecars |
 | **Public HTTPS / TLS** | Google Certificate Manager (Load Balancer Authorization) | `cert-manager` + Let's Encrypt ACME HTTP-01 solver |
@@ -23,18 +23,25 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 
 > [!TIP]
 > **Which document should I read?**
-> - **[USER_GUIDE.md](USER_GUIDE.md) (this document)**: The authoritative, step-by-step customer deployment guide with configuration options (domain vs. `sslip.io`, Google-managed OAuth vs. custom OAuth), distributed Spark + TPU setup, and VS Code desktop connection instructions.
-> - **[CODELAB.md](CODELAB.md)**: A streamlined quickstart walkthrough using the automation scripts (`deploy_standalone.sh`, `build_jupyterlab.sh`, `cleanup_standalone.sh`) along with the historical pilot verification record.
+> - **[USER_GUIDE.md](USER_GUIDE.md) (this document)**: The authoritative, step-by-step deployment guide for the core standalone platform: configuration options (domain vs. `sslip.io`, Google-managed OAuth vs. custom OAuth), stateful pause & resume, and how to attach desktop VS Code to a remote Jupyter kernel running in the cluster.
+> - **[docs/gke-pilot-codelab.md](../../docs/gke-pilot-codelab.md)**: A streamlined quickstart walkthrough using the automation scripts (`deploy_standalone.sh` and `cleanup_standalone.sh`) along with the historical pilot verification record.
 > - **[DESIGN.md](DESIGN.md)**: Detailed security architecture and trade-offs of the Istio-free access proxy.
 
 ### Automated Deployment Scripts
 To streamline the entire installation, use the scripts in this directory:
 - **[`deploy_standalone.sh`](deploy_standalone.sh)**: Automates API enablement, Gateway controller setup, `cert-manager` installation, core image builds, Certificate Manager setup (with automatic `sslip.io` fallback if you don't have a domain), IAP audience discovery, Kubeflow Trainer + Spark Operator installation, tenant RBAC, and GCS Workload Identity IAM bindings.
-- **[`build_jupyterlab.sh`](build_jupyterlab.sh)**: Builds and pushes custom JupyterLab (CPU, GPU, TPU) and Spark 4.0.1 images (bundled with `examples/distributed_tpu_example.ipynb`) and registers the `jupyterlab` `WorkspaceKind` and GPU/TPU `ComputeClasses`.
-- **[`deploy_agent_sandbox.sh`](deploy_agent_sandbox.sh)**: Deploys the Kubernetes Agent Sandbox operator, aggregated RBAC, Vertex AI / Gemini Workload Identity, tenant `SandboxWarmPool`, and in-cluster MCP server for autonomous AI coding agents in VS Code.
 - **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Cleanly tears down deployed resources.
 
 ---
+
+
+## Where things live
+
+| Directory | Purpose |
+| --- | --- |
+| `providers/gke/` (this directory) | The core standalone deployment only: [`deploy_standalone.sh`](deploy_standalone.sh), [`cleanup_standalone.sh`](cleanup_standalone.sh), the Go sources (`cmd/`, `internal/`), the Dockerfiles for the five platform images, [`manifests/`](manifests/) (`pilot`, `proxy`, `snapshot`, `tenant`, `upstream`), [`scripts/`](scripts/), and the [`Makefile`](Makefile). |
+| [`images/`](../../images/README.md) | Custom workspace container images (JupyterLab, in-browser VS Code via `codeserver-python`, Spark, Agent Sandbox MCP server), the [`build.sh`](../../images/build.sh) builder, sample notebooks, and ready-made `WorkspaceKind` templates in [`images/workspacekinds/`](../../images/workspacekinds/). (`codeserver-python` is the *image* name; the `WorkspaceKind` it backs is named **`codeserver`**.) |
+| [`examples/`](../../examples/README.md) | End-to-end examples: [`distributed/`](../../examples/distributed/) (Spark ETL + TPU training), [`resumable-notebooks/`](../../examples/resumable-notebooks/) (stateful pause & resume), [`agent-sandbox/`](../../examples/agent-sandbox/), and [`compute-classes/`](../../examples/compute-classes/) (GPU / TPU ComputeClasses). |
 
 ## 1. Prerequisites & Cluster Setup
 
@@ -46,24 +53,39 @@ Ensure the following tools are installed on your workstation:
 - `go` (v1.25+)
 - `jq`, `curl`, `sha256sum`, `envsubst` (from `gettext`)
 
+### GCP Organization Policy: External Load Balancer Permission
+The standalone architecture uses the GKE Gateway API (`gke-l7-global-external-managed` GatewayClass), which creates a Google Cloud Global External Application Load Balancer (`GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS`).
+
+If your GCP project is governed by organization policies (common in corporate and enterprise GCP environments), verify that the organization policy constraint `constraints/compute.restrictLoadBalancerCreationForTypes` permits external HTTP/HTTPS load balancers:
+
+```bash
+gcloud resource-manager org-policies describe compute.restrictLoadBalancerCreationForTypes \
+  --project="${PROJECT_ID}" --effective
+```
+
+- If `allValues: ALLOW` or `allowedValues` includes `GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS`, your project is ready.
+- If the effective policy restricts creation to internal load balancer types (such as `INTERNAL_HTTP_HTTPS` and `INTERNAL_TCP_UDP`), the GKE Gateway controller will be blocked from creating the forwarding rule and report:
+  `Constraint constraints/compute.restrictLoadBalancerCreationForTypes violated for projects/... Forwarding Rule ... of type GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS is not allowed.`
+- **Remediation**: Request an organization policy exemption for your project (e.g., via your organization's policy administrator, or Google-internally via [go/overground-quickstart#project-level](http://go/overground-quickstart#project-level) / [go/gcp-control-gclb](http://go/gcp-control-gclb)) to allow `GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS`, or deploy into an already-exempted project/folder (such as projects under `teams/gke/dev/dev_projects`).
+
 ### Create or Select a GKE Cluster
 You need a VPC-native GKE cluster with **Dataplane V2** (`ADVANCED_DATAPATH`), **Workload Identity Federation for GKE**, **HTTP Load Balancing**, **GCE Persistent Disk CSI Driver**, and **Gateway API (`--gateway-api=standard`)** enabled.
 
 If you do not have a cluster yet, create one using `gcloud`:
 
 ```bash
-export PROJECT="your-gcp-project-id"
-export CLUSTER="kubeflow-notebooks"
+export PROJECT_ID="your-gcp-project-id"
+export CLUSTER_NAME="kubeflow-notebooks"
 export LOCATION="us-central1-c"   # Zone or region where you have TPU / GPU quota
 export REGION="us-central1"       # Region for Artifact Registry and GCS bucket
 
-gcloud container clusters create "${CLUSTER}" \
-  --project="${PROJECT}" \
+gcloud container clusters create "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" \
   --location="${LOCATION}" \
   --enable-pod-snapshots `# Required for Pause & Resume` \
   --enable-dataplane-v2 `# Required: Enforces Kubernetes NetworkPolicies` \
   --gateway-api=standard `# Required: Enables GKE Gateway API controller` \
-  --workload-pool="${PROJECT}.svc.id.goog" `# Required: Enables Workload Identity for GCS access` \
+  --workload-pool="${PROJECT_ID}.svc.id.goog" `# Required: Enables Workload Identity for GCS access` \
   --workload-metadata=GKE_METADATA \
   --addons=HttpLoadBalancing,GcePersistentDiskCsiDriver,GcsFuseCsiDriver \
   --num-nodes=1 \
@@ -72,8 +94,8 @@ gcloud container clusters create "${CLUSTER}" \
 
 # Optional: Create an autoscaling CPU node pool for Spark executors and inference pods
 gcloud container node-pools create cpu-autoscaling-pool \
-  --cluster="${CLUSTER}" \
-  --project="${PROJECT}" \
+  --cluster="${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" \
   --location="${LOCATION}" \
   --image-type=cos_containerd `# Required for Pause & Resume` \
   --sandbox type=gvisor `# Required for Pause & Resume` \
@@ -84,34 +106,78 @@ gcloud container node-pools create cpu-autoscaling-pool \
 ```
 
 ### Set Environment Variables
-Run all commands from the root of the repository (`gke-notebook/`). Export your deployment variables:
+Run all commands from the root of the repository. Export your deployment variables:
 
 ```bash
 set -euo pipefail
-export PROJECT="your-gcp-project-id"
-export PROJECT_ID="${PROJECT}"
-export CLUSTER="kubeflow-notebooks"
+export REPO_ROOT="$(pwd)"                         # Root of this repository
+export PROJECT_ID="your-gcp-project-id"
+export CLUSTER_NAME="kubeflow-notebooks"
 export LOCATION="us-central1-c"
 export REGION="us-central1"
 export PILOT_USERS="user1@example.com,user2@example.com" # Comma- or space-separated Google account emails of users
 export TENANT_NAMESPACE="team-a"                  # Example tenant namespace for notebooks & jobs
-export REPOSITORY="notebooks"                     # Artifact Registry repository name
+export REPO_NAME="notebooks"                      # Artifact Registry repository name
 export ADDRESS_NAME="notebooks-gke-global"        # Global static external IP name
 export CERTIFICATE_NAME="notebooks-gke"
 export CERTIFICATE_MAP="notebooks-gke"
-export CONTEXT="gke_${PROJECT}_${LOCATION}_${CLUSTER}"
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}"
+export CONTEXT="gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}"
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 export TAG="pilot-$(date -u +%Y%m%d%H%M%S)"
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"              # Shared GCS bucket for distributed_tpu_example.ipynb (Spark ETL & TPU data)
+export BUILD_IMAGES="true"                        # Build & push the five core platform images
+export INSTALL_TRAINER="true"
+export INSTALL_SPARK_OPERATOR="true"
+export APPLY_SAMPLE_WORKSPACEKIND="true"
+export SAMPLE_WORKSPACEKIND="${REPO_ROOT}/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml"
 export SNAPSHOT_GCS_BUCKET="${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GCS bucket for GKE Pod Snapshots (stateful Pause/Resume)
 ```
+
+#### Environment Variable Reference
+
+Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its default:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PROJECT_ID` | `gcloud config get-value project` | GCP project ID. **Required** — the script exits if empty. (Legacy alias: `PROJECT`). |
+| `PILOT_USERS` | *(empty)* | Comma- or space-separated Google account emails to admit via IAP + RBAC. **Required** — the script exits if empty. Falls back to `PILOT_USER`. |
+| `CLUSTER_NAME` | `kubeflow-notebooks` | GKE cluster name. (Legacy alias: `CLUSTER`). |
+| `LOCATION` | `us-central1-c` | Cluster zone or region. |
+| `REGION` | `us-central1` | Region for Artifact Registry, the snapshot GCS bucket, and `REGISTRY`. |
+| `TENANT_NAMESPACE` | `team-a` | Tenant namespace for Workspaces and jobs. |
+| `REPO_NAME` | `notebooks` | Artifact Registry Docker repository name. (Legacy alias: `REPOSITORY`). |
+| `ADDRESS_NAME` | `notebooks-gke-global` | Name of the reserved global external IPv4 address. |
+| `CERTIFICATE_NAME` | `notebooks-gke` | Certificate Manager certificate for `WORKSPACES_HOST`. The desktop certificate is always `${CERTIFICATE_NAME}-desktop`. |
+| `CERTIFICATE_MAP` | `notebooks-gke` | Certificate Manager map attached to the Gateway. |
+| `CONTEXT` | `gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}` | kubectl context. |
+| `REGISTRY` | `${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}` | Destination registry for the core images. |
+| `TAG` | `pilot-$(date -u +%Y%m%d%H%M%S)` | Image tag. When `BUILD_IMAGES=false` and `TAG` is unset, the script resolves the newest existing `gke-access-proxy` tag instead. |
+| `WORKSPACES_HOST` | *(empty)* | **Hostname #1 — the web dashboard.** Where users browse the Workspaces UI and open workspaces. When empty, defaults to `notebooks.<ADDRESS>.sslip.io`. Set this to your own domain — see [Option A2](#option-a2-what-to-do-if-you-have-your-own-custom-domain). |
+| `DESKTOP_HOST` | *(empty)* | **Hostname #2 — the remote-kernel endpoint.** A second, cluster-wide hostname on the *same* IP, used by the Jupyter extension in **VS Code running on your laptop** to reach a Jupyter kernel inside an already-running JupyterLab workspace. Not related to the `codeserver` WorkspaceKind, and not per-workspace. When empty, defaults to `connect.<ADDRESS>.sslip.io`. See [Section 8](#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint). |
+| `OAUTH_FILE` | *(empty)* | Path to a downloaded Web-application OAuth client JSON. Set only for Option B2. |
+| `IAP_CLIENT_ID` | *(empty)* | OAuth client ID. Leave empty for Google-managed OAuth. Derived from `OAUTH_FILE` when that is set. |
+| `IAP_SECRET_NAME` | *(empty)* | Kubernetes Secret holding the OAuth client secret. Defaults to `iap-oauth` when `OAUTH_FILE` is set. |
+| `INSTALL_TRAINER` | `true` | Deploy Kubeflow Trainer (v2). |
+| `INSTALL_SPARK_OPERATOR` | `true` | Deploy Kubeflow Spark Operator. |
+| `BUILD_IMAGES` | `true` | Build & push the five core platform images (Section 3). |
+| `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the upstream sample `jupyterlab` WorkspaceKind after tenant RBAC is applied. |
+| `SAMPLE_WORKSPACEKIND` | `<repo-root>/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml` | Path to the WorkspaceKind applied when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
+| `KUBE_CLIENT_QPS` | `100` | Kubernetes client QPS for `gke-access-proxy`. |
+| `KUBE_CLIENT_BURST` | `200` | Kubernetes client burst for `gke-access-proxy`. |
+| `SNAPSHOT_GCS_BUCKET` | `${TENANT_NAMESPACE}-snapshots-bucket` | Dedicated GCS bucket for GKE Pod Snapshots. |
+| `SNAPSHOT_RETENTION_DAYS` | `14` | Age (days) for the GCS Object Lifecycle `Delete` rule on the snapshot bucket. |
+| `CONTROL_PLANE_CIDR` | `<control-plane-ip>/32` (auto-discovered) | CIDR allowed to reach the admission webhooks. |
+| `SKIP_ORG_POLICY_CHECK` | `false` | When `true`, skips the preflight check for `constraints/compute.restrictLoadBalancerCreationForTypes`. |
+| `DIST_DIR` | `/tmp/kubeflow-community-distribution` | Local clone of `kubeflow/community-distribution`. |
+
+> [!NOTE]
+> [`cleanup_standalone.sh`](cleanup_standalone.sh) reads `PROJECT_ID`, `CLUSTER_NAME`, `LOCATION`, `TENANT_NAMESPACE`, `ADDRESS_NAME`, `CERTIFICATE_NAME`, `CERTIFICATE_MAP`, `CONTEXT`, `SNAPSHOT_GCS_BUCKET`, and `DIST_DIR`, plus two of its own: `DELETE_EDGE_RESOURCES` (default `false`) and `DELETE_SNAPSHOT_BUCKET` (default `false`).
 
 Authenticate `kubectl` to your cluster:
 
 ```bash
-gcloud container clusters get-credentials "${CLUSTER}" \
+gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --location="${LOCATION}" \
-  --project="${PROJECT}"
+  --project="${PROJECT_ID}"
 ```
 
 ---
@@ -174,8 +240,8 @@ echo "CONTROL_PLANE_CIDR: ${CONTROL_PLANE_CIDR}"
 Create the Docker repository in Artifact Registry if it does not exist:
 
 ```bash
-gcloud artifacts repositories create "${REPOSITORY}" \
-  --project="${PROJECT}" \
+gcloud artifacts repositories create "${REPO_NAME}" \
+  --project="${PROJECT_ID}" \
   --location="${REGION}" \
   --repository-format=docker || true
 ```
@@ -184,13 +250,13 @@ gcloud artifacts repositories create "${REPOSITORY}" \
 `cert-manager` issues internal TLS certificates for the admission webhooks used by Kubeflow Workspaces, Trainer, and Spark Operator. Install `cert-manager` v1.21.2 if not already present:
 
 ```bash
-mkdir -p gke/bin
+mkdir -p providers/gke/bin
 curl -fsSL https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml \
-  -o gke/bin/cert-manager-v1.21.2.yaml
+  -o providers/gke/bin/cert-manager-v1.21.2.yaml
 printf '%s  %s\n' e03b668ec8675214af6b0a671699d088f2601fa3878e0dbe1b41d3feafd1879f \
-  gke/bin/cert-manager-v1.21.2.yaml | sha256sum --check
+  providers/gke/bin/cert-manager-v1.21.2.yaml | sha256sum --check
 kubectl --context="${CONTEXT}" apply --server-side \
-  --field-manager=notebooks-gke-platform -f gke/bin/cert-manager-v1.21.2.yaml
+  --field-manager=notebooks-gke-platform -f providers/gke/bin/cert-manager-v1.21.2.yaml
 
 for component in cert-manager cert-manager-webhook cert-manager-cainjector; do
   kubectl --context="${CONTEXT}" -n cert-manager rollout status \
@@ -200,40 +266,38 @@ done
 
 ---
 
-## 3. Build & Push Application & Custom JupyterLab/Spark Images
+## 3. Build & Push Application Images
 
 ### Step 3.1: Build & Push Standalone Workspaces Core Images
-Build and push the four standalone core images (`gke-access-proxy`, `gke-frontend`, `gke-controller`, `gke-backend`) and pin their registry digests:
+Build and push the five standalone core platform images (`gke-access-proxy`, `gke-snapshot-addon`, `gke-frontend`, `gke-controller`, `gke-backend`) and pin their registry digests. This is exactly what Step 3 of [`deploy_standalone.sh`](deploy_standalone.sh) does when `BUILD_IMAGES=true`:
 
 ```bash
-make -C gke test
+make -C providers/gke test
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
 
-docker build --platform=linux/amd64 -t "${REGISTRY}/gke-access-proxy:${TAG}" gke
-docker build --platform=linux/amd64 -f gke/frontend.Dockerfile \
+docker build --platform=linux/amd64 -t "${REGISTRY}/gke-access-proxy:${TAG}" providers/gke
+docker build --platform=linux/amd64 -f providers/gke/snapshot.Dockerfile \
+  -t "${REGISTRY}/gke-snapshot-addon:${TAG}" providers/gke
+docker build --platform=linux/amd64 -f providers/gke/frontend.Dockerfile \
   -t "${REGISTRY}/gke-frontend:${TAG}" .
 docker build --platform=linux/amd64 -f workspaces/controller/Dockerfile \
   -t "${REGISTRY}/gke-controller:${TAG}" workspaces/controller
 docker build --platform=linux/amd64 -f workspaces/backend/Dockerfile \
   -t "${REGISTRY}/gke-backend:${TAG}" workspaces
 
-for component in access-proxy frontend controller backend; do
+for component in access-proxy snapshot-addon frontend controller backend; do
   docker push "${REGISTRY}/gke-${component}:${TAG}"
 done
 ```
 
-### Step 3.2: Build & Push Custom JupyterLab & Spark Images for `distributed_tpu_example.ipynb`
-To run the distributed Spark ETL and Cloud TPU training workflow in [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb), build the custom JupyterLab (CPU, GPU, TPU) and Spark 4.0.1 images using [`gke/build_jupyterlab.sh`](build_jupyterlab.sh):
+> [!NOTE]
+> `make -C providers/gke test` (`go test -race ./... && go vet ./...`) is not run by `deploy_standalone.sh`; it is an optional pre-flight check.
 
-```bash
-PROJECT_ID="${PROJECT}" \
-REGION="${REGION}" \
-REPO_NAME="${REPOSITORY}" \
-TENANT_NAMESPACE="${TENANT_NAMESPACE}" \
-GCS_BUCKET="${GCS_BUCKET}" \
-  bash gke/build_jupyterlab.sh
-```
-*(Tip: Add `--cloud-build` to build remotely via Google Cloud Build instead of local Docker.)*
+### Step 3.2: Build Optional Custom Workspace Images
+
+Custom workspace images (JupyterLab, in-browser VS Code via `codeserver-python`, Spark, and the Agent Sandbox MCP server) are **not** built by `deploy_standalone.sh` and are not required for the core deployment. Instead, the core deployment optionally registers a sample WorkspaceKind that uses public `ghcr.io/kubeflow` images.
+
+If you want to build the custom images for the examples, use [`../../images/build.sh`](../../images/build.sh) and follow [`../../images/README.md`](../../images/README.md). Ready-made `WorkspaceKind` templates for those images live in [`../../images/workspacekinds/`](../../images/workspacekinds/).
 
 ---
 
@@ -253,11 +317,11 @@ sequenceDiagram
     participant Proxy as gke-access-proxy
 
     Note over GW,CM: 1. Global External IP reserved & Certificate Map attached to Gateway
-    User->>DNS: Resolve NOTEBOOK_HOST (e.g. notebooks.<IP>.sslip.io)
+    User->>DNS: Resolve WORKSPACES_HOST (e.g. notebooks.<IP>.sslip.io)
     DNS-->>User: Returns Global External IP (<ADDRESS>)
     CM->>GW: Verify Load Balancer Authorization via Global IP
     CM-->>GW: Activate Public TLS Certificate (ACTIVE)
-    User->>GW: HTTPS GET https://<NOTEBOOK_HOST>/workspaces/
+    User->>GW: HTTPS GET https://<WORKSPACES_HOST>/workspaces/
     GW->>IAP: Authenticate User via Google Login (OAuth)
     IAP->>Proxy: Forward request + signed x-goog-iap-jwt-assertion header
     Proxy->>Proxy: Verify IAP JWT signature & Kubernetes SubjectAccessReview RBAC
@@ -276,7 +340,20 @@ export ADDRESS=$(gcloud compute addresses describe "${ADDRESS_NAME}" \
 echo "Reserved Global External IP: ${ADDRESS}"
 ```
 
-Now choose **Option A1 (No Domain)** or **Option A2 (Custom Domain)**:
+Now choose **Option A1 (No Domain)** or **Option A2 (Custom Domain)**.
+
+> [!IMPORTANT]
+> **This deployment uses two hostnames, both pointing at the one IP you just reserved.**
+>
+> | Variable | What it serves | Who talks to it |
+> | --- | --- | --- |
+> | `WORKSPACES_HOST` | The Workspaces web dashboard and in-browser workspaces | Users, in a browser |
+> | `DESKTOP_HOST` | The remote-kernel endpoint ([Section 8](#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint)) | The Jupyter extension in VS Code on a user's laptop |
+>
+> `deploy_standalone.sh` always provisions **both**, each with its own TLS
+> certificate. If you set only `WORKSPACES_HOST`, your dashboard will be on your
+> domain while the remote-kernel endpoint silently stays on `sslip.io`. That works,
+> but it is rarely what you want. Set both, or neither.
 
 ---
 
@@ -284,51 +361,73 @@ Now choose **Option A1 (No Domain)** or **Option A2 (Custom Domain)**:
 If you do not own a domain name or want an instant, zero-DNS setup, use **[sslip.io](https://sslip.io/)**. Any hostname of the form `notebooks.<IP>.sslip.io` automatically resolves to `<IP>` on public DNS without any configuration:
 
 ```bash
-export NOTEBOOK_HOST="notebooks.${ADDRESS}.sslip.io"
-echo "Using automatic sslip.io hostname: ${NOTEBOOK_HOST}"
+export WORKSPACES_HOST="notebooks.${ADDRESS}.sslip.io"
+export DESKTOP_HOST="connect.${ADDRESS}.sslip.io"
+echo "Dashboard:      ${WORKSPACES_HOST}"
+echo "Remote kernels: ${DESKTOP_HOST}"
 
 # Verify public DNS resolution
-getent ahostsv4 "${NOTEBOOK_HOST}"
+getent ahostsv4 "${WORKSPACES_HOST}"
+getent ahostsv4 "${DESKTOP_HOST}"
 ```
 
-*(Note: When running `./gke/deploy_standalone.sh`, if `NOTEBOOK_HOST` is left unset, the script automatically configures `notebooks.${ADDRESS}.sslip.io` for you.)*
+*(Note: when running `./providers/gke/deploy_standalone.sh`, leaving **both** variables unset produces exactly these two values. You do not need to export anything for this option.)*
 
 ---
 
 #### Option A2: What To Do If You Have Your Own Custom Domain
-If you own a custom domain (e.g., `notebooks.example.com`):
-1. Set your desired hostname:
+If you own a custom domain (e.g., `example.com`):
+
+1. Set **both** hostnames:
    ```bash
-   export NOTEBOOK_HOST="notebooks.example.com"
+   export WORKSPACES_HOST="workspaces.example.com"
+   export DESKTOP_HOST="connect.example.com"
    ```
-2. In your DNS provider (Cloud DNS, Route 53, Cloudflare, etc.), create an **A record**:
-   - **Name / Host**: `notebooks` (for `notebooks.example.com`)
-   - **Type**: `A`
-   - **Value**: `${ADDRESS}` (your reserved global external IP)
-   - **TTL**: `300` seconds
-   *(If using Cloudflare, set proxy status to **DNS only / grey cloud**).*
-3. Verify public DNS resolves to `${ADDRESS}` before continuing:
+   The names are yours to choose; only the variables matter. If you do not intend
+   to use desktop VS Code at all, still set `DESKTOP_HOST` to a name on your domain —
+   the script provisions a certificate for it either way, and leaving it unset
+   pins that certificate to an `sslip.io` name you do not control.
+
+2. In your DNS provider (Cloud DNS, Route 53, Cloudflare, etc.), create **two A records**, both pointing at the same IP:
+
+   | Name / Host | Type | Value | TTL |
+   | --- | --- | --- | --- |
+   | `workspaces` | `A` | `${ADDRESS}` | `300` |
+   | `connect` | `A` | `${ADDRESS}` | `300` |
+
+   *(If using Cloudflare, set proxy status to **DNS only / grey cloud** for both.)*
+
+3. Verify **both** resolve to `${ADDRESS}` before continuing — certificate issuance
+   fails if they do not:
    ```bash
-   dig +short "${NOTEBOOK_HOST}"
+   dig +short "${WORKSPACES_HOST}"
+   dig +short "${DESKTOP_HOST}"
    ```
 
 ---
 
 #### Step 4A.2: Create Google Certificate Manager Certificate & Map Entry
-Once `NOTEBOOK_HOST` is set (via either Option A1 or Option A2), create the Certificate Manager certificate and certificate map entry:
+Once `WORKSPACES_HOST` is set (via either Option A1 or Option A2), create the Certificate Manager certificate and certificate map entry:
 
 ```bash
 gcloud certificate-manager certificates create "${CERTIFICATE_NAME}" \
-  --domains="${NOTEBOOK_HOST}" --project="${PROJECT}"
+  --domains="${WORKSPACES_HOST}" --project="${PROJECT}"
 
 gcloud certificate-manager maps create "${CERTIFICATE_MAP}" --project="${PROJECT}"
 
 gcloud certificate-manager maps entries create notebooks \
   --map="${CERTIFICATE_MAP}" --certificates="${CERTIFICATE_NAME}" \
-  --hostname="${NOTEBOOK_HOST}" --project="${PROJECT}"
+  --hostname="${WORKSPACES_HOST}" --project="${PROJECT}"
 ```
 > [!NOTE]
 > Because this certificate uses Load Balancer Authorization (no DNS challenge required), it will remain in `PROVISIONING` state until Step 5 creates the GKE Gateway and attaches the certificate map. Do **not** wait for `ACTIVE` before continuing to Step 5.
+
+> [!IMPORTANT]
+> The commands above cover **only** `WORKSPACES_HOST`. The second certificate
+> (`${CERTIFICATE_NAME}-desktop`) and its `notebooks-desktop` map entry, which serve
+> `DESKTOP_HOST`, are created in [Step 8.1](#step-81-enable-the-desktop-endpoint).
+> `deploy_standalone.sh` creates both in one pass; if you are following this guide
+> manually and never reach Section 8, you simply will not have a remote-kernel endpoint.
 
 ---
 
@@ -342,7 +441,7 @@ Identity-Aware Proxy (IAP) authenticates users with Google accounts. Choose **Op
 | **External Google accounts (`@gmail.com`) or users outside the GCP project's organization** | **Option B2: Custom OAuth Client** (Dedicated Web Application OAuth client + Secret) |
 
 #### Option B1: Google-Managed OAuth (Users Within Your GCP Organization)
-If the Google accounts signing in belong to the same Google Cloud Organization that owns `${PROJECT}`, leave both `IAP_CLIENT_ID` and `IAP_SECRET_NAME` empty:
+If the Google accounts signing in belong to the same Google Cloud Organization that owns `${PROJECT_ID}`, leave both `IAP_CLIENT_ID` and `IAP_SECRET_NAME` empty:
 
 ```bash
 export IAP_CLIENT_ID=""
@@ -351,17 +450,27 @@ export IAP_SECRET_NAME=""
 *(Skip directly to Section 5.)*
 
 #### Option B2: Custom OAuth Client (External / Cross-Organization Users)
-Google-managed OAuth only allows users inside the project's organization. If your users are external (e.g., `@gmail.com` or from a different organization):
-1. Open [Google Auth Platform Branding](https://console.cloud.google.com/auth/branding) in your project and configure the app name and support email.
-2. If using External testing mode, add the emails in `${PILOT_USERS}` to the **Test users** list.
-3. Open [Google Auth Platform Clients](https://console.cloud.google.com/auth/clients), create a **Web application** OAuth client named **Notebooks GKE**, and download the JSON file to a private location (e.g. `~/oauth-client.json`).
-4. Edit the OAuth client in the Cloud Console and add the exact **Authorized redirect URI** (substituting your `CLIENT_ID`):
-   ```
-   https://iap.googleapis.com/v1/oauth/clientIds/CLIENT_ID:handleRedirect
-   ```
-5. Export `IAP_CLIENT_ID` and `IAP_SECRET_NAME`:
+Google-managed OAuth only permits users whose accounts belong to the project's own Google Cloud Organization (for example, if the project is in `my-org.net`, only `@my-org.net` accounts can sign in; `@google.com`, `@gmail.com`, or other domains will receive an IAP `You don't have access` error).
+
+If your users are external to the project's organization, configure a custom OAuth client:
+1. Open [Google Auth Platform > Branding / Consent](https://console.cloud.google.com/auth/branding) in your GCP project and configure the app name (e.g. `Kubeflow Workspaces`) and support email.
+2. Under **Audience** (User type: External), add the emails in `${PILOT_USERS}` to the **Test users** list.
+3. Open [Google Auth Platform > Clients](https://console.cloud.google.com/auth/clients) and click **Create Client**:
+   - Application type: **Web application**
+   - Name: `Notebooks GKE`
+   - Leave *Authorized redirect URIs* empty for now and click **Create**.
+4. In the pop-up modal, copy the newly generated **Client ID** (it is prefixed with your project number, e.g. `<project-number>-<hash>.apps.googleusercontent.com`).
+5. Click the pencil icon to **Edit** the newly created client:
+   - Under **Authorized redirect URIs**, click **+ Add URI** and paste the exact IAP callback URI with your Client ID:
+     ```
+     https://iap.googleapis.com/v1/oauth/clientIds/<YOUR_CLIENT_ID>:handleRedirect
+     ```
+     *(Example: `https://iap.googleapis.com/v1/oauth/clientIds/97289666241-abc123xyz.apps.googleusercontent.com:handleRedirect`)*
+   - Click **Save**.
+6. Click **Download JSON** on the client and save it to a secure location (e.g. `~/oauth-client.json`).
+7. Export `OAUTH_FILE` before deploying:
    ```bash
-   export OAUTH_FILE="/absolute/private/path/oauth-client.json"
+   export OAUTH_FILE="$HOME/oauth-client.json"
    chmod 600 "${OAUTH_FILE}"
    export IAP_CLIENT_ID=$(jq -er '.web.client_id' "${OAUTH_FILE}")
    export IAP_SECRET_NAME="iap-oauth"
@@ -372,17 +481,39 @@ Google-managed OAuth only allows users inside the project's organization. If you
 ## 5. Step-by-Step Deployment
 
 > [!TIP]
-> **Automated Execution**: You can execute all of Section 5 automatically by running:
+> **Automated Execution**: You can execute the entire deployment automatically by running:
 > ```bash
-> ./gke/deploy_standalone.sh
+> ./providers/gke/deploy_standalone.sh
 > ```
 > Or follow the individual steps below to inspect and apply each stage manually.
+
+#### How this guide maps to the script's nine steps
+
+[`deploy_standalone.sh`](deploy_standalone.sh) is organised into nine numbered steps. They are spread across this guide as follows:
+
+| Script step | Guide section |
+| --- | --- |
+| 1. Enable GCP APIs, GKE Gateway controller, Artifact Registry repository | [Section 2.1](#step-21-enable-google-cloud-apis), [2.2](#step-22-enable--verify-gke-gateway-api-controller), [2.4](#step-24-create-artifact-registry-repository) |
+| 2. Install cert-manager v1.21.2 | [Section 2.5](#step-25-install-cert-manager-v1212) |
+| 3. Build & push the five core platform images | [Section 3.1](#step-31-build--push-standalone-workspaces-core-images) |
+| 4. Reserve global external IP, resolve hostnames, create Certificate Manager certificates/map, create the GKE-node-tagged GCLB health-check firewall rule | [Section 4 Part A](#part-a-domain--tls-certificate-configuration-options) |
+| 5. Render & apply the fail-closed bootstrap plan | [Step 5.1](#step-51-generate-deployment-plan--apply-fail-closed-bootstrap) |
+| 6. Discover the IAP backend audience & finalize the access proxy | [Step 5.2](#step-52-discover-iap-backend-audience--finalize-access-proxy) |
+| 7. Deploy Kubeflow Trainer (v2) & Spark Operator | [Step 5.3](#step-53-deploy-kubeflow-trainer-v2--kubeflow-spark-operator-standalone-no-istio) |
+| 8. Admit users via IAP, apply tenant RBAC, register the sample WorkspaceKind | [Step 5.4](#step-54-admit-users-via-iap--configure-tenant-workspace-tenant_namespace) |
+| 9. Create the snapshot GCS bucket, Workload Identity IAM bindings & lifecycle rule | [Step 7.1](#step-71-configure-snapshot_gcs_bucket-iam-workload-identity--gke-service-agent--lifecycle-rule) |
+
+> [!NOTE]
+> Script Step 4 also creates the **desktop** certificate `${CERTIFICATE_NAME}-desktop` and its `notebooks-desktop` map entry unconditionally. This guide covers those in [Section 8.1](#step-81-enable-the-desktop-endpoint); if you follow Section 4 manually and skip Section 8, you simply will not have a desktop endpoint.
+
 
 ### Step 5.1: Generate Deployment Plan & Apply Fail-Closed Bootstrap
 Resolve the `@sha256:` digests of your built core images and generate the deployment configuration:
 
 ```bash
 PROXY_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-access-proxy:${TAG}" \
+  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+SNAPSHOT_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-snapshot-addon:${TAG}" \
   --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
 FRONTEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-frontend:${TAG}" \
   --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
@@ -391,29 +522,43 @@ CONTROLLER_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-cont
 BACKEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-backend:${TAG}" \
   --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
 
-jq -n --arg cidr "${CONTROL_PLANE_CIDR}" --arg host "${NOTEBOOK_HOST}" \
-  --arg certificateMap "${CERTIFICATE_MAP}" --arg addressName "${ADDRESS_NAME}" \
-  --arg client "${IAP_CLIENT_ID}" --arg secret "${IAP_SECRET_NAME}" \
+jq -n \
+  --arg cidr "${CONTROL_PLANE_CIDR}" \
+  --arg host "${WORKSPACES_HOST}" \
+  --arg desktopHost "${DESKTOP_HOST:-}" \
+  --arg certificateMap "${CERTIFICATE_MAP}" \
+  --arg addressName "${ADDRESS_NAME}" \
+  --arg client "${IAP_CLIENT_ID}" \
+  --arg secret "${IAP_SECRET_NAME}" \
   --arg tenant "${TENANT_NAMESPACE}" \
-  --arg proxy "${PROXY_IMAGE}" --arg frontend "${FRONTEND_IMAGE}" \
-  --arg controller "${CONTROLLER_IMAGE}" --arg backend "${BACKEND_IMAGE}" \
-  '{controlPlaneCIDR:$cidr,hostname:$host,certificateMap:$certificateMap,
+  --arg snapshotBucket "${SNAPSHOT_GCS_BUCKET}" \
+  --argjson qps "${KUBE_CLIENT_QPS:-100}" \
+  --argjson burst "${KUBE_CLIENT_BURST:-200}" \
+  --arg proxy "${PROXY_IMAGE}" \
+  --arg snapshot "${SNAPSHOT_IMAGE}" \
+  --arg frontend "${FRONTEND_IMAGE}" \
+  --arg controller "${CONTROLLER_IMAGE}" \
+  --arg backend "${BACKEND_IMAGE}" \
+  '{controlPlaneCIDR:$cidr,hostname:$host,desktopHostname:$desktopHost,certificateMap:$certificateMap,
     addressName:$addressName,iapClientID:$client,iapSecretName:$secret,
-    iapAudience:"",tenants:[$tenant],
-    images:{proxy:$proxy,frontend:$frontend,controller:$controller,backend:$backend}}' \
-  > gke/deployment.local.json
+    iapAudience:"",kubeClientQPS:$qps,kubeClientBurst:$burst,snapshotGCSBucket:$snapshotBucket,tenants:[$tenant],
+    images:{proxy:$proxy,snapshot:$snapshot,frontend:$frontend,controller:$controller,backend:$backend}}' \
+  > providers/gke/deployment.local.json
 
-rm -rf gke/rendered/bootstrap
-make -C gke plan CONFIG=deployment.local.json OUTPUT=rendered/bootstrap
+rm -rf providers/gke/rendered/bootstrap
+make -C providers/gke plan CONFIG=deployment.local.json OUTPUT=rendered/bootstrap
 ```
+
+> [!NOTE]
+> `make plan` runs [`scripts/plan.sh`](scripts/plan.sh), which builds `./cmd/render` and emits four stage files (`namespaces.json`, `isolation.json`, `applications.json`, `edge.json`) plus `upstream-revision.txt` and `config.sha256`. It **refuses to overwrite an existing output directory**, which is why each render is preceded by `rm -rf`. It changes nothing in the cluster or in Google Cloud.
 
 Apply namespaces and NetworkPolicy isolation rules first:
 
 ```bash
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-  -f gke/rendered/bootstrap/namespaces.json
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-  -f gke/rendered/bootstrap/isolation.json
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+  -f providers/gke/rendered/bootstrap/namespaces.json
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+  -f providers/gke/rendered/bootstrap/isolation.json
 ```
 
 If using **Option B2 (Custom OAuth)**, create the Kubernetes Secret containing the OAuth client secret:
@@ -430,16 +575,16 @@ Apply CRDs, wait for them to establish, and apply the application and edge manif
 
 ```bash
 jq '{apiVersion,kind,items:[.items[]|select(.kind=="CustomResourceDefinition")]}' \
-  gke/rendered/bootstrap/applications.json | \
-  kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke -f -
+  providers/gke/rendered/bootstrap/applications.json | \
+  kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke -f -
 
 kubectl --context="${CONTEXT}" wait --for=condition=Established --timeout=2m \
   crd/workspaces.kubeflow.org crd/workspacekinds.kubeflow.org
 
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-  -f gke/rendered/bootstrap/applications.json
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-  -f gke/rendered/bootstrap/edge.json
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+  -f providers/gke/rendered/bootstrap/applications.json
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+  -f providers/gke/rendered/bootstrap/edge.json
 ```
 *(Because `iapAudience` is empty during bootstrap, `gke-access-proxy` intentionally exits at startup until Step 5.2 configures the verified IAP audience.)*
 
@@ -466,16 +611,16 @@ export IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/global/backendServices/${BACKEN
 echo "Discovered IAP Backend: ${BACKEND_SERVICE} (Audience: ${IAP_AUDIENCE})"
 
 # 3. Render ready plan with the verified IAP audience and update the deployment
-rm -rf gke/rendered/ready
+rm -rf providers/gke/rendered/ready
 jq --arg audience "${IAP_AUDIENCE}" '.iapAudience=$audience' \
-  gke/deployment.local.json > gke/rendered/deployment.ready.json
-make -C gke plan CONFIG=rendered/deployment.ready.json OUTPUT=rendered/ready
+  providers/gke/deployment.local.json > providers/gke/rendered/deployment.ready.json
+make -C providers/gke plan CONFIG=rendered/deployment.ready.json OUTPUT=rendered/ready
 
-kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-  -f gke/rendered/ready/applications.json
+kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+  -f providers/gke/rendered/ready/applications.json
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
 
-for component in workspaces-controller workspaces-backend workspaces-frontend gke-access-proxy; do
+for component in workspaces-controller workspaces-backend workspaces-frontend gke-access-proxy gke-workspace-snapshot-addon; do
   kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/"${component}" --timeout=5m
 done
 ```
@@ -535,10 +680,10 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
    done
    ```
 
-2. **Apply Tenant RBAC, ServiceAccount, StorageClass, and ValidatingAdmissionPolicy**:
-   Render [`gke/manifests/pilot`](manifests/pilot/kustomization.yaml) with all users in `${PILOT_USERS}` added to the `RoleBinding` and `ClusterRoleBinding` subjects:
+2. **Apply Tenant RBAC, ServiceAccount, StorageClass, ResourceQuota, NetworkPolicy, and ValidatingAdmissionPolicy**:
+   Render [`providers/gke/manifests/pilot`](manifests/pilot/kustomization.yaml) (which is [`admission.yaml`](manifests/pilot/admission.yaml) + [`access.yaml`](manifests/pilot/access.yaml)) with all users in `${PILOT_USERS}` added to the `RoleBinding` and `ClusterRoleBinding` subjects:
    ```bash
-   kubectl kustomize --load-restrictor=LoadRestrictionsNone gke/manifests/pilot | \
+   kubectl kustomize --load-restrictor=LoadRestrictionsNone providers/gke/manifests/pilot | \
      python3 -c 'import yaml, json, sys; print(json.dumps({"apiVersion": "v1", "kind": "List", "items": [d for d in yaml.safe_load_all(sys.stdin) if d]}))' | \
      jq --arg users "${PILOT_USERS}" --arg ns "${TENANT_NAMESPACE}" \
        '([ $users | split(",")[] | split(" ")[] | select(length > 0) | {kind: "User", name: ., apiGroup: "rbac.authorization.k8s.io"} ]) as $user_subjects |
@@ -555,44 +700,28 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
              )) + $user_subjects
            )
          else . end)
-       ))}' > gke/rendered/ready/customer-pilot.json
+       ))}' > providers/gke/rendered/ready/customer-pilot.json
 
    kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke-pilot \
-     -f gke/rendered/ready/customer-pilot.json
+     -f providers/gke/rendered/ready/customer-pilot.json
    ```
 
-3. **Register Custom `jupyterlab` WorkspaceKind & GPU/TPU ComputeClasses**:
-   Register the `jupyterlab` `WorkspaceKind` (which includes CPU, GPU, and TPU image/pod options and injects `REGISTRY` and `GCS_BUCKET` into workspace pods) and the GKE `ComputeClass` definitions (`tpu-v5-8-multi-host`, `tpu-v5-4-single-host`, `gpu-l4-spot`, `gpu-t4-spot`).
+3. **Register Sample WorkspaceKind**:
+   When `APPLY_SAMPLE_WORKSPACEKIND=true` (the default), the script registers the upstream sample `jupyterlab` WorkspaceKind from `SAMPLE_WORKSPACEKIND` so users have something to launch immediately after deployment. It only references public `ghcr.io/kubeflow` images, so no custom image build is required. If the file at `SAMPLE_WORKSPACEKIND` does not exist, the script prints a warning and skips this step.
 
-   The `WorkspaceKind` pins an exact image tag per variant rather than floating on `:latest-*`, so a Workspace restarts onto the image it was created with and a rebuild cannot swap the runtime underneath a running Workspace. `build_jupyterlab.sh` records the tags it produced in `gke/rendered/jupyterlab-image-tags.env`; source that file so you pin the images you actually built:
+   *To register the custom WorkspaceKinds, see [`../../images/README.md#ready-made-workspacekind-templates`](../../images/README.md#ready-made-workspacekind-templates). Note that the custom `jupyterlab` template uses the **same `metadata.name`** as the sample above, so applying it **replaces** the sample rather than adding a second kind; the custom `codeserver` kind is additive. To apply ComputeClasses for GPU and TPU pods, apply the YAMLs in [`../../examples/compute-classes/`](../../examples/compute-classes/).*
+
    ```bash
-   # Tags written by build_jupyterlab.sh. Without these, envsubst renders an empty
-   # tag and the WorkspaceKind cannot start a Pod.
-   source gke/rendered/jupyterlab-image-tags.env
-
-   PROJECT_ID="${PROJECT}" \
-   REGION="${REGION}" \
-   REPO_NAME="${REPOSITORY}" \
-   IMAGE_NAME="jupyterlab" \
-   GCS_BUCKET="${GCS_BUCKET}" \
-   CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" \
-   GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" \
-   TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
-     envsubst < gke/jupyterlab/workspacekind.yaml | kubectl --context="${CONTEXT}" apply -f -
-
-   # Optionally register the resumable-only WorkspaceKind (CPU & GPU)
-   PROJECT_ID="${PROJECT}" \
-   REGION="${REGION}" \
-   REPO_NAME="${REPOSITORY}" \
-   IMAGE_NAME="jupyterlab" \
-   GCS_BUCKET="${GCS_BUCKET}" \
-   CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" \
-   GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" \
-   TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
-     envsubst < gke/jupyterlab/workspacekind-resumable.yaml | kubectl --context="${CONTEXT}" apply -f -
-
-   kubectl --context="${CONTEXT}" apply -f gke/manifests/compute-classes/
+   if [[ "${APPLY_SAMPLE_WORKSPACEKIND}" == "true" && -f "${SAMPLE_WORKSPACEKIND}" ]]; then
+     kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
+       --field-manager=notebooks-gke-pilot -f "${SAMPLE_WORKSPACEKIND}"
+   fi
    ```
+
+   > [!IMPORTANT]
+   > The `notebooks-gke-pilot-workspaces` ValidatingAdmissionPolicy applied in the previous substep restricts `Workspace.spec.kind` in `${TENANT_NAMESPACE}` to exactly four values: **`gke-jupyterlab`**, **`jupyterlab`**, **`jupyterlab-resumable`**, and **`codeserver`**. Registering a `WorkspaceKind` under any other name will succeed, but every `Workspace` referencing it will be **denied at admission**. The policy also rejects Workspaces that mount secrets or set user-supplied pod labels/annotations. See [`manifests/pilot/admission.yaml`](manifests/pilot/admission.yaml).
+   >
+   > The names shipped in this repo line up with that allow-list: the upstream sample is `jupyterlab`, [`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml) is `jupyterlab`, [`../../images/workspacekinds/codeserver-python.yaml`](../../images/workspacekinds/codeserver-python.yaml) is `codeserver`, and [`../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) is `jupyterlab-resumable`.
 
 ---
 
@@ -610,77 +739,85 @@ gcloud certificate-manager certificates describe "${CERTIFICATE_NAME}" \
 
 ---
 
-## 6. Running End-to-End Distributed Spark + TPU Example (`distributed_tpu_example.ipynb`)
+### Step 5.6: Create Your First Workspace
 
-The [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb) notebook demonstrates how a lightweight CPU Kubeflow Workspace pod acts as the **single control plane** for an end-to-end distributed ML workflow on Kubernetes:
+Open `https://${WORKSPACES_HOST}/workspaces/` and create a Workspace from the `jupyterlab` WorkspaceKind in namespace `${TENANT_NAMESPACE}`.
 
-| Stage | Workload | Execution Target | Kubernetes API / SDK |
-| --- | --- | --- | --- |
-| **Stage 1: Distributed ETL** | Apache Spark Fashion-MNIST preprocessing & augmentation | 1 Driver + 4 Executor Pods | Kubeflow Spark SDK (`kubeflow.spark.SparkClient` / `SparkConnect`) |
-| **Stage 2: Distributed Training** | Multi-host JAX data-parallel training (`pmap` + `pmean`) | 2 Cloud TPU v5e Hosts (8 TPU cores) | Kubeflow Trainer (`kubeflow.trainer.TrainerClient` / `TrainJob`) |
-| **Stage 3: Model Serving** | CPU HTTP inference server (`/predict`) | 2-Replica CPU `Deployment` + `Service` | `apps/v1 Deployment` (`fashion-mnist-inference`) |
-
-All three stages share data shards, model checkpoints, and metrics via a **Google Cloud Storage (GCS) bucket** (`gs://${GCS_BUCKET}`).
-
-### Step 6.1: Provision GCS Bucket & Grant Workload Identity IAM Access
-Because Workload Identity Federation (`--workload-pool=${PROJECT}.svc.id.goog`) is enabled on the cluster, you can grant GCS bucket access directly to all ServiceAccounts in `${TENANT_NAMESPACE}` without managing service account keys:
+To do the same from the CLI, first create the home PVC — **the Workspace controller does not create it for you, and the PVC must already exist in the namespace**:
 
 ```bash
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
-
-# 1. Create the shared GCS bucket (if it does not exist yet)
-gcloud storage buckets create "gs://${GCS_BUCKET}" \
-  --location="${REGION}" \
-  --project="${PROJECT}" || true
-
-# 2. Grant roles/storage.objectUser to all pods/ServiceAccounts in ${TENANT_NAMESPACE}
-#    (covers the workspace pod, Spark driver/executors, TPU TrainJob hosts, and inference pods)
-gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
-  --role="roles/storage.objectUser"
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" apply -f - <<'EOF'
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: workspace-home-pvc
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: notebooks-gke-rwo
+  resources:
+    requests:
+      storage: 50Gi
+EOF
 ```
 
-### Step 6.2: Create & Connect to Your Workspace
-1. Open `https://${NOTEBOOK_HOST}/workspaces/` in your browser and sign in with one of the Google accounts in `${PILOT_USERS}`.
-2. Select your tenant namespace (**`${TENANT_NAMESPACE}`**) from the namespace dropdown.
-3. Click **Create workspace**:
-   - **Workspace Kind**: Choose **JupyterLab Notebook** (`jupyterlab`)
-   - **Image**: Choose **jupyterlab (CPU)** (`jupyterlab-cpu`, pre-loaded with `kubeflow[spark]`, `kubeflow-trainer`, `google-cloud-storage`, and `examples/distributed_tpu_example.ipynb`)
-   - **Pod Configuration**: Choose **Small CPU** (`small_cpu`, 1 CPU / 2 GiB RAM)
-   - **Home Volume**: Attach a new PersistentVolumeClaim using StorageClass **`notebooks-gke-rwo`** (ReadWriteOnce, 10 GiB)
-4. Click **Create**. Wait for the workspace status to reach **Running**, then click **Connect > JupyterLab**.
+Then create the Workspace:
 
-### Step 6.3: Execute the 3-Stage Distributed Workflow
-Inside JupyterLab, open `distributed_tpu_example.ipynb` (located in `/home/jovyan/demo/distributed_tpu_example.ipynb` or upload [`examples/distributed_tpu_example.ipynb`](examples/distributed_tpu_example.ipynb) together with [`examples/jobs/`](examples/jobs/)) and run the cells in sequence:
-
-1. **Cell 0 (Setup & RBAC Check)**:
-   Confirms in-cluster ServiceAccount credentials and verifies `can-i create` permissions in `${TENANT_NAMESPACE}` for `trainjobs.trainer.kubeflow.org`, `sparkconnects.sparkoperator.k8s.io`, `sparkapplications.sparkoperator.k8s.io`, and `deployments.apps`.
-2. **Stage 1 (Distributed Data Processing with Apache Spark)**:
-   Runs `pipeline.run_data_processing(num_executors=4, num_shards=4, wait=True)`.
-   - Spins up a `SparkConnect` cluster (1 driver + 4 executor pods) in `${TENANT_NAMESPACE}`.
-   - Processes 60,000 Fashion-MNIST images in parallel and writes compressed `.npz` shards to `gs://${GCS_BUCKET}/processed/train/`.
-3. **Stage 2 (Multi-Host Cloud TPU Training with Kubeflow Trainer)**:
-   Runs `pipeline.run_training(num_hosts=2, epochs=5, global_batch_size=1024, wait=True)`.
-   - Submits a `TrainJob` using the `jax-distributed` runtime on 2 Cloud TPU v5e hosts (`cloud.google.com/compute-class: tpu-v5-8-multi-host`, 8 TPU cores total).
-   - Trains a 3-layer MLP with `jax.pmap` across all 8 TPU cores and writes model parameters and `metrics.json` to `gs://${GCS_BUCKET}/model/`.
-4. **Stage 3 (CPU Model Serving & Inference)**:
-   Deploys the 2-replica `fashion-mnist-inference` `Deployment` and `Service` in `${TENANT_NAMESPACE}` and sends live HTTP prediction requests to `http://fashion-mnist-inference:8080/predict`.
-5. **Stage 4 (Pause & Resume Workspace)**:
-   Demonstrates pausing the workspace from the Kubeflow Workspaces UI to release compute resources while preserving persistent files on the GKE Persistent Disk (`notebooks-gke-rwo`), and resuming the workspace when ready.
-
-You can monitor all spawned resources from your workstation terminal:
 ```bash
-kubectl --context="${CONTEXT}" get workspaces,sparkconnects,trainjobs,jobsets,deployments,pods -n "${TENANT_NAMESPACE}"
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" apply -f - <<'EOF'
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: jupyterlab-workspace
+spec:
+  paused: false
+  displayName: "Example JupyterLab Workspace"
+  kind: "jupyterlab"
+  podTemplate:
+    volumes:
+      # `home` is the NAME of an existing PVC, given as a plain string.
+      home: "workspace-home-pvc"
+    options:
+      imageConfig: "jupyter-scipy:v1.10.0"
+      podConfig: "tiny_cpu"
+EOF
+
+kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get workspace jupyterlab-workspace -w
 ```
+
+> [!IMPORTANT]
+> Common mistakes when hand-writing a `Workspace`:
+> - `spec.podTemplate.volumes.home` is a **plain string** holding the PVC name — it is *not* an object, and there is no nested `pvcName`/`mountPath` under it. The mount path is fixed by the WorkspaceKind at `spec.podTemplate.volumeMounts.home` (`/home/jovyan` for the sample kind). Only the `data` list uses `{pvcName, mountPath, readOnly}` objects.
+> - There is **no `spec.deferUpdates` field**. Do not add one.
+> - `spec.podTemplate.volumes.secrets` is rejected by the pilot ValidatingAdmissionPolicy (Step 5.4).
+> - `imageConfig` and `podConfig` must be `id` values that exist in the WorkspaceKind. For the upstream sample kind the available ids are `jupyter-scipy:v1.8.0`, `jupyter-scipy:v1.9.2`, `jupyter-scipy:v1.10.0`, `jupyter-pytorch-cuda-full:v1.9.2`, `jupyter-pytorch-cuda-full:v1.10.0` and `tiny_cpu`, `small_cpu`, `big_gpu`.
+>
+> A fully annotated reference `Workspace` lives at [`workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspace.yaml`](../../workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspace.yaml).
+
+---
+
+## 6. End-to-End Examples
+
+For step-by-step examples demonstrating how to use the standalone GKE deployment for distributed model training, data processing, stateful pause/resume, and autonomous AI agents, see [`../../examples/README.md`](../../examples/README.md), which documents the order the examples' prerequisites have to happen in:
+- **[Distributed ML Workflow (Spark ETL + TPU Training)](../../examples/distributed/)**
+- **[Stateful Pause & Resume](../../examples/resumable-notebooks/)**
+- **[Agent Sandbox (AI Coding Agents)](../../examples/agent-sandbox/)**
+- **[GPU & TPU ComputeClasses](../../examples/compute-classes/)** (a prerequisite for the accelerator pod options used by the other examples)
+
+*(Note: The Kubeflow Trainer and Spark Operator installed in Step 5.3 are used by the distributed ML example. If you are not running that example, you can skip their installation by setting `INSTALL_TRAINER=false` and `INSTALL_SPARK_OPERATOR=false`.)*
 
 ---
 
 ## 7. Stateful Workspace Pause & Resume with GKE Pod Snapshots
 
-GKE Pod Snapshots enable **stateful Pause & Resume** for Kubeflow Workspaces: when a user pauses (stops) a Workspace, GKE checkpoints the running container memory (including live Jupyter Python kernels and in-memory variables) and container rootfs to a dedicated Google Cloud Storage bucket (`gs://${SNAPSHOT_GCS_BUCKET}`) before scaling the Pod down to `0`. When the user resumes (starts) the Workspace, the newly created Pod restores its memory and kernel state directly from the GCS checkpoint.
+GKE Pod Snapshots enable **stateful Pause & Resume** for Kubeflow Workspaces: when a user pauses (stops) a Workspace, GKE checkpoints the running container memory (including live Jupyter Python kernels and in-memory variables) and container rootfs to a dedicated Google Cloud Storage bucket (`gs://${SNAPSHOT_GCS_BUCKET}`) before scaling the Pod down to `0`. When the user resumes (starts) the Workspace, the newly created Pod restores its memory and kernel state directly from the GCS checkpoint in seconds.
+
+Two complete verification examples and the `jupyterlab-resumable` manifest are provided in [`examples/resumable-notebooks/`](../../examples/resumable-notebooks/):
+- **CPU Pause & Resume**: [`examples/resumable-notebooks/cpu_checkpoint_restore_example.ipynb`](../../examples/resumable-notebooks/cpu_checkpoint_restore_example.ipynb) verifies bit-exact in-memory datasets (~160 MB), process PID continuity, background thread frozen duration, and instant CPU compute resumption.
+- **GPU Checkpoint & Restore**: [`examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb`](../../examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb) verifies 6+ GB VRAM model residency (Qwen2.5-3B-Instruct in fp16 on NVIDIA T4), bit-identical weight tensors read back from VRAM, and ~12s restore without reloading.
+- **Resumable WorkspaceKind**: [`examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) configures CPU and GPU pod profiles pre-annotated for stateful snapshots.
 
 > [!IMPORTANT]
-> **Separate `SNAPSHOT_GCS_BUCKET` from `GCS_BUCKET`**: Container memory dumps may include in-memory tokens or environment state and have different lifecycle/retention requirements than shared datasets and training outputs (`gs://${GCS_BUCKET}`). Always configure a dedicated `SNAPSHOT_GCS_BUCKET` (default: `${TENANT_NAMESPACE}-snapshots-bucket`) separate from the workload data `GCS_BUCKET` (`${TENANT_NAMESPACE}-bucket`).
+> **Keep the snapshot bucket separate from any workload data bucket**: container memory dumps may include in-memory tokens or environment state, and they have different lifecycle and retention requirements than shared datasets and training outputs. `deploy_standalone.sh` therefore provisions one dedicated bucket, `SNAPSHOT_GCS_BUCKET` (default `${TENANT_NAMESPACE}-snapshots-bucket`), and configures a 14-day lifecycle `Delete` rule on it. If you also give the tenant a bucket for datasets and model artifacts, create and manage it separately — the deployment script does not create one.
 
 This feature is implemented by the standalone `gke-workspace-snapshot-addon` Deployment (separate from `gke-access-proxy`, so a snapshot control-plane failure never affects notebook traffic) via two Kubernetes Mutating Admission Webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`podsnapshot.gke.kubeflow.org/active`), and a background snapshot reconciler—requiring **zero changes** to upstream Kubeflow `Workspace` / `WorkspaceKind` CRDs, `workspaces-controller`, Backend API, or React Frontend.
 
@@ -693,15 +830,20 @@ GKE Pod Snapshots use **two distinct identities** for GCS operations:
 > [!WARNING]
 > **Preventing Unbounded GCS Storage Growth**: If `service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com` is not granted `roles/storage.objectUser` on `gs://${SNAPSHOT_GCS_BUCKET}`, `PodSnapshot` resources remain stuck in `Deleting` (`403 Forbidden` on `storage.objects.list`) and old snapshot files (`checkpoint.img`, `pages.img`) are **never deleted from GCS**. Always grant both bindings below and apply the GCS lifecycle rule.
 
-1. **Create `SNAPSHOT_GCS_BUCKET`, Grant IAM Bindings, & Set a 14-Day GCS Lifecycle Rule**:
+#### Using a Custom `SNAPSHOT_GCS_BUCKET`
+
+If using a custom snapshot bucket (e.g. `export SNAPSHOT_GCS_BUCKET="my-custom-snapshot-bucket"` instead of the default `${TENANT_NAMESPACE}-snapshots-bucket`), ensure you follow these steps:
+
+1. **Create the Custom Bucket & Configure Permissions**:
    ```bash
    export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
    PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
 
-   # 1. Create the dedicated snapshot GCS bucket if it does not already exist
+   # 1. Create the dedicated snapshot GCS bucket in the cluster location
    gcloud storage buckets create "gs://${SNAPSHOT_GCS_BUCKET}" \
      --location="${REGION}" \
-     --project="${PROJECT}" || true
+     --project="${PROJECT}" \
+     --uniform-bucket-level-access || true
 
    # 2. Grant objectUser and bucketViewer to the tenant namespace's Workload Identity principalSet (checkpoint & restore)
    gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
@@ -712,7 +854,7 @@ GKE Pod Snapshots use **two distinct identities** for GCS operations:
      --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
      --role="roles/storage.bucketViewer"
 
-   # 3. Grant objectUser to the GKE Service Agent so podsnapshot.gke.io/podsnapshot-finalizer
+   # 3. Grant objectUser to the GKE Service Agent robot so podsnapshot.gke.io/podsnapshot-finalizer
    #    automatically deletes consumed/expired snapshot folders from GCS
    gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
      --member="serviceAccount:service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com" \
@@ -729,14 +871,48 @@ GKE Pod Snapshots use **two distinct identities** for GCS operations:
    rm -f /tmp/snapshot-lifecycle.json
    ```
 
-2. **Configure `SNAPSHOT_GCS_BUCKET` on `gke-access-proxy`**:
-   - When deploying via `deploy_standalone.sh` or `make -C gke plan`, set `"snapshotGCSBucket": "${SNAPSHOT_GCS_BUCKET}"` in your render config JSON (automatically populated from `export SNAPSHOT_GCS_BUCKET=...` by `deploy_standalone.sh`).
-   - To update the bucket on an already-running cluster without re-rendering:
-     ```bash
-     kubectl --context="${CONTEXT}" -n kubeflow-workspaces patch configmap gke-access-proxy \
-       --type merge -p "{\"data\":{\"SNAPSHOT_GCS_BUCKET\":\"${SNAPSHOT_GCS_BUCKET}\"}}"
-     kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
+2. **Connect the Bucket to Kubeflow** (Two Approaches):
+
+   - **Approach A: Create a Custom `PodSnapshotStorageConfig` (Recommended for Multi-Tenant / Per-Team Buckets)**:
+     If you want a team, tenant, or specific workspace to use their own bucket without changing controller configuration or restarting any pods:
+     ```yaml
+     # custom-storage-config.yaml
+     apiVersion: podsnapshot.gke.io/v1
+     kind: PodSnapshotStorageConfig
+     metadata:
+       name: my-team-storage-config
+     spec:
+       snapshotStorageConfig:
+         gcs:
+           bucket: "my-team-snapshots"
+           path: "kubeflow-notebooks"
      ```
+     Apply it to the cluster:
+     ```bash
+     kubectl --context="${CONTEXT}" apply -f custom-storage-config.yaml
+     ```
+     Then point your `Workspace` (or custom `WorkspaceKind`) to it:
+     ```bash
+     kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" patch workspace <workspace-name> \
+       --type merge -p '{"metadata":{"annotations":{"podsnapshot.gke.kubeflow.org/enabled":"true","podsnapshot.gke.kubeflow.org/storage-config":"my-team-storage-config"}}}'
+     ```
+     The snapshot reconciler dynamically binds the workspace's `PodSnapshotPolicy` to `my-team-storage-config`. No controller restart or reconfiguration is needed.
+
+   - **Approach B: Change the Controller's Default Bucket (Cluster-Wide)**:
+     - **For new deployments**: Set `export SNAPSHOT_GCS_BUCKET="my-custom-snapshot-bucket"` before running `deploy_standalone.sh`, or set `"snapshotGCSBucket": "my-custom-snapshot-bucket"` in your render config JSON (`deployment.local.json`).
+     - **For existing clusters**: Update the `gke-workspace-snapshot-addon` ConfigMap and `PodSnapshotStorageConfig`:
+       ```bash
+       # 1. Update the snapshot addon controller configuration
+       kubectl --context="${CONTEXT}" -n kubeflow-workspaces patch configmap gke-workspace-snapshot-addon \
+         --type merge -p "{\"data\":{\"SNAPSHOT_GCS_BUCKET\":\"${SNAPSHOT_GCS_BUCKET}\"}}"
+       kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-workspace-snapshot-addon
+       kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/gke-workspace-snapshot-addon --timeout=2m
+
+       # 2. Update the default cluster-scoped PodSnapshotStorageConfig
+       kubectl --context="${CONTEXT}" patch podsnapshotstorageconfig kubeflow-pod-snapshot-storage-config \
+         --type merge -p "{\"spec\":{\"snapshotStorageConfig\":{\"gcs\":{\"bucket\":\"${SNAPSHOT_GCS_BUCKET}\"}}}}"
+       ```
+       *(Note: Resume any currently paused workspaces before changing buckets to prevent orphan snapshot references).*
 
 ### Step 7.2: Configure `PodSnapshotStorageConfig` & `PodSnapshotPolicy` (4-Layer Automatic Cleanup)
 
@@ -769,7 +945,10 @@ kubectl --context="${CONTEXT}" get podsnapshotpolicies -n "${TENANT_NAMESPACE}"
 
 ### Step 7.3: Configure `WorkspaceKind` (or Per-Workspace Annotations)
 
-To enable stateful snapshots for all Workspaces of a given kind, annotate the `WorkspaceKind` with `podsnapshot.gke.kubeflow.org/enabled: "true"` and `podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"` (already pre-configured in [`gke/jupyterlab/workspacekind.yaml`](jupyterlab/workspacekind.yaml)):
+To enable stateful snapshots for all Workspaces of a given kind, annotate the `WorkspaceKind` with `podsnapshot.gke.kubeflow.org/enabled: "true"` and `podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"`.
+
+Of the `WorkspaceKind` manifests shipped in this repo, only [`../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) (`jupyterlab-resumable`) carries these annotations out of the box. The upstream sample `jupyterlab` kind and the custom kinds in [`../../images/workspacekinds/`](../../images/workspacekinds/) do **not**; add the annotations yourself if you want snapshotting on those:
+
 
 ```yaml
 apiVersion: kubeflow.org/v1beta1
@@ -781,7 +960,7 @@ metadata:
     podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
 ```
 
-*(You can also enable or disable snapshotting for an individual `Workspace` by setting `podsnapshot.gke.kubeflow.org/enabled: "true"` or `"false"` in `Workspace.metadata.annotations`, which takes precedence over the `WorkspaceKind` annotation).*
+*(You can also enable or disable snapshotting for an individual `Workspace` by setting `podsnapshot.gke.kubeflow.org/enabled: "true"` or `"false"` in `Workspace.metadata.annotations`, or direct it to a custom bucket configuration via `podsnapshot.gke.kubeflow.org/storage-config: "<custom-storage-config-name>"`, both of which take precedence over the `WorkspaceKind` annotations).*
 
 When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod` webhook automatically:
 1. Sets `spec.runtimeClassName: gvisor` so the Pod schedules onto a gVisor Sandbox node pool (`--sandbox type=gvisor`).
@@ -801,7 +980,7 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
    - **What happens automatically**:
      - `POST /mutate-workspace` intercepts the update, keeps `spec.paused: false` temporarily, sets `podsnapshot.gke.kubeflow.org/checkpoint-state: "Checkpointing"`, and immediately flips the Pod's `podsnapshot.gke.kubeflow.org/active` readiness gate and `PodReady` condition to `False` (`READINESS GATES: 0/1`).
      - Flipping `PodReady` to `False` causes `workspaces-controller` to immediately transition `Workspace.status.state` out of `Running`, which disables the **Connect** button in the UI, hides the **Stop** action, blocks premature **Start** requests, removes the Pod from Service endpoints, and drains open WebSockets.
-     - After the 3-second socket settle window, `gke-workspace-snapshot-addon` creates `PodSnapshotManualTrigger/ws-<workspace-name>-trigger`, waits for GKE to finish uploading the `PodSnapshot` to `gs://${GCS_BUCKET}`, records `podsnapshot.gke.kubeflow.org/last-checkpoint-name: <snapshot-uuid>`, and patches `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`.
+     - After the 3-second socket settle window, `gke-workspace-snapshot-addon` creates `PodSnapshotManualTrigger/ws-<workspace-name>-trigger`, waits for GKE to finish uploading the `PodSnapshot` to `gs://${SNAPSHOT_GCS_BUCKET}`, records `podsnapshot.gke.kubeflow.org/last-checkpoint-name: <snapshot-uuid>`, and patches `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`.
 
 2. **Monitor Checkpoint Progress**:
    ```bash
@@ -827,15 +1006,22 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
 
 > [!IMPORTANT]
 > **Memory-Recoverable Pause & Resume**:
-> - **Supported**: Memory-recoverable pause and resume (preserving in-memory variables and execution state via GKE Pod Snapshots) is **only supported for JupyterLab notebook workspaces (`jupyterlab`) on CPU/GPU hardware**.
-> - **VS Code & Other Workspaces (Stateless Pause & Resume)**: For VS Code (`codeserver`) or other workspace kinds, pause and resume is stateless: pausing scales down the Pod to release compute resources, and resuming starts a fresh Pod. All files and custom Conda environments located on the persistent home volume (`/home/jovyan`) are preserved, but in-memory process execution state and live notebook variables are not saved across restarts.
-> - For in-depth technical analysis, gVisor CRIU constraints, and pilot records, see [CODELAB.md](CODELAB.md).
+> - **Supported**: Memory-recoverable pause and resume (preserving in-memory variables and execution state via GKE Pod Snapshots) is **supported for JupyterLab notebook workspaces (`jupyterlab` and `jupyterlab-resumable`) on both CPU and GPU hardware**:
+>   - Test CPU stateful pause/resume with [`examples/resumable-notebooks/cpu_checkpoint_restore_example.ipynb`](../../examples/resumable-notebooks/cpu_checkpoint_restore_example.ipynb).
+>   - Test GPU stateful checkpoint/restore with [`examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb`](../../examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb).
+> - **In-Browser VS Code (`codeserver`) & Other Workspaces (Stateless Pause & Resume)**: For the in-browser `codeserver` WorkspaceKind or other workspace kinds, pause and resume is stateless: pausing scales down the Pod to release compute resources, and resuming starts a fresh Pod. All files and custom Conda environments located on the persistent home volume (`/home/jovyan`) are preserved, but in-memory process execution state and live notebook variables are not saved across restarts. *(This is about VS Code running **in the cluster**. Desktop VS Code connecting to a remote kernel is [Section 8](#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint), a separate feature.)*
+> - **Not every process survives**: the checkpoint captures the container's init process tree, so notebook kernels and processes you started from a JupyterLab terminal come back. Processes you started with `kubectl exec ... &` are **not** restored — see [What survives a pause](../../examples/resumable-notebooks/README.md#what-survives-a-pause-and-what-does-not).
+> - For in-depth technical analysis, gVisor CRIU constraints, and pilot records, see [docs/gke-pilot-codelab.md](../../docs/gke-pilot-codelab.md).
 
 ### Step 7.6: Package Management & Persistence Across Restarts
 
 When a workspace Pod restarts, is rescheduled, or resumes from a stateless pause, the ephemeral container root filesystem (`/`) is recreated, while the user home volume (`/home/jovyan` mounted via PVC) is preserved.
 
-To ensure your Python packages survive restarts and do not consume unnecessary PVC disk quota, the workspace images provide two recommended workflows:
+To ensure your Python packages survive restarts and do not consume unnecessary PVC disk quota, the custom workspace images built from [`../../images/`](../../images/README.md) provide the recommended workflows below.
+
+> [!NOTE]
+> The pre-configured `pip` behaviour in workflow 1 is baked into this repo's custom images (`pip config --site set install.user true` in [`../../images/jupyterlab/Dockerfile`](../../images/jupyterlab/Dockerfile) and its GPU/TPU variants). The upstream `ghcr.io/kubeflow/.../jupyter-scipy` images used by the default sample WorkspaceKind do **not** set this, so on those you must pass `pip install --user` explicitly for packages to land on the persistent home volume. Workflows 2 and 3 work on any image.
+
 
 #### 1. Quick Installs in the Base Environment (Zero Baseline Overhead)
 The pre-installed base environment (`/opt/conda`) includes full ML stacks (PyTorch, CUDA, JAX, SciPy, pandas, ipykernel).
@@ -872,16 +1058,52 @@ All Conda environments are automatically created under `/home/jovyan/.conda/envs
 
 ---
 
-## 8. VS Code Jupyter Extension (Desktop Endpoint)
+## 8. Remote Jupyter Kernels from Desktop VS Code (the `connect` Endpoint)
 
-The optional desktop endpoint allows standard VS Code (`ms-toolsai.jupyter`) to connect to running workspaces using Kubernetes-minted connection tokens. IAP continues to protect browser access and token issuance, while a separate desktop backend validates short-lived tokens without exposing dashboard APIs.
+**What this is:** a way to run notebook code on the cluster while editing it in the
+**VS Code application installed on your laptop**. Your `.ipynb` file stays local;
+the kernel executing it runs inside a workspace Pod in GKE, with that Pod's CPU,
+GPU, TPU and cluster access.
+
+**How it works:** you generate a short-lived connection token from the dashboard in
+your browser, paste it into VS Code's *Existing Jupyter Server* dialog, and VS Code
+talks to the kernel over a second hostname (`DESKTOP_HOST`, e.g.
+`connect.<ADDRESS>.sslip.io`).
+
+> [!IMPORTANT]
+> **This is not the `codeserver` WorkspaceKind.** Those are easy to confuse — both
+> involve "VS Code" — but they are opposites:
+>
+> | | `codeserver` WorkspaceKind | This section (`DESKTOP_HOST`) |
+> | --- | --- | --- |
+> | Where the editor runs | In the cluster, viewed in your **browser** | On your **laptop**, as the installed VS Code app |
+> | Where the kernel runs | In the cluster | In the cluster |
+> | What you need | Just a browser | VS Code + the `ms-toolsai.jupyter` extension |
+> | Hostname used | `WORKSPACES_HOST` | `DESKTOP_HOST` |
+>
+> You do **not** need a `codeserver` workspace to use this, and a `codeserver`
+> workspace cannot be used *as* the target: the connection speaks the Jupyter
+> protocol, and the `codeserver` kind exposes a code-server port, not a Jupyter
+> server. **Target a JupyterLab-type workspace** (the `jupyterlab` port).
+
+> [!NOTE]
+> `DESKTOP_HOST` is a **single cluster-wide endpoint**, not a per-workspace address.
+> One hostname serves every workspace and every user; which workspace you reach is
+> determined by the token you generate, not by the hostname. You therefore do not
+> create or configure anything per workspace — but the workspace you want to target
+> **must already exist and be `Running`** before you can generate a token for it.
+
+Security model: IAP protects browser access and token issuance, while a separate
+desktop backend validates the short-lived tokens without exposing dashboard APIs.
 
 ### Step 8.1: Enable the Desktop Endpoint
 Choose a second, dedicated DNS name (e.g., `connect.example.com` or `connect.${ADDRESS}.sslip.io`) pointing at the same global external IP `${ADDRESS}`, create a Certificate Manager certificate and map entry, and render the desktop plan:
 
 ```bash
 export DESKTOP_HOST="connect.${ADDRESS}.sslip.io" # Or connect.YOUR_DOMAIN
-export DESKTOP_CERTIFICATE="notebooks-desktop"
+# Must be "${CERTIFICATE_NAME}-desktop": deploy_standalone.sh creates this name and
+# cleanup_standalone.sh deletes exactly this name.
+export DESKTOP_CERTIFICATE="${CERTIFICATE_NAME}-desktop"
 
 gcloud certificate-manager certificates create "${DESKTOP_CERTIFICATE}" \
   --domains="${DESKTOP_HOST}" --project="${PROJECT}"
@@ -890,23 +1112,46 @@ gcloud certificate-manager maps entries create notebooks-desktop \
   --hostname="${DESKTOP_HOST}" --project="${PROJECT}"
 
 jq --arg host "${DESKTOP_HOST}" '.desktopHostname=$host' \
-  gke/rendered/deployment.ready.json > gke/rendered/deployment.desktop.json
-make -C gke plan CONFIG=rendered/deployment.desktop.json OUTPUT=rendered/desktop
+  providers/gke/rendered/deployment.ready.json > providers/gke/rendered/deployment.desktop.json
+rm -rf providers/gke/rendered/desktop
+make -C providers/gke plan CONFIG=rendered/deployment.desktop.json OUTPUT=rendered/desktop
 
 for stage in namespaces isolation applications edge; do
-  kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke \
-    -f "gke/rendered/desktop/${stage}.json"
+  kubectl --context="${CONTEXT}" apply --server-side --force-conflicts --field-manager=notebooks-gke \
+    -f "providers/gke/rendered/desktop/${stage}.json"
 done
 
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout restart deployment/gke-access-proxy
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces rollout status deployment/gke-access-proxy --timeout=5m
 ```
 
+> [!NOTE]
+> `deploy_standalone.sh` already does all of the above automatically: it always creates `${CERTIFICATE_NAME}-desktop` and the `notebooks-desktop` map entry in Step 4, and it always passes `desktopHostname` into the render config in Step 5. This section is only needed if you are deploying by hand or are adding the desktop endpoint to an existing deployment that was rendered without one.
+
 ### Step 8.2: Connect from VS Code
-1. Open `https://${NOTEBOOK_HOST}/workspaces/connections` in your browser and sign in with Google.
-2. Select your running workspace, port (`jupyterlab`), and duration, then click **Generate connection** and **Copy URL**.
-3. In VS Code, open any `.ipynb` notebook and select **Select Kernel > Select Another Kernel > Existing Jupyter Server**, then paste the copied URL (including `?token=`).
-4. When finished, click **Revoke** on the connection page to immediately terminate active desktop WebSockets and invalidate the token.
+
+> [!IMPORTANT]
+> **Before you start, the target workspace must already be `Running`.** The token
+> you generate is scoped to one specific workspace; there is nothing to connect to
+> until it exists. Create it from the dashboard first, and confirm with
+> `kubectl get workspaces -n "${TENANT_NAMESPACE}"`.
+
+1. In your browser, open `https://${WORKSPACES_HOST}/workspaces/connections` and sign in with Google.
+   *(Note this is the **dashboard** host, not `DESKTOP_HOST` — tokens are issued through IAP.)*
+2. Select your running workspace, then the **port** — choose the Jupyter port
+   (`jupyterlab`). A `codeserver` port will not work; see the comparison above.
+3. Choose a duration, click **Generate connection**, then **Copy URL**. The URL
+   looks like:
+   ```
+   https://connect.<ADDRESS>.sslip.io/workspace/connect/<namespace>/<workspace>/jupyterlab/?token=<token>
+   ```
+   It is short-lived and specific to that one workspace. Generate a new one when it
+   expires or when you switch workspaces.
+4. In VS Code on your laptop, open any `.ipynb` and choose
+   **Select Kernel → Select Another Kernel → Existing Jupyter Server**, then paste
+   the copied URL **including the `?token=` part**.
+5. When finished, click **Revoke** on the connection page. This immediately
+   terminates active desktop WebSockets and invalidates the token.
 
 On macOS, if VS Code fails with `unable to get issuer certificate` for a valid
 Google Certificate Manager certificate, set `"http.systemCertificatesNode": true`
@@ -919,218 +1164,20 @@ root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TL
 
 ---
 
-## 9. Integrating Kubernetes Agent Sandbox with Gemini (VS Code & Gemini CLI)
+## 9. Enrolling Additional Users
 
-This section demonstrates how to combine the standalone Kubeflow VS Code development environment on GKE with the **Kubernetes Agent Sandbox (`agent-sandbox`)** operator as the execution backbone.
-
-When developers interact with AI agents in their VS Code code-server environment—such as **Gemini Code Assist** in Agent Mode or **Gemini CLI (`gemini`)** in the integrated terminal—the agents can dynamically provision, execute untrusted or resource-heavy workloads inside, and tear down disposable Kubernetes sandboxes. This guarantees that untrusted scripts, test executions, and package installations are isolated from both the developer's primary workspace pod and the cluster control plane.
-
-```mermaid
-flowchart TD
-    subgraph K8s["GKE Cluster: kubeflow-notebooks"]
-        subgraph Tenant["Tenant Namespace: ${TENANT_NAMESPACE}"]
-            CS["Any Workspace Pod<br/>(VS Code, JupyterLab)"]
-            CLI["Gemini CLI (gemini)<br/>v0.60.0+"]
-            EXT["Gemini Code Assist<br/>Agent Mode"]
-            MCP_SVC["Agent Sandbox MCP Server<br/>(SA: agent-sandbox-mcp-server)"]
-            CLAIM["SandboxClaim<br/>(sandbox-claim-*)"]
-            WARM["SandboxWarmPool<br/>(python-warmpool)"]
-            SBX["Isolated Sandbox Pod<br/>(python-runtime-sandbox :8888)"]
-        end
-
-        subgraph Sys["System Namespace: agent-sandbox-system"]
-            CTRL["Agent Sandbox Controller<br/>(agents.x-k8s.io reconcilers)"]
-        end
-
-        CS --> CLI
-        CS --> EXT
-        CLI -- "MCP JSON-RPC (HTTP)" --> MCP_SVC
-        EXT -- "MCP JSON-RPC (HTTP)" --> MCP_SVC
-        MCP_SVC -- "K8s API" --> CLAIM
-        CTRL -- "Reconciles" --> CLAIM
-        CTRL -- "Reconciles" --> WARM
-        WARM -- "Pre-provisions" --> SBX
-        CLAIM -- "Adopts / Binds" --> SBX
-        MCP_SVC -- "In-Cluster HTTP (:8888)" --> SBX
-    end
-```
-
-### Architecture Highlights
-- **Model Context Protocol (MCP)**: The agent communicates with `agent-sandbox-mcp-server` over in-cluster streamable HTTP (`http://agent-sandbox-mcp-server.${TENANT_NAMESPACE}.svc.cluster.local:8000/mcp`).
-- **Dedicated MCP Server ServiceAccount**: The MCP server runs with its own dedicated ServiceAccount (`agent-sandbox-mcp-server`) bound directly to `agent-sandbox-kubeflow-edit`, completely decoupled from any developer workspace.
-- **Universal RBAC via `WorkspaceKind`**: Instead of hardcoding permissions to a single workspace, `agent-sandbox-kubeflow-edit` is attached under `spec.podTemplate.serviceAccount.clusterRoles` across `WorkspaceKind` definitions (`codeserver`, `jupyterlab`). The Kubeflow `workspaces-controller` dynamically provisions and maintains namespaced `RoleBinding`s (`ws-<name>-<hash>`) for every workspace created in the cluster.
-- **Aggregated Kubernetes RBAC**: The `agent-sandbox-kubeflow-edit` ClusterRole carries the label `rbac.authorization.kubeflow.org/aggregate-to-kubeflow-edit: "true"`, automatically aggregating sandbox and pod management permissions into `kubeflow-edit`.
-- **Namespace-Wide Workload Identity Federation**: Google Cloud Workload Identity binds `roles/iam.workloadIdentityUser` to the entire tenant namespace via `principalSet://.../namespace/${TENANT_NAMESPACE}`, enabling any workspace in the tenant namespace to authenticate with Vertex AI Gemini models.
-- **Sub-Second Sandbox Provisioning**: `SandboxWarmPool` maintains standby pre-warmed pods (`python-warmpool`), allowing an agent to claim and begin executing inside a sandbox in under 300ms.
-- **Dataplane V2 & In-Cluster Routing**: The tenant network policy `gke-tenant-workloads-ingress` permits pod-to-pod communication between any workspace, the MCP server, and sandbox pods while denying unauthorized ingress from outside the namespace.
-
----
-
-### Step 9.1: Automated Deployment (`deploy_agent_sandbox.sh`)
-
-A dedicated script [`gke/deploy_agent_sandbox.sh`](deploy_agent_sandbox.sh) automates the installation and configuration of all components:
-
-```bash
-# Export standard environment variables (matching deploy_standalone.sh)
-export PROJECT="your-gcp-project-id"
-export CLUSTER="kubeflow-notebooks"
-export LOCATION="us-west1"
-export REGION="us-west1"
-export TENANT_NAMESPACE="kubeflow-user"
-export REPOSITORY="kubeflow-repo"
-
-# Deploy Agent Sandbox operator, RBAC, MCP server, and warm pool
-./gke/deploy_agent_sandbox.sh
-```
-
-**What the script configures automatically**:
-1. **Official Release Manifests**: Deploys the official `sandbox-with-extensions.yaml` release artifact from `https://github.com/kubernetes-sigs/agent-sandbox/releases/download/v1.0.3/sandbox-with-extensions.yaml` (controller image `registry.k8s.io/agent-sandbox/agent-sandbox-controller:v1.0.3`).
-2. **Official Sandbox Release Image**: Configures `SandboxTemplate` to directly use the official upstream release image **`registry.k8s.io/agent-sandbox/python-runtime-sandbox:v1.0.3`**—no manual container builds required for the sandbox execution layer.
-3. **Workspace-Agnostic RBAC via `WorkspaceKind`**: Applies `gke/manifests/agent-sandbox/clusterrole.yaml` and updates `WorkspaceKind` manifests so `agent-sandbox-kubeflow-edit` is automatically bound to every current and future workspace ServiceAccount by the Kubeflow controller.
-4. **Dedicated MCP Server Identity**: Provisions `ServiceAccount/agent-sandbox-mcp-server` and binds it to `agent-sandbox-kubeflow-edit` for isolated in-cluster MCP operations.
-5. **Namespace-Wide Workload Identity & Vertex AI**: Grants `roles/aiplatform.user` on the GCP project to `${TENANT_NAMESPACE}-sa@${PROJECT}.iam.gserviceaccount.com` and binds it to the entire `${TENANT_NAMESPACE}` namespace via IAM `principalSet` federation for seamless Vertex AI Gemini access.
-6. **Tenant Templates**: Deploys `SandboxTemplate` (`python-runtime-template`) and `SandboxWarmPool` (`python-warmpool`, 1 standby replica) in `${TENANT_NAMESPACE}`.
-7. **In-Cluster MCP Server**: Deploys `Deployment/agent-sandbox-mcp-server` and `Service/agent-sandbox-mcp-server` exposing port 8000.
-8. **Workspace Tooling**: Injects MCP server connection settings (`~/.gemini/settings.json`) and folder trust (`~/.gemini/trustedFolders.json`) into running VS Code workspace pods.
-
----
-
-### Step 9.2: Using Gemini CLI Directly with the Sandbox
-
-All custom VS Code (`codeserver-python`) Docker images come pre-installed with Node.js and `@google/gemini-cli@nightly` (for native Gemini 3.8 support).
-
-#### How Gemini CLI Discovers and Uses the Sandbox
-1. **MCP Discovery (`~/.gemini/settings.json`)**: When `gemini` launches, it loads configured MCP servers and registers the 8 tools exposed by `agent-sandbox-mcp-server`. Run `gemini mcp list` to check connectivity:
-   ```text
-   Configured MCP servers:
-   ✓ agent-sandbox: http://agent-sandbox-mcp-server.kubeflow-user.svc.cluster.local:8000/mcp (http) - Connected
-   ```
-2. **Contextual Instructions (`~/.gemini/GEMINI.md`)**: `deploy_agent_sandbox.sh` provisions `~/.gemini/GEMINI.md` instructing Gemini to route code execution, testing, and benchmark tasks into isolated Kubernetes sandboxes via `mcp_agent-sandbox_*` tools using namespace `${TENANT_NAMESPACE}` and warmpool `python-warmpool`.
-3. **Authentication via `GEMINI_API_KEY`**: Authenticate Gemini CLI in the workspace terminal by providing your API key:
-   ```bash
-   export GEMINI_API_KEY="your-gemini-api-key"
-   ```
-   Add this to your `~/.bashrc` in the workspace to persist it across terminal sessions.
-
-#### 1. Gemini CLI in the Terminal (Autonomous Tool Execution)
-In the VS Code terminal (`/home/jovyan`), run natural language prompts with `--yolo` (auto-approval mode):
-
-```bash
-# Example 1: Compute using an isolated sandbox
-gemini -p 'Compute the first 5 prime numbers larger than 10000 by executing a python script in a sandbox. Output only the final list of primes.' --yolo -m gemini-3.8-flash
-```
-
-What Gemini CLI does autonomously under the hood:
-1. Calls `mcp_agent-sandbox_create_sandbox` with `warmpool="python-warmpool"` and `namespace="kubeflow-user"`.
-2. Adopts a pre-warmed pod (`python-warmpool-*`) in under 200ms.
-3. Calls `mcp_agent-sandbox_upload_file` to stage `primes.py` inside the sandbox pod.
-4. Calls `mcp_agent-sandbox_execute_command` to execute `python3 primes.py` and captures stdout:
-   ```text
-   [10007, 10009, 10037, 10039, 10061]
-   ```
-5. Calls `mcp_agent-sandbox_delete_sandbox` to tear down the sandbox pod and release resources.
-
-```bash
-# Example 2: Run an autonomous test suite inside an isolated sandbox
-gemini -p 'We want to test a python function in an isolated environment. In the kubeflow-user namespace: 1) create a sandbox from warmpool python-warmpool, 2) upload a python script fib_test.py that defines fib(n) and asserts fib(10) == 55 and prints "FIBONACCI TEST PASSED", 3) execute python3 fib_test.py in the sandbox, 4) clean up and delete the sandbox, 5) tell me the execution result.' --yolo -m gemini-3.8-flash
-```
-
-Output:
-```text
-The python script `fib_test.py` was executed successfully in the sandbox. The script output was:
-```
-FIBONACCI TEST PASSED
-```
-The sandbox has been cleaned up and deleted.
-```
-
-#### 2. Gemini Code Assist Extension (Agent Mode)
-1. Open the **Gemini Code Assist** panel from the VS Code activity bar.
-2. Toggle the mode selector to **Agent Mode**.
-3. Prompt Gemini:
-   > *"Run the test suite in an isolated Kubernetes sandbox and summarize any failures."*
-   Gemini will automatically invoke the `agent-sandbox` MCP tools to create the sandbox, sync code files, execute tests, capture stdout/stderr, and tear down the sandbox.
-
----
-
-### Step 9.3: Multi-Sandbox Distributed Walkthrough (20 Parallel Agents)
-
-To see a distributed, high-scale scenario where a main coordinator orchestrates **20 parallel autonomous agents**, each commanding its own dedicated Kubernetes Agent Sandbox pod concurrently, run the bundled walkthrough:
-
-```bash
-# Run the automated 20-agent coordinator script inside the workspace pod:
-python3 gke/examples/multi_agent_sandbox_walkthrough.py
-```
-*(You can also open [`gke/examples/multi_agent_sandbox_walkthrough.ipynb`](examples/multi_agent_sandbox_walkthrough.ipynb) in JupyterLab or VS Code to step through cell-by-cell).*
-
-#### Walkthrough Scenario: Enterprise Global Portfolio Risk & Stress-Testing
-The walkthrough models a **$1,000,000,000 Enterprise Multi-Asset Portfolio** divided across **20 distinct market sectors** (AI & Cloud, Semiconductors, Biotech, Clean Energy, Aerospace, Fintech, Shipping, Robotics, Critical Metals, Sovereign Debt, Digital Assets, etc.):
-
-1. **Autonomous Worker Agents**: The coordinator launches 20 concurrent threads. Each agent instantiates an independent MCP session (`FastMCPHttpClient(client_name=f"Worker-{sector_id}")`) to guarantee complete thread-safe session isolation.
-2. **Dynamic Sandbox Allocation (20 Concurrent Pods)**:
-   - Each worker agent calls `create_sandbox` with `warmpool="python-warmpool"`.
-   - The first agent claims the pre-warmed pod in ~0.3s; the remaining 19 dynamically provision on-demand pods across the GKE node pool while the `SandboxWarmPool` operator reconciles replacements in the background.
-3. **Merton Jump-Diffusion Simulation**:
-   - Each agent generates a sector-specific quantitative modeling pipeline (`simulate.py`) modeling compound Poisson jump processes ($dS_t = (\mu - \lambda k) S_t dt + \sigma S_t dW_t + J_t S_t dN_t$) and uploads it via `upload_file`.
-   - All 20 sandboxes execute 15,000 Monte Carlo paths in parallel (300,000 total paths cluster-wide) via `execute_command`.
-4. **Tail-Risk Analysis & Artifact Retrieval**:
-   - Each sandbox computes empirical 95% & 99% Value-at-Risk (VaR), 99% Conditional VaR (Expected Shortfall / CVaR), and systemic crash stress loss, writing `risk_report.json`.
-   - Agents download results via `download_file` and terminate their individual sandbox claims via `delete_sandbox`.
-5. **Executive Portfolio Matrix Synthesis**:
-   - The coordinator aggregates the sector outputs into an **Enterprise Global Risk Matrix**, ranking tail-risk exposures across the portfolio.
-6. **Cluster Reclamation & Warmpool Verification**:
-   - Confirms that all 20 dynamic sandbox pods are terminated, releasing cluster resources, and the warmpool automatically restores its standby replica.
-
----
-
-### Step 9.4: How to Observe Sandbox Execution in Kubernetes
-
-While an agent or walkthrough script is running, open a separate terminal to observe what is happening under the hood:
-
-#### 1. Watch Custom Resource Lifecycle
-```bash
-kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get sandboxes,sandboxclaims,sandboxwarmpools -w
-```
-- When `create_sandbox` is called, a `SandboxClaim` appears in `Pending`, then flips to `Bound` as it adopts a pod.
-- `SandboxWarmPool` shows `readyReplicas` drop from `1` to `0`, followed immediately by the operator spinning up a new replacement warm pod to maintain the desired capacity.
-
-#### 2. Inspect Sandbox Pods & Labels
-```bash
-kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get pods \
-  -l agents.x-k8s.io/sandbox-claim-name -o wide
-```
-Each active sandbox pod is tagged with tracking labels:
-- `agents.x-k8s.io/sandbox-claim-name`: The unique claim ID.
-- `agents.x-k8s.io/sandbox-template-ref-hash`: Hash of the template configuration.
-- `mcp.k8s-agent-sandbox/session-id`: MCP session identifier.
-
-#### 3. Tail MCP Server Tool Invocation Logs
-```bash
-kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" logs \
-  -l app=agent-sandbox-mcp-server -f
-```
-Observe real-time JSON-RPC tool dispatches:
-```text
-INFO: 10.32.3.23:54320 - "POST /mcp HTTP/1.1" 200 OK  # initialize
-INFO: Calling tool: create_sandbox with {'warmpool': 'python-warmpool'}
-INFO: Calling tool: upload_file with {'sandbox_claim_name': 'sandbox-claim-10ddced5'}
-INFO: Calling tool: execute_command with {'command': 'python3 matrix_pipeline.py'}
-INFO: Calling tool: delete_sandbox with {'sandbox_claim_name': 'sandbox-claim-10ddced5'}
-```
-
-#### 4. Tail Sandbox Runtime Container Logs
-```bash
-# Find active sandbox pod name
-SANDBOX_POD=$(kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" get pods \
-  -l agents.x-k8s.io/sandbox-claim-name -o jsonpath='{.items[0].metadata.name}')
-
-kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" logs "${SANDBOX_POD}" -c sandbox-runtime -f
-```
-Shows incoming HTTP operations executed inside the container environment on port 8888.
-
----
-
-## 10. Enrolling Additional Users
+> [!NOTE]
+> `${BACKEND_SERVICE}` below is the name of the GKE-created global backend service.
+> It is `export`ed by [Step 5.2](#step-52-discover-iap-backend-audience--finalize-access-proxy).
+> If you are in a new shell, re-derive it first:
+> ```bash
+> NEG_NAME=$(kubectl --context="${CONTEXT}" -n kubeflow-workspaces get service gke-access-proxy \
+>   -o json | jq -er '.metadata.annotations["cloud.google.com/neg-status"] | fromjson | .network_endpoint_groups["8080"]')
+> export BACKEND_SERVICE=$(gcloud compute backend-services list --global --project="${PROJECT}" \
+>   --format='json(name,backends)' | jq -er --arg neg "${NEG_NAME}" \
+>   '[.[] | select(any(.backends[]?; .group | endswith("/networkEndpointGroups/"+$neg)))][0].name')
+> echo "${BACKEND_SERVICE}"
+> ```
 
 IAP admission and Kubernetes RBAC are configured as independent layers:
 1. **Grant IAP Admission (Google Group or Individual User)**:
@@ -1150,28 +1197,46 @@ IAP admission and Kubernetes RBAC are configured as independent layers:
 
 ---
 
-## 11. Teardown & Cleanup
+## 10. Teardown & Cleanup
 
-To remove all deployed components (including the `gke-workspace-snapshot-mutating-webhook`, `PodSnapshot*` custom resources, and tenant `ConfigMap/jupyter-ipc-config`) cleanly using the automated cleanup script:
+Tear the deployment down with the automated cleanup script:
 
 ```bash
-./gke/cleanup_standalone.sh
+./providers/gke/cleanup_standalone.sh
 ```
-To also delete the GKE Pod Snapshot GCS bucket (`gs://${SNAPSHOT_GCS_BUCKET}`), global external IP address, and Google Certificate Manager certificate map:
+
+By default, [`cleanup_standalone.sh`](cleanup_standalone.sh) removes, in this order:
+1. The snapshot mutating webhook (`gke-workspace-snapshot-mutating-webhook`) **first**, so Workspace and Pod teardown is never intercepted, plus the `gke-snapshot-webhook-cert` Certificate and Secret.
+2. All tenant workloads in `${TENANT_NAMESPACE}`: `workspaces`, `podsnapshotmanualtriggers`, `podsnapshots`, `podsnapshotpolicies`, the cluster-scoped `podsnapshotstorageconfig/kubeflow-pod-snapshot-storage-config`, `configmap/jupyter-ipc-config`, `trainjobs`, `sparkconnects`, `sparkapplications`, and the example `fashion-mnist-inference` Deployment/Service.
+3. Kubeflow Spark Operator and Kubeflow Trainer — **only if `${DIST_DIR}` (default `/tmp/kubeflow-community-distribution`) still exists locally.**
+4. The `jupyterlab`, `gke-jupyterlab`, `jupyterlab-resumable`, and `codeserver` WorkspaceKinds, and the ComputeClasses in `examples/compute-classes/` if that directory exists.
+5. The rendered edge, application, and isolation resources — **only if `providers/gke/rendered/ready/` still exists locally.**
+6. The `notebooks-gke-pilot-workspaces` ValidatingAdmissionPolicy and its binding, and the `notebooks-connections` namespace.
+
+To also delete the GKE Pod Snapshot GCS bucket and the edge resources (global external IP, Certificate Manager map entries, map, and both certificates):
+
 ```bash
-DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.sh
+DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./providers/gke/cleanup_standalone.sh
 ```
+
+> [!WARNING]
+> Because steps 3 and 5 are conditional on local directories, running the script from a fresh clone (or after `/tmp` has been cleared) will **silently skip** the Trainer/Spark removal and the edge/application/isolation deletion. Re-render the plan or re-clone `${DIST_DIR}` first if you need a complete teardown.
+
+> [!NOTE]
+> The script deliberately does **not** delete: the `${TENANT_NAMESPACE}` and `kubeflow-workspaces` namespaces, tenant **PVCs** (your notebook home disks, which keep billing until you delete them explicitly), `cert-manager`, the Kubeflow CRDs, the Artifact Registry repository and images, the GKE cluster, or the GCLB health-check firewall rule created in Step 4. Remove those by hand only after explicit data-deletion approval.
 
 ---
 
-## 12. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Resolution |
 | --- | --- |
 | `kubectl get gatewayclasses` shows no `gke-l7-global-external-managed` | Ensure you ran `gcloud container clusters update "$CLUSTER" --location="$LOCATION" --gateway-api=standard` first (Section 2.2). |
-| Google login succeeds but IAP returns `Access Denied` | Verify `gcloud iap web add-iam-policy-binding` was granted on `--service="${BACKEND_SERVICE}"`, organization membership for managed OAuth, and that external users are added to Google Auth Platform Test Users if using Custom OAuth; do not broaden IAM blindly. |
+| Browser shows `ERR_CONNECTION_CLOSED` ("unexpectedly closed the connection") | The Certificate Manager certificate is still in `PROVISIONING` / `AUTHORIZING` state. Google Front End (GFE) terminates the TLS handshake until the certificate reaches `ACTIVE`. Wait 5–15 minutes after the Gateway is Programmed, and check status using `gcloud certificate-manager certificates describe ${CERTIFICATE_NAME} --project=${PROJECT_ID}`. |
+| Browser shows `ERR_CONNECTION_RESET` ("site can’t be reached") | The GKE Gateway has not finished provisioning the load balancer forwarding rule. Inspect `kubectl describe gateway notebooks -n kubeflow-workspaces` for events. Common cause: GCP Organization Policy constraint `constraints/compute.restrictLoadBalancerCreationForTypes` blocking `GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS` (see Section 1). |
+| Google login succeeds but IAP returns `You don't have access` / `Access Denied` | 1. If using Google-managed OAuth (Option B1), the user's account domain must belong to the GCP project's organization (e.g. an external organization account or `@gmail.com` will be blocked). Switch to **Option B2 (Custom OAuth Client)** and add users to **Test users**.<br>2. Verify `gcloud iap web add-iam-policy-binding` with `roles/iap.httpsResourceAccessor` was granted on `--service="${BACKEND_SERVICE}"`. |
 | OAuth redirect mismatch | Ensure the exact `https://iap.googleapis.com/v1/oauth/clientIds/CLIENT_ID:handleRedirect` callback URI is registered on this OAuth client ID. |
-| Certificate Manager status stays `PROVISIONING` | Ensure the Gateway is `Programmed`, `NOTEBOOK_HOST` resolves to `${ADDRESS}`, the certificate map is attached, and wait 5–15 minutes for Load Balancer Authorization. |
+| Certificate Manager status stays `PROVISIONING` | Ensure the Gateway is `Programmed`, `WORKSPACES_HOST` resolves to `${ADDRESS}`, the certificate map is attached, and wait 5–15 minutes for Load Balancer Authorization. |
 | `gke-access-proxy` CrashLoopBackOff during Step 5.1 | Expected fail-closed bootstrap behavior before `IAP_AUDIENCE` is configured in Step 5.2. |
 | Webhook admission times out | Verify `CONTROL_PLANE_CIDR` and Konnectivity-agent TCP 9443 allowance in the isolation plan; certificate readiness alone does not prove connectivity. |
 | No namespace appears in the Workspaces UI | The verified email needs `list workspaces` in `${TENANT_NAMESPACE}`; IAP access alone does not grant Kubernetes RBAC. |
@@ -1179,20 +1244,20 @@ DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./gke/cleanup_standalone.
 | Notebook remains `Pending` | Check node resources, image pull permissions, PVC provisioning, quota, Pod Security, and pod events. |
 | Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update. |
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |
-| In-memory variables or kernel state lost after pause/resume | Memory-recoverable pause and resume is only supported for JupyterLab notebook workspaces on CPU/GPU hardware; other workspaces (such as VS Code) use stateless pause and resume where files on `/home/jovyan` persist but in-memory execution state does not (Step 7.5). |
+| In-memory variables or kernel state lost after pause/resume | Memory-recoverable pause and resume is only supported for JupyterLab notebook workspaces on CPU/GPU hardware; other workspaces (such as the in-browser `codeserver` kind) use stateless pause and resume where files on `/home/jovyan` persist but in-memory execution state does not (Step 7.5). Also check you did not start the work with `kubectl exec ... &` — those processes are outside the checkpointed process tree and are never restored. |
 | Custom Python packages or Conda environments missing after restart | Packages installed into ephemeral container rootfs (`/opt/conda`) are lost on Pod recreation. In the base environment, `pip` is pre-configured to automatically install into persistent storage (`/home/jovyan/.local/`) so packages persist without flags. For isolated project environments inheriting base packages, use `python3 -m venv --system-site-packages /home/jovyan/envs/<name>` (Step 7.6). |
-| VS Code fails with `unable to get issuer certificate` | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
-| Spark or TPU pods fail to create in `${TENANT_NAMESPACE}` | Verify `gke/manifests/pilot/access.yaml` has been applied to `${TENANT_NAMESPACE}` (grants RBAC on `sparkoperator.k8s.io` and `trainer.kubeflow.org` and configures baseline Pod Security and expanded `ResourceQuota`). |
-| GCS permission denied (`403`) during Spark ETL, TPU training, or `PodSnapshotPolicy` `_perm_check` | Verify both `roles/storage.objectUser` and `roles/storage.bucketViewer` are granted on `gs://${GCS_BUCKET}` to `principalSet://.../namespace/${TENANT_NAMESPACE}` (Sections 6.1 and 7.1). |
-| Gemini CLI reports `Permission 'aiplatform.endpoints.predict' denied` | Ensure Google Service Account `${TENANT_NAMESPACE}-sa@${PROJECT}.iam.gserviceaccount.com` has `roles/aiplatform.user` granted on `${PROJECT}`, or provide `GEMINI_API_KEY` (Step 9.1). |
-| Agent Sandbox MCP tool calls fail with connection refused or 404 | Verify `agent-sandbox-mcp-server` Deployment and Service are running in `${TENANT_NAMESPACE}` on port 8000 (`kubectl get pods -n ${TENANT_NAMESPACE} -l app=agent-sandbox-mcp-server`), and verify `mcpServers.agent-sandbox.url` in `/home/jovyan/.gemini/settings.json`. |
+| **Desktop** VS Code (macOS) fails with `unable to get issuer certificate` when connecting to the `connect` endpoint (Section 8) | Set `"http.systemCertificatesNode": true` in VS Code user settings and reload the window so Node uses native macOS trust instead of injecting cross-signed `GTS Root R1` without `GlobalSign Root CA` from `/Library/Keychains/System.keychain`; do not disable TLS verification. |
+| `WorkspaceCRD` rejects apply with `probes in body must be of type object: "null"` | The `probes:` block in your WorkspaceKind is fully commented out, making it parse as null. Either comment out the parent `probes:` key as well, or provide valid children. |
+| Workspace create is denied: `The pilot permits only the reviewed gke-jupyterlab, jupyterlab, jupyterlab-resumable, or codeserver WorkspaceKind.` | `spec.kind` must be one of those four names. The `notebooks-gke-pilot-workspaces` ValidatingAdmissionPolicy enforces the allow-list in [`manifests/pilot/admission.yaml`](manifests/pilot/admission.yaml) (Step 5.4). |
+| Workspace create is denied: `Secret mounts are disabled for the pilot.` / `User-supplied pod labels and annotations are disabled for the pilot.` | Remove `spec.podTemplate.volumes.secrets` and any `spec.podTemplate.podMetadata.labels` / `.annotations` from the Workspace, or relax the policy. |
+| Workspace stays out of `Running` and the Pod is `Pending` on an unbound volume | `spec.podTemplate.volumes.home` names a PVC that must **already exist** in the namespace; the controller does not create it. Create it first (Step 5.6). |
 
 Inspect conditions and error messages without printing Secrets, access tokens,
 OAuth state values, or cookies. Keep notebook data when investigating failures.
 
 ---
 
-## 13. Security and Operational Limits
+## 12. Security and Operational Limits
 
 The pilot has verified browser login, kernel and terminal WebSockets, file
 persistence across pause/resume, selected cross-tenant/forged-header denials,

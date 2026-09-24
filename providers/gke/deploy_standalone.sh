@@ -26,31 +26,30 @@ DIST_DIR="${DIST_DIR:-/tmp/kubeflow-community-distribution}"
 # ==============================================================================
 # 1. Configuration & Environment Variables
 # ==============================================================================
-export PROJECT="${PROJECT:-${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}}"
-export PROJECT_ID="${PROJECT}"
-export CLUSTER="${CLUSTER:-kubeflow-notebooks}"
+export PROJECT_ID="${PROJECT_ID:-${PROJECT:-$(gcloud config get-value project 2>/dev/null || true)}}"
+export CLUSTER_NAME="${CLUSTER_NAME:-${CLUSTER:-kubeflow-notebooks}}"
 export LOCATION="${LOCATION:-us-central1-c}"
 export REGION="${REGION:-us-central1}"
 # Comma- or space-separated list of Google account emails to grant IAP & RBAC access
 export PILOT_USERS="${PILOT_USERS:-${PILOT_USER:-}}"
 export TENANT_NAMESPACE="${TENANT_NAMESPACE:-team-a}"
-export REPOSITORY="${REPOSITORY:-notebooks}"
+export REPO_NAME="${REPO_NAME:-${REPOSITORY:-notebooks}}"
 export ADDRESS_NAME="${ADDRESS_NAME:-notebooks-gke-global}"
 export CERTIFICATE_NAME="${CERTIFICATE_NAME:-notebooks-gke}"
 export CERTIFICATE_MAP="${CERTIFICATE_MAP:-notebooks-gke}"
-export CONTEXT="${CONTEXT:-gke_${PROJECT}_${LOCATION}_${CLUSTER}}"
-export REGISTRY="${REGISTRY:-${REGION}-docker.pkg.dev/${PROJECT}/${REPOSITORY}}"
+export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 if [[ -z "${TAG:-}" ]]; then
   if [[ "${BUILD_IMAGES:-true}" == "false" ]]; then
     TAG=$(gcloud artifacts docker tags list "${REGISTRY}/gke-access-proxy" \
-      --project="${PROJECT}" --format='value(tag)' --limit=1 2>/dev/null | head -n1)
+      --project="${PROJECT_ID}" --format='value(tag)' --limit=1 2>/dev/null | head -n1)
   fi
   export TAG="${TAG:-pilot-$(date -u +%Y%m%d%H%M%S)}"
 fi
 
-# Optional: Custom domain (e.g., "notebooks.example.com").
+# Optional: Custom domain (e.g., "notebooks.example.com" or "workspaces.example.com").
 # If unset or empty, defaults automatically to "notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io" (zero DNS setup required).
-export NOTEBOOK_HOST="${NOTEBOOK_HOST:-}"
+export WORKSPACES_HOST="${WORKSPACES_HOST:-${NOTEBOOK_HOST:-}}"
 export DESKTOP_HOST="${DESKTOP_HOST:-}"
 
 # Optional: OAuth configuration
@@ -64,24 +63,27 @@ export IAP_SECRET_NAME="${IAP_SECRET_NAME:-}"
 export INSTALL_TRAINER="${INSTALL_TRAINER:-true}"
 export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
 
-# Optional: Build standalone core images (access-proxy, frontend, controller, backend)
+# Optional: Build standalone core images (access-proxy, snapshot-addon, frontend, controller, backend).
+# Custom workspace images (JupyterLab / VS Code / Spark) are NOT built here; see ../../images/build.sh.
 export BUILD_IMAGES="${BUILD_IMAGES:-true}"
-# Optional: Build custom JupyterLab (CPU/GPU/TPU) and Spark images for distributed_tpu_example.ipynb
-export BUILD_JUPYTERLAB_IMAGES="${BUILD_JUPYTERLAB_IMAGES:-true}"
-# Optional: Build custom VS Code (codeserver-python) images (CPU/GPU/TPU)
-export BUILD_CODESERVER_IMAGES="${BUILD_CODESERVER_IMAGES:-true}"
+
+# Optional: Register the upstream sample JupyterLab WorkspaceKind so users have
+# something to launch immediately after the deployment finishes.
+export APPLY_SAMPLE_WORKSPACEKIND="${APPLY_SAMPLE_WORKSPACEKIND:-true}"
+export SAMPLE_WORKSPACEKIND="${SAMPLE_WORKSPACEKIND:-${REPO_ROOT}/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml}"
 
 # Optional: Kubernetes client QPS & Burst for gke-access-proxy
 export KUBE_CLIENT_QPS="${KUBE_CLIENT_QPS:-100}"
 export KUBE_CLIENT_BURST="${KUBE_CLIENT_BURST:-200}"
 
-# GCS Bucket for distributed_tpu_example.ipynb (Spark ETL & TPU Training data)
-export GCS_BUCKET="${GCS_BUCKET:-${TENANT_NAMESPACE}-bucket}"
 # Dedicated GCS Bucket for GKE Pod Snapshots (stateful Workspace Pause & Resume)
 export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
 
-if [[ -z "${PROJECT}" ]]; then
-  echo "ERROR: PROJECT / PROJECT_ID is not set. Please run: export PROJECT=your-gcp-project-id" >&2
+# Optional: Skip organization policy check for external load balancer types
+export SKIP_ORG_POLICY_CHECK="${SKIP_ORG_POLICY_CHECK:-false}"
+
+if [[ -z "${PROJECT_ID}" ]]; then
+  echo "ERROR: PROJECT_ID is not set. Please run: export PROJECT_ID=your-gcp-project-id" >&2
   exit 1
 fi
 
@@ -90,21 +92,56 @@ if [[ -z "${PILOT_USERS}" ]]; then
   exit 1
 fi
 
+# Pre-flight check: verify that project allows external HTTP/HTTPS load balancers
+if [[ "${SKIP_ORG_POLICY_CHECK}" != "true" ]]; then
+  echo "Checking organization policy constraints on project '${PROJECT_ID}'..."
+  EFFECTIVE_LB_POLICY=$(gcloud resource-manager org-policies describe compute.restrictLoadBalancerCreationForTypes \
+    --project="${PROJECT_ID}" --effective --format=json 2>/dev/null || true)
+  if [[ -n "${EFFECTIVE_LB_POLICY}" ]]; then
+    ALL_VALUES=$(jq -r '.listPolicy.allValues // empty' <<< "${EFFECTIVE_LB_POLICY}")
+    LB_ALLOWED=true
+    if [[ "${ALL_VALUES}" == "DENY" ]]; then
+      LB_ALLOWED=false
+    elif [[ "${ALL_VALUES}" != "ALLOW" ]]; then
+      if jq -e '.listPolicy.allowedValues' <<< "${EFFECTIVE_LB_POLICY}" >/dev/null 2>&1; then
+        if ! jq -e '.listPolicy.allowedValues | index("GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS")' <<< "${EFFECTIVE_LB_POLICY}" >/dev/null 2>&1; then
+          LB_ALLOWED=false
+        fi
+      fi
+      if jq -e '.listPolicy.deniedValues' <<< "${EFFECTIVE_LB_POLICY}" >/dev/null 2>&1; then
+        if jq -e '.listPolicy.deniedValues | index("GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS")' <<< "${EFFECTIVE_LB_POLICY}" >/dev/null 2>&1; then
+          LB_ALLOWED=false
+        fi
+      fi
+    fi
+
+    if [[ "${LB_ALLOWED}" == "false" ]]; then
+      echo "ERROR: Organization policy constraint 'constraints/compute.restrictLoadBalancerCreationForTypes' on project '${PROJECT_ID}' does not allow GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS." >&2
+      echo "The GKE Gateway controller requires this load balancer type for the 'gke-l7-global-external-managed' GatewayClass." >&2
+      echo "To fix this:" >&2
+      echo "  1. Request an org policy exemption for project '${PROJECT_ID}' allowing GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS (e.g. via go/gcp-control-gclb or go/overground-quickstart#project-level)." >&2
+      echo "  2. Or deploy into an already-exempted project/folder (e.g. projects under teams/gke/dev/dev_projects)." >&2
+      echo "  (To bypass this check, re-run with: export SKIP_ORG_POLICY_CHECK=true)" >&2
+      exit 1
+    fi
+  fi
+fi
+
 echo "=================================================================="
 echo "Standalone Kubeflow Workspaces on GKE (No Istio) Deployment"
 echo "=================================================================="
-echo "  PROJECT:             ${PROJECT}"
-echo "  CLUSTER:             ${CLUSTER} (${LOCATION})"
+echo "  PROJECT_ID:          ${PROJECT_ID}"
+echo "  CLUSTER_NAME:        ${CLUSTER_NAME} (${LOCATION})"
 echo "  REGION:              ${REGION}"
 echo "  PILOT_USERS:         ${PILOT_USERS}"
 echo "  TENANT_NAMESPACE:    ${TENANT_NAMESPACE}"
+echo "  REPO_NAME:           ${REPO_NAME}"
 echo "  REGISTRY:            ${REGISTRY}"
-echo "  GCS_BUCKET:          ${GCS_BUCKET}"
 echo "  SNAPSHOT_GCS_BUCKET: ${SNAPSHOT_GCS_BUCKET}"
+echo "  BUILD_IMAGES:        ${BUILD_IMAGES}"
 echo "  INSTALL_TRAINER:     ${INSTALL_TRAINER}"
 echo "  INSTALL_SPARK:       ${INSTALL_SPARK_OPERATOR}"
-echo "  BUILD_JUPYTERLAB:    ${BUILD_JUPYTERLAB_IMAGES}"
-echo "  BUILD_CODESERVER:    ${BUILD_CODESERVER_IMAGES}"
+echo "  SAMPLE_WORKSPACEKIND:${APPLY_SAMPLE_WORKSPACEKIND}"
 echo "=================================================================="
 
 # ==============================================================================
@@ -119,19 +156,19 @@ gcloud services enable \
   artifactregistry.googleapis.com \
   certificatemanager.googleapis.com \
   iap.googleapis.com \
-  --project="${PROJECT}"
+  --project="${PROJECT_ID}"
 
-gcloud container clusters get-credentials "${CLUSTER}" \
+gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --location="${LOCATION}" \
-  --project="${PROJECT}"
+  --project="${PROJECT_ID}"
 
 if kubectl --context="${CONTEXT}" get gatewayclass/gke-l7-global-external-managed -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null | grep -q "True"; then
-  echo "GatewayClass 'gke-l7-global-external-managed' is already Accepted on cluster '${CLUSTER}'; skipping cluster update."
+  echo "GatewayClass 'gke-l7-global-external-managed' is already Accepted on cluster '${CLUSTER_NAME}'; skipping cluster update."
 else
-  echo "Enabling standard Gateway API on GKE cluster '${CLUSTER}'..."
-  gcloud container clusters update "${CLUSTER}" \
+  echo "Enabling standard Gateway API on GKE cluster '${CLUSTER_NAME}'..."
+  gcloud container clusters update "${CLUSTER_NAME}" \
     --location="${LOCATION}" \
-    --project="${PROJECT}" \
+    --project="${PROJECT_ID}" \
     --gateway-api=standard \
     --quiet
 
@@ -146,15 +183,24 @@ kubectl --context="${CONTEXT}" get crd \
   gcpbackendpolicies.networking.gke.io \
   healthcheckpolicies.networking.gke.io
 
-# Ensure Artifact Registry repository exists
-if ! gcloud artifacts repositories describe "${REPOSITORY}" \
+# Ensure Artifact Registry repository exists and GKE nodes can pull images
+if ! gcloud artifacts repositories describe "${REPO_NAME}" \
     --location="${REGION}" \
-    --project="${PROJECT}" >/dev/null 2>&1; then
-  echo "Creating Artifact Registry repository '${REPOSITORY}' in ${REGION}..."
-  gcloud artifacts repositories create "${REPOSITORY}" \
+    --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "Creating Artifact Registry repository '${REPO_NAME}' in ${REGION}..."
+  gcloud artifacts repositories create "${REPO_NAME}" \
     --repository-format=docker \
     --location="${REGION}" \
-    --project="${PROJECT}"
+    --project="${PROJECT_ID}"
+fi
+
+GKE_SA="$(gcloud iam service-accounts list --project="${PROJECT_ID}" --filter="displayName:Compute Engine default service account" --format='value(email)' 2>/dev/null | head -n1 || true)"
+if [[ -n "${GKE_SA}" ]]; then
+  gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
+    --location="${REGION}" \
+    --project="${PROJECT_ID}" \
+    --member="serviceAccount:${GKE_SA}" \
+    --role="roles/artifactregistry.reader" >/dev/null 2>&1 || true
 fi
 
 # ==============================================================================
@@ -203,56 +249,27 @@ if [[ "${BUILD_IMAGES}" == "true" ]]; then
   done
 fi
 
-if [[ "${BUILD_JUPYTERLAB_IMAGES}" == "true" ]]; then
-  echo "=================================================================="
-  echo "Step 3b: Checking Custom JupyterLab (CPU/GPU/TPU) & Spark Images..."
-  echo "=================================================================="
-  if [[ "${FORCE_BUILD_JUPYTERLAB_IMAGES:-false}" != "true" ]] && \
-     gcloud artifacts docker images describe "${REGISTRY}/jupyterlab:latest-cpu" --project="${PROJECT}" >/dev/null 2>&1 && \
-     gcloud artifacts docker images describe "${REGISTRY}/spark-py312:latest" --project="${PROJECT}" >/dev/null 2>&1; then
-    echo "Custom JupyterLab and Spark images already exist in ${REGISTRY}; skipping rebuild."
-  else
-    PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
-      TENANT_NAMESPACE="${TENANT_NAMESPACE}" GCS_BUCKET="${GCS_BUCKET}" \
-      bash "${SCRIPT_DIR}/build_jupyterlab.sh"
-  fi
-fi
-
-if [[ "${BUILD_CODESERVER_IMAGES}" == "true" ]]; then
-  echo "=================================================================="
-  echo "Step 3c: Checking Custom VS Code (codeserver-python) Images..."
-  echo "=================================================================="
-  if [[ "${FORCE_BUILD_CODESERVER_IMAGES:-false}" != "true" ]] && \
-     gcloud artifacts docker images describe "${REGISTRY}/codeserver-python:latest-cpu" --project="${PROJECT}" >/dev/null 2>&1; then
-    echo "Custom codeserver-python images already exist in ${REGISTRY}; skipping rebuild."
-  else
-    PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
-      TENANT_NAMESPACE="${TENANT_NAMESPACE}" GCS_BUCKET="${GCS_BUCKET}" \
-      bash "${SCRIPT_DIR}/build_codeserver_python.sh" --variant "${CODESERVER_VARIANT:-cpu}" --fast
-  fi
-fi
-
 # ==============================================================================
 # Step 4: Reserve Global External IP, Configure Domain & Certificate Manager
 # ==============================================================================
 echo "=================================================================="
 echo "Step 4: Configuring Global External IP, Domain & Certificate Manager..."
 echo "=================================================================="
-if ! gcloud compute addresses describe "${ADDRESS_NAME}" --global --project="${PROJECT}" >/dev/null 2>&1; then
+if ! gcloud compute addresses describe "${ADDRESS_NAME}" --global --project="${PROJECT_ID}" >/dev/null 2>&1; then
   gcloud compute addresses create "${ADDRESS_NAME}" --global --ip-version=IPV4 \
-    --network-tier=PREMIUM --project="${PROJECT}"
+    --network-tier=PREMIUM --project="${PROJECT_ID}"
 fi
 
 export ADDRESS=$(gcloud compute addresses describe "${ADDRESS_NAME}" \
-  --global --project="${PROJECT}" --format='value(address)')
+  --global --project="${PROJECT_ID}" --format='value(address)')
 echo "Global External IP (${ADDRESS_NAME}): ${ADDRESS}"
 
-if [[ -z "${NOTEBOOK_HOST}" ]]; then
-  export NOTEBOOK_HOST="notebooks.${ADDRESS}.sslip.io"
-  echo "No NOTEBOOK_HOST specified. Automatically using sslip.io domain: ${NOTEBOOK_HOST}"
+if [[ -z "${WORKSPACES_HOST}" ]]; then
+  export WORKSPACES_HOST="notebooks.${ADDRESS}.sslip.io"
+  echo "No WORKSPACES_HOST specified. Automatically using sslip.io domain: ${WORKSPACES_HOST}"
 else
-  echo "Using custom NOTEBOOK_HOST: ${NOTEBOOK_HOST}"
-  echo "Ensure your DNS A record maps ${NOTEBOOK_HOST} -> ${ADDRESS}"
+  echo "Using custom WORKSPACES_HOST: ${WORKSPACES_HOST}"
+  echo "Ensure your DNS A record maps ${WORKSPACES_HOST} -> ${ADDRESS}"
 fi
 
 if [[ -z "${DESKTOP_HOST}" ]]; then
@@ -263,32 +280,107 @@ else
   echo "Ensure your DNS A record maps ${DESKTOP_HOST} -> ${ADDRESS}"
 fi
 
-if ! gcloud certificate-manager certificates describe "${CERTIFICATE_NAME}" --project="${PROJECT}" >/dev/null 2>&1; then
-  gcloud certificate-manager certificates create "${CERTIFICATE_NAME}" \
-    --domains="${NOTEBOOK_HOST}" --project="${PROJECT}"
+if ! gcloud certificate-manager maps describe "${CERTIFICATE_MAP}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  gcloud certificate-manager maps create "${CERTIFICATE_MAP}" --project="${PROJECT_ID}"
 fi
+
+# Helper function to ensure a Certificate Manager certificate exists and covers the target domain
+ensure_certificate() {
+  local cert_name="$1"
+  local target_domain="$2"
+  local out_var="$3"
+
+  # Check if the desired certificate name already exists
+  if gcloud certificate-manager certificates describe "${cert_name}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    local existing_domains
+    existing_domains=$(gcloud certificate-manager certificates describe "${cert_name}" \
+      --project="${PROJECT_ID}" --format='value(domains)' 2>/dev/null || true)
+    if [[ "${existing_domains}" == *"${target_domain}"* ]]; then
+      echo "Certificate '${cert_name}' covers '${target_domain}'."
+      eval "${out_var}=\"${cert_name}\""
+      return 0
+    fi
+    echo "Existing certificate '${cert_name}' covers '${existing_domains}', but target domain is '${target_domain}'."
+  fi
+
+  # Check if another certificate in the project already covers target_domain
+  local alt_cert
+  alt_cert=$(gcloud certificate-manager certificates list --project="${PROJECT_ID}" \
+    --format='json' 2>/dev/null | jq -r --arg domain "${target_domain}" \
+    '.[] | select(any(.domains[]?; . == $domain)) | .name' | awk -F'/' '{print $NF}' | head -n1 || true)
+  if [[ -n "${alt_cert}" ]]; then
+    echo "Found existing certificate '${alt_cert}' covering '${target_domain}'."
+    eval "${out_var}=\"${alt_cert}\""
+    return 0
+  fi
+
+  # If cert_name exists with the wrong domain, recreate it
+  if gcloud certificate-manager certificates describe "${cert_name}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Recreating certificate '${cert_name}' for domain '${target_domain}'..."
+    local entries_to_delete
+    entries_to_delete=$(gcloud certificate-manager maps entries list --map="${CERTIFICATE_MAP}" \
+      --project="${PROJECT_ID}" --format='json' 2>/dev/null | jq -r --arg cert "${cert_name}" \
+      '.[] | select(any(.certificates[]?; endswith("/certificates/" + $cert))) | .name' | awk -F'/' '{print $NF}' || true)
+    for entry in ${entries_to_delete}; do
+      echo "Removing map entry '${entry}' referencing '${cert_name}' before certificate recreation..."
+      gcloud certificate-manager maps entries delete "${entry}" \
+        --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --quiet || true
+    done
+    gcloud certificate-manager certificates delete "${cert_name}" --project="${PROJECT_ID}" --quiet
+  fi
+
+  echo "Creating Certificate Manager certificate '${cert_name}' for '${target_domain}'..."
+  gcloud certificate-manager certificates create "${cert_name}" \
+    --domains="${target_domain}" --project="${PROJECT_ID}"
+  eval "${out_var}=\"${cert_name}\""
+}
+
+# Helper function to ensure a Certificate Map entry exists for the target hostname
+ensure_map_entry() {
+  local entry_name="$1"
+  local target_host="$2"
+  local cert_name="$3"
+
+  # Check if an entry for this exact hostname already exists in the map under any entry name
+  local existing_entry_for_host
+  existing_entry_for_host=$(gcloud certificate-manager maps entries list --map="${CERTIFICATE_MAP}" \
+    --project="${PROJECT_ID}" --format='json' 2>/dev/null | jq -r --arg host "${target_host}" \
+    '.[] | select(.hostname == $host) | .name' | awk -F'/' '{print $NF}' | head -n1 || true)
+
+  if [[ -n "${existing_entry_for_host}" ]]; then
+    local current_certs
+    current_certs=$(gcloud certificate-manager maps entries describe "${existing_entry_for_host}" \
+      --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --format='value(certificates)' 2>/dev/null || true)
+    if [[ "${current_certs}" != *"${cert_name}"* ]]; then
+      echo "Updating certificate on existing map entry '${existing_entry_for_host}' to '${cert_name}'..."
+      gcloud certificate-manager maps entries update "${existing_entry_for_host}" \
+        --map="${CERTIFICATE_MAP}" --certificates="${cert_name}" --project="${PROJECT_ID}"
+    fi
+    return 0
+  fi
+
+  # If entry_name exists but points to a different hostname, remove it first
+  if gcloud certificate-manager maps entries describe "${entry_name}" --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    echo "Certificate map entry '${entry_name}' exists with different hostname. Recreating for '${target_host}'..."
+    gcloud certificate-manager maps entries delete "${entry_name}" \
+      --map="${CERTIFICATE_MAP}" --project="${PROJECT_ID}" --quiet
+  fi
+
+  echo "Creating Certificate Map entry '${entry_name}' for '${target_host}'..."
+  gcloud certificate-manager maps entries create "${entry_name}" \
+    --map="${CERTIFICATE_MAP}" --certificates="${cert_name}" \
+    --hostname="${target_host}" --project="${PROJECT_ID}"
+}
+
+ACTUAL_WORKSPACES_CERT=""
+ensure_certificate "${CERTIFICATE_NAME}" "${WORKSPACES_HOST}" ACTUAL_WORKSPACES_CERT
 
 DESKTOP_CERTIFICATE="${CERTIFICATE_NAME}-desktop"
-if ! gcloud certificate-manager certificates describe "${DESKTOP_CERTIFICATE}" --project="${PROJECT}" >/dev/null 2>&1; then
-  gcloud certificate-manager certificates create "${DESKTOP_CERTIFICATE}" \
-    --domains="${DESKTOP_HOST}" --project="${PROJECT}"
-fi
+ACTUAL_DESKTOP_CERT=""
+ensure_certificate "${DESKTOP_CERTIFICATE}" "${DESKTOP_HOST}" ACTUAL_DESKTOP_CERT
 
-if ! gcloud certificate-manager maps describe "${CERTIFICATE_MAP}" --project="${PROJECT}" >/dev/null 2>&1; then
-  gcloud certificate-manager maps create "${CERTIFICATE_MAP}" --project="${PROJECT}"
-fi
-
-if ! gcloud certificate-manager maps entries describe notebooks --map="${CERTIFICATE_MAP}" --project="${PROJECT}" >/dev/null 2>&1; then
-  gcloud certificate-manager maps entries create notebooks \
-    --map="${CERTIFICATE_MAP}" --certificates="${CERTIFICATE_NAME}" \
-    --hostname="${NOTEBOOK_HOST}" --project="${PROJECT}"
-fi
-
-if ! gcloud certificate-manager maps entries describe notebooks-desktop --map="${CERTIFICATE_MAP}" --project="${PROJECT}" >/dev/null 2>&1; then
-  gcloud certificate-manager maps entries create notebooks-desktop \
-    --map="${CERTIFICATE_MAP}" --certificates="${DESKTOP_CERTIFICATE}" \
-    --hostname="${DESKTOP_HOST}" --project="${PROJECT}"
-fi
+ensure_map_entry notebooks "${WORKSPACES_HOST}" "${ACTUAL_WORKSPACES_CERT}"
+ensure_map_entry notebooks-desktop "${DESKTOP_HOST}" "${ACTUAL_DESKTOP_CERT}"
 
 # Ensure a GKE-node-tagged firewall rule exists for Google Cloud Load Balancer
 # health checks and Google Front Ends (35.191.0.0/16, 130.211.0.0/22).
@@ -301,22 +393,22 @@ if [[ -n "${FIRST_NODE}" ]]; then
   FIRST_NODE_ZONE=$(kubectl --context="${CONTEXT}" get node "${FIRST_NODE}" \
     -o jsonpath='{.metadata.labels.topology\.kubernetes\.io/zone}' 2>/dev/null || true)
   GKE_NODE_TAG=$(gcloud compute instances describe "${FIRST_NODE}" \
-    --zone="${FIRST_NODE_ZONE}" --project="${PROJECT}" \
+    --zone="${FIRST_NODE_ZONE}" --project="${PROJECT_ID}" \
     --format='value(tags.items)' 2>/dev/null | tr ';' '\n' | grep -E '^gke-.*-node$' | head -n1 || true)
-  CLUSTER_NETWORK=$(gcloud container clusters describe "${CLUSTER}" \
-    --location="${LOCATION}" --project="${PROJECT}" \
+  CLUSTER_NETWORK=$(gcloud container clusters describe "${CLUSTER_NAME}" \
+    --location="${LOCATION}" --project="${PROJECT_ID}" \
     --format='value(network)' 2>/dev/null || echo "default")
   if [[ -n "${GKE_NODE_TAG}" ]]; then
     GCLB_FW_NAME="${GKE_NODE_TAG%-node}-gclb-hc"
-    if ! gcloud compute firewall-rules describe "${GCLB_FW_NAME}" --project="${PROJECT}" >/dev/null 2>&1; then
+    if ! gcloud compute firewall-rules describe "${GCLB_FW_NAME}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
       echo "Creating GKE-node-tagged firewall rule '${GCLB_FW_NAME}' (target tag: ${GKE_NODE_TAG}) for GCLB health checks..."
       gcloud compute firewall-rules create "${GCLB_FW_NAME}" \
-        --project="${PROJECT}" \
+        --project="${PROJECT_ID}" \
         --network="${CLUSTER_NETWORK}" \
         --target-tags="${GKE_NODE_TAG}" \
         --allow=tcp:8080,tcp:8081 \
         --source-ranges=35.191.0.0/16,130.211.0.0/22 \
-        --description='{"kubernetes.io/cluster-id":"'"${CLUSTER}"'","purpose":"allow-gclb-health-checks-and-gfe"}'
+        --description='{"kubernetes.io/cluster-id":"'"${CLUSTER_NAME}"'","purpose":"allow-gclb-health-checks-and-gfe"}'
     else
       echo "GKE-node-tagged firewall rule '${GCLB_FW_NAME}' already exists."
     fi
@@ -334,30 +426,30 @@ if [[ -n "${OAUTH_FILE}" && -f "${OAUTH_FILE}" ]]; then
   export IAP_SECRET_NAME="${IAP_SECRET_NAME:-iap-oauth}"
 fi
 
-CONTROL_PLANE_IP=$(gcloud container clusters describe "${CLUSTER}" \
-  --location="${LOCATION}" --project="${PROJECT}" \
+CONTROL_PLANE_IP=$(gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
   --format='value(privateClusterConfig.privateEndpoint,controlPlaneEndpointsConfig.ipEndpointsConfig.privateEndpoint)' | awk '{print $1}')
 if [[ -z "${CONTROL_PLANE_IP}" ]]; then
-  CONTROL_PLANE_IP=$(gcloud container clusters describe "${CLUSTER}" \
-    --location="${LOCATION}" --project="${PROJECT}" \
+  CONTROL_PLANE_IP=$(gcloud container clusters describe "${CLUSTER_NAME}" \
+    --location="${LOCATION}" --project="${PROJECT_ID}" \
     --format='value(endpoint)')
 fi
 export CONTROL_PLANE_CIDR="${CONTROL_PLANE_CIDR:-${CONTROL_PLANE_IP}/32}"
 
 PROXY_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-access-proxy:${TAG}" \
-  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
 SNAPSHOT_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-snapshot-addon:${TAG}" \
-  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
 FRONTEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-frontend:${TAG}" \
-  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
 CONTROLLER_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-controller:${TAG}" \
-  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
 BACKEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-backend:${TAG}" \
-  --project="${PROJECT}" --format='value(image_summary.fully_qualified_digest)')
+  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
 
 jq -n \
   --arg cidr "${CONTROL_PLANE_CIDR}" \
-  --arg host "${NOTEBOOK_HOST}" \
+  --arg host "${WORKSPACES_HOST}" \
   --arg desktopHost "${DESKTOP_HOST}" \
   --arg certificateMap "${CERTIFICATE_MAP}" \
   --arg addressName "${ADDRESS_NAME}" \
@@ -425,7 +517,7 @@ done
 
 MATCHED_BACKEND=""
 for i in {1..60}; do
-  MATCHED_BACKEND=$(gcloud compute backend-services list --global --project="${PROJECT}" \
+  MATCHED_BACKEND=$(gcloud compute backend-services list --global --project="${PROJECT_ID}" \
     --format='json(name,id,backends,iap.enabled)' | jq -ce --arg neg "${NEG_NAME}" \
     '[.[] | select(any(.backends[]?; .group | endswith("/networkEndpointGroups/"+$neg)))]
      | if length==1 then .[0] else empty end' 2>/dev/null || true)
@@ -438,7 +530,7 @@ done
 
 export BACKEND_SERVICE=$(jq -er '.name' <<< "${MATCHED_BACKEND}")
 BACKEND_ID=$(jq -er '.id' <<< "${MATCHED_BACKEND}")
-PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')
 export IAP_AUDIENCE="/projects/${PROJECT_NUMBER}/global/backendServices/${BACKEND_ID}"
 echo "Discovered IAP Backend Service: ${BACKEND_SERVICE} (Audience: ${IAP_AUDIENCE})"
 
@@ -495,7 +587,7 @@ if [[ "${INSTALL_TRAINER}" == "true" || "${INSTALL_SPARK_OPERATOR}" == "true" ]]
 fi
 
 # ==============================================================================
-# Step 8: Admit Users via IAP & Apply Tenant RBAC, WorkspaceKind, ComputeClasses
+# Step 8: Admit Users via IAP & Apply Tenant RBAC + Sample WorkspaceKind
 # ==============================================================================
 echo "=================================================================="
 echo "Step 8: Admitting Users via IAP & Configuring Tenant Workspace..."
@@ -503,7 +595,7 @@ echo "=================================================================="
 for user_email in $(echo "${PILOT_USERS}" | tr ',' ' '); do
   if [[ -n "${user_email}" ]]; then
     echo "Granting IAP access to ${user_email}..."
-    gcloud iap web add-iam-policy-binding --project="${PROJECT}" \
+    gcloud iap web add-iam-policy-binding --project="${PROJECT_ID}" \
       --resource-type=backend-services --service="${BACKEND_SERVICE}" \
       --member="user:${user_email}" --role=roles/iap.httpsResourceAccessor --condition=None
   fi
@@ -531,111 +623,38 @@ kubectl kustomize --load-restrictor=LoadRestrictionsNone "${SCRIPT_DIR}/manifest
 kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke-pilot \
   -f "${SCRIPT_DIR}/rendered/ready/customer-pilot.json"
 
-# Helper: Resolve the latest image tag for a variant from Artifact Registry,
-# falling back to any existing rendered tags file, and finally to latest-${variant}.
-resolve_latest_tag() {
-  local image="$1"
-  local variant="$2"
-  local env_file="${3:-}"
-  local default_tag="latest-${variant}"
-
-  local tag=""
-  tag=$(gcloud artifacts docker tags list "${REGISTRY}/${image}" \
-    --project="${PROJECT}" --format="value(tag)" 2>/dev/null | grep -E "^v[0-9]{8}-[0-9]{6}-${variant}$" | sort -V | tail -n 1 || true)
-
-  if [[ -n "${tag}" ]]; then
-    echo "${tag}"
-    return
+# Register the upstream sample JupyterLab WorkspaceKind so that the tenant has a
+# ready-to-use Workspace option as soon as the deployment finishes. It only uses
+# public ghcr.io/kubeflow images, so no custom image build is required.
+# To register the custom (JupyterLab / VS Code) WorkspaceKinds that back the
+# examples, build the images with ../../images/build.sh and apply the templates
+# in ../../images/workspacekinds/.
+if [[ "${APPLY_SAMPLE_WORKSPACEKIND}" == "true" ]]; then
+  if [[ -f "${SAMPLE_WORKSPACEKIND}" ]]; then
+    echo "Registering sample WorkspaceKind from ${SAMPLE_WORKSPACEKIND}..."
+    kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
+      --field-manager=notebooks-gke-pilot -f "${SAMPLE_WORKSPACEKIND}"
+  else
+    echo "WARNING: SAMPLE_WORKSPACEKIND '${SAMPLE_WORKSPACEKIND}' not found; skipping." >&2
   fi
-
-  if [[ -n "${env_file}" && -f "${env_file}" ]]; then
-    local var_key="$(echo "${variant}" | tr '[:lower:]' '[:upper:]')_IMAGE_TAG"
-    local saved_tag
-    saved_tag=$(grep -E "^${var_key}=" "${env_file}" 2>/dev/null | head -n1 | cut -d'"' -f2 || true)
-    if [[ -n "${saved_tag}" ]]; then
-      echo "${saved_tag}"
-      return
-    fi
-  fi
-
-  echo "${default_tag}"
-}
-
-if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" ]]; then
-  echo "Registering WorkspaceKind 'jupyterlab' for distributed_tpu_example.ipynb..."
-  JL_TAGS_FILE="${SCRIPT_DIR}/rendered/jupyterlab-image-tags.env"
-  CPU_IMAGE_TAG="${CPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "cpu" "${JL_TAGS_FILE}")}"
-  GPU_IMAGE_TAG="${GPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "gpu" "${JL_TAGS_FILE}")}"
-  TPU_IMAGE_TAG="${TPU_IMAGE_TAG:-$(resolve_latest_tag "jupyterlab" "tpu" "${JL_TAGS_FILE}")}"
-
-  mkdir -p "$(dirname "${JL_TAGS_FILE}")"
-  cat > "${JL_TAGS_FILE}" <<EOF
-# Updated by deploy_standalone.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
-CPU_IMAGE_TAG="${CPU_IMAGE_TAG}"
-GPU_IMAGE_TAG="${GPU_IMAGE_TAG}"
-TPU_IMAGE_TAG="${TPU_IMAGE_TAG}"
-EOF
-
-  echo "  pinning cpu=${CPU_IMAGE_TAG} gpu=${GPU_IMAGE_TAG} tpu=${TPU_IMAGE_TAG}"
-  PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
-    IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
-    CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
-    envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind.yaml" | kubectl --context="${CONTEXT}" apply -f -
-
-  if [[ -f "${SCRIPT_DIR}/jupyterlab/workspacekind-resumable.yaml" ]]; then
-    echo "Registering WorkspaceKind 'jupyterlab-resumable' (resumable CPU & GPU)..."
-    PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
-      IMAGE_NAME="jupyterlab" GCS_BUCKET="${GCS_BUCKET}" \
-      CPU_IMAGE_TAG="${CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${TPU_IMAGE_TAG}" \
-      envsubst < "${SCRIPT_DIR}/jupyterlab/workspacekind-resumable.yaml" | kubectl --context="${CONTEXT}" apply -f -
-  fi
-fi
-
-if [[ -f "${SCRIPT_DIR}/codeserver-python/workspacekind.yaml" ]]; then
-  echo "Registering WorkspaceKind 'codeserver'..."
-  CS_TAGS_FILE="${SCRIPT_DIR}/rendered/codeserver-image-tags.env"
-  CS_CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "cpu" "${CS_TAGS_FILE}")}"
-  CS_GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "gpu" "${CS_TAGS_FILE}")}"
-  CS_TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG:-$(resolve_latest_tag "codeserver-python" "tpu" "${CS_TAGS_FILE}")}"
-
-  mkdir -p "$(dirname "${CS_TAGS_FILE}")"
-  cat > "${CS_TAGS_FILE}" <<EOF
-# Updated by deploy_standalone.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
-CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG}"
-GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG}"
-TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG}"
-EOF
-
-  echo "  pinning cpu=${CS_CPU_IMAGE_TAG} gpu=${CS_GPU_IMAGE_TAG} tpu=${CS_TPU_IMAGE_TAG}"
-  PROJECT_ID="${PROJECT}" REGION="${REGION}" REPO_NAME="${REPOSITORY}" \
-    IMAGE_NAME="codeserver-python" GCS_BUCKET="${GCS_BUCKET}" \
-    CPU_IMAGE_TAG="${CS_CPU_IMAGE_TAG}" GPU_IMAGE_TAG="${CS_GPU_IMAGE_TAG}" TPU_IMAGE_TAG="${CS_TPU_IMAGE_TAG}" \
-    envsubst < "${SCRIPT_DIR}/codeserver-python/workspacekind.yaml" | kubectl --context="${CONTEXT}" apply -f -
-fi
-
-if [[ -d "${SCRIPT_DIR}/manifests/compute-classes" ]]; then
-  echo "Applying GKE ComputeClass manifests (GPU and TPU)..."
-  kubectl --context="${CONTEXT}" apply -f "${SCRIPT_DIR}/manifests/compute-classes/"
 fi
 
 # ==============================================================================
-# Step 9: Configure Data & Snapshot GCS Buckets & Workload Identity IAM Bindings
+# Step 9: Configure Snapshot GCS Bucket & Workload Identity IAM Bindings
 # ==============================================================================
 echo "=================================================================="
-echo "Step 9: Configuring Data & Snapshot GCS Buckets & Workload Identity..."
+echo "Step 9: Configuring Snapshot GCS Bucket & Workload Identity..."
 echo "=================================================================="
-for bucket in "${GCS_BUCKET}" "${SNAPSHOT_GCS_BUCKET}"; do
-  if ! gcloud storage buckets describe "gs://${bucket}" --project="${PROJECT}" >/dev/null 2>&1; then
-    echo "Creating GCS bucket gs://${bucket}..."
-    gcloud storage buckets create "gs://${bucket}" --location="${REGION}" --project="${PROJECT}" || true
-  fi
-  gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
-    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
-    --role="roles/storage.objectUser" >/dev/null || true
-  gcloud storage buckets add-iam-policy-binding "gs://${bucket}" \
-    --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
-    --role="roles/storage.bucketViewer" >/dev/null || true
-done
+if ! gcloud storage buckets describe "gs://${SNAPSHOT_GCS_BUCKET}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+  echo "Creating GCS bucket gs://${SNAPSHOT_GCS_BUCKET}..."
+  gcloud storage buckets create "gs://${SNAPSHOT_GCS_BUCKET}" --location="${REGION}" --project="${PROJECT_ID}" || true
+fi
+gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+  --role="roles/storage.objectUser" >/dev/null || true
+gcloud storage buckets add-iam-policy-binding "gs://${SNAPSHOT_GCS_BUCKET}" \
+  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/namespace/${TENANT_NAMESPACE}" \
+  --role="roles/storage.bucketViewer" >/dev/null || true
 
 # Grant GKE Service Agent roles/storage.objectUser on SNAPSHOT_GCS_BUCKET so
 # podsnapshot.gke.io/podsnapshot-finalizer can delete consumed/expired snapshot files in GCS
@@ -657,22 +676,45 @@ cat <<EOF > /tmp/snapshot-lifecycle.json
 }
 EOF
 gcloud storage buckets update "gs://${SNAPSHOT_GCS_BUCKET}" \
-  --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT}" >/dev/null || true
+  --lifecycle-file=/tmp/snapshot-lifecycle.json --project="${PROJECT_ID}" >/dev/null || true
 rm -f /tmp/snapshot-lifecycle.json
 
 echo "=================================================================="
 echo "✅ Standalone Kubeflow Workspaces Deployment Complete!"
 echo "=================================================================="
-echo "  Public HTTPS URL:  https://${NOTEBOOK_HOST}/workspaces/"
-echo "  VS Code Tokens:    https://${NOTEBOOK_HOST}/workspaces/connections"
+echo "  Public HTTPS URL:  https://${WORKSPACES_HOST}/workspaces/"
+echo "  VS Code Tokens:    https://${WORKSPACES_HOST}/workspaces/connections"
 echo "  Desktop Endpoint:  https://${DESKTOP_HOST}/"
 echo "  Admitted Users:    ${PILOT_USERS}"
 echo "  Tenant Namespace:  ${TENANT_NAMESPACE}"
-echo "  Data GCS Bucket:   gs://${GCS_BUCKET}"
 echo "  Snapshot Bucket:   gs://${SNAPSHOT_GCS_BUCKET}"
 echo ""
-echo "Note: Certificate Manager certificates '${CERTIFICATE_NAME}' and '${CERTIFICATE_NAME}-desktop' use Load Balancer"
-echo "authorization and may take 5-15 minutes after Gateway attachment to reach ACTIVE state."
-echo "Check certificate status with:"
-echo "  gcloud certificate-manager certificates list --project=${PROJECT}"
+echo "Next steps:"
+echo "  1. Open https://${WORKSPACES_HOST}/workspaces/ and create a Workspace from the"
+echo "     'jupyterlab' or 'codeserver' WorkspaceKind in namespace '${TENANT_NAMESPACE}'."
+echo "  2. To build custom workspace images, see ../../images/README.md."
+echo "  3. To run the end-to-end examples, see ../../examples/README.md."
+echo ""
+echo "------------------------------------------------------------------"
+echo "ℹ️  Initial Access & Certificate Provisioning Status:"
+echo "------------------------------------------------------------------"
+echo "Certificate Manager certificates '${ACTUAL_WORKSPACES_CERT}' and '${ACTUAL_DESKTOP_CERT}' use Load Balancer"
+echo "authorization (ACME TLS-ALPN-01 on port 443). They begin issuance only after the GKE Gateway"
+echo "becomes healthy, and typically take 5-15 minutes to reach ACTIVE state."
+echo ""
+echo "Current Certificate Status:"
+gcloud certificate-manager certificates list --project="${PROJECT_ID}" \
+  --filter="name:(${ACTUAL_WORKSPACES_CERT} OR ${ACTUAL_DESKTOP_CERT})" \
+  --format="table(name,managed.state:label=STATE,managed.authorizationAttemptInfo[0].state:label=AUTHORIZATION,updateTime:label=UPDATED)" 2>/dev/null || true
+echo ""
+echo "Troubleshooting connection errors when accessing https://${WORKSPACES_HOST}/workspaces/:"
+echo "  • ERR_CONNECTION_CLOSED (or 'unexpectedly closed the connection'):"
+echo "    The certificate is still in PROVISIONING / AUTHORIZING state. Google Front End terminates"
+echo "    the TLS handshake until the certificate becomes ACTIVE. Wait 5-15 minutes and monitor:"
+echo "      gcloud certificate-manager certificates describe ${ACTUAL_WORKSPACES_CERT} --project=${PROJECT_ID}"
+echo ""
+echo "  • ERR_CONNECTION_RESET (or 'site can’t be reached'):"
+echo "    The GKE Gateway has not finished provisioning the load balancer forwarding rule."
+echo "    Check Gateway status and sync events for possible org policy or quota issues:"
+echo "      kubectl describe gateway notebooks -n kubeflow-workspaces"
 echo "=================================================================="
