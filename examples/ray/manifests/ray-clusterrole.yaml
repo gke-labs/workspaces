@@ -1,0 +1,45 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ray-edit
+  labels:
+    # Aggregates into kubeflow-edit if Kubeflow RBAC aggregation is enabled
+    rbac.authorization.kubeflow.org/aggregate-to-kubeflow-edit: "true"
+rules:
+  - apiGroups: ["ray.io"]
+    resources:
+      - rayclusters
+      - rayclusters/status
+      - rayclusters/finalizers
+      - rayjobs
+      - rayjobs/status
+      - rayjobs/finalizers
+      - rayservices
+      - rayservices/status
+      - rayservices/finalizers
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - services
+      - events
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ray-view
+  labels:
+    # Aggregates into kubeflow-view if Kubeflow RBAC aggregation is enabled
+    rbac.authorization.kubeflow.org/aggregate-to-kubeflow-view: "true"
+rules:
+  - apiGroups: ["ray.io"]
+    resources:
+      - rayclusters
+      - rayclusters/status
+      - rayjobs
+      - rayjobs/status
+      - rayservices
+      - rayservices/status
+    verbs: ["get", "list", "watch"]

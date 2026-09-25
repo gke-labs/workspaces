@@ -21,6 +21,7 @@ and cleanup instructions.
 | [**distributed**](distributed/) | A 0.1-CPU notebook drives a Spark ETL job, multi-host TPU training, and a serving Deployment — without you writing any YAML | CPU notebook + 5 Spark pods + 2 × TPU v5e host | 1–2 hours |
 | [**tpu**](tpu/) | Interactive JAX training on Cloud TPU v5e (4 chips) directly from Desktop VS Code or JupyterLab | 1 × TPU v5e (4 chips) | 10–20 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
+| [**ray**](ray/) | Elastic distributed computing with Ray (KubeRay): launch on-demand clusters from Python, run interactive tasks, submit batch jobs, and view the Ray Dashboard in-workspace | CPU (`e2-standard-4`) | 15–30 min |
 
 Plus shared utilities and building blocks:
 
@@ -266,18 +267,19 @@ By default, files are placed in the remote user's home directory (`~`, matching 
 
 The platform and components configured in the **one-time setup** (steps 1–6) provide everything these examples require:
 
-| | resumable-notebooks | distributed | tpu | agent-sandbox |
-| :--- | :---: | :---: | :---: | :---: |
-| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ |
-| Custom images from `images/build.sh` | JupyterLab CPU + GPU | JupyterLab CPU + `spark-py312` | JupyterLab TPU | VS Code (`codeserver-python`) CPU **+ `agent-sandbox-mcp-server`** (opt-in; not built by `--all`) |
-| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) |
-| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none |
-| GKE Pod Snapshots + gVisor | ✅ | — | — | — |
-| Kubeflow Trainer v2 | — | ✅ | — | — |
-| Kubeflow Spark Operator | — | ✅ | — | — |
-| Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) |
-| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — |
-| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — |
+| | resumable-notebooks | distributed | tpu | agent-sandbox | ray |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Custom images from `images/build.sh` | JupyterLab CPU + GPU | JupyterLab CPU + `spark-py312` | JupyterLab TPU | VS Code (`codeserver-python`) CPU **+ `agent-sandbox-mcp-server`** (opt-in; not built by `--all`) | JupyterLab CPU (with `jupyter-server-proxy`) |
+| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` |
+| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none | none (standard CPU node pool) |
+| GKE Pod Snapshots + gVisor | ✅ | — | — | — | — (requires standard non-gVisor node pool) |
+| Kubeflow Trainer v2 | — | ✅ | — | — | — |
+| Kubeflow Spark Operator | — | ✅ | — | — | — |
+| Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) | — |
+| KubeRay operator | — | — | — | — | ✅ (installed via Helm in Step 1) |
+| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — | — |
+| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — | — |
 
 ---
 

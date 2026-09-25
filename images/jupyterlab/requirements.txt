@@ -13,6 +13,7 @@
 
 # Added by this layer (absent from the base image).
 jax[cpu]==0.11.1
+jupyter-server-proxy==4.6.0
 
 # Already present in the base at these exact versions; declared so the dependency is
 # explicit, and so the kubeflow[spark] extra pulls in its Spark dependencies. Keep in

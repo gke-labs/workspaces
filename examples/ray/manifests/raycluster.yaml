@@ -1,0 +1,65 @@
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: raycluster-shared
+  labels:
+    app.kubernetes.io/name: raycluster-shared
+    app.kubernetes.io/part-of: kubeflow-notebooks-ray
+spec:
+  # Ray version must match the ray Python package installed in the notebook client
+  rayVersion: '2.41.0'
+  headGroupSpec:
+    # The KubeRay operator automatically creates a Service named '<cluster-name>-head-svc'
+    serviceType: ClusterIP
+    rayStartParams:
+      dashboard-host: '0.0.0.0'
+      # Prevent heavy compute tasks from scheduling on the head node
+      num-cpus: '0'
+    template:
+      metadata:
+        labels:
+          ray.io/node-type: head
+          sidecar.istio.io/inject: "false"
+      spec:
+        containers:
+          - name: ray-head
+            # Python 3.12 matches jupyterlab-cpu workspace image (Python 3.12)
+            image: rayproject/ray:2.41.0-py312
+            imagePullPolicy: IfNotPresent
+            ports:
+              - containerPort: 6379
+                name: gcs-server
+              - containerPort: 8265
+                name: dashboard
+              - containerPort: 10001
+                name: client
+            resources:
+              requests:
+                cpu: "1"
+                memory: "2Gi"
+              limits:
+                cpu: "2"
+                memory: "4Gi"
+  workerGroupSpecs:
+    - groupName: batch-workers
+      replicas: 3
+      minReplicas: 1
+      maxReplicas: 6
+      rayStartParams: {}
+      template:
+        metadata:
+          labels:
+            ray.io/node-type: worker
+            sidecar.istio.io/inject: "false"
+        spec:
+          containers:
+            - name: ray-worker
+              image: rayproject/ray:2.41.0-py312
+              imagePullPolicy: IfNotPresent
+              resources:
+                requests:
+                  cpu: "2"
+                  memory: "4Gi"
+                limits:
+                  cpu: "2"
+                  memory: "4Gi"

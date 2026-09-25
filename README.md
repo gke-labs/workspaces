@@ -26,7 +26,7 @@ This repository provides a **standalone deployment of Kubeflow Workspaces** with
 | :--- | :--- |
 | [`providers/gke/`](providers/gke/) | Everything needed to deploy Kubeflow Workspaces in **standalone mode on GKE** (no Istio): the IAP-authenticated access proxy, the Pod snapshot add-on, deployment manifests, and automation scripts (`deploy_standalone.sh` / `cleanup_standalone.sh`). Start with [`providers/gke/USER_GUIDE.md`](providers/gke/USER_GUIDE.md). |
 | [`images/`](images/) | Cloud-agnostic build utilities for custom workspace images (VS Code, JupyterLab, Spark) across CPU/GPU/TPU, plus ready-made `WorkspaceKind` templates. See [`images/README.md`](images/README.md). |
-| [`examples/`](examples/) | End-to-end examples written for people who have never used Kubernetes: stateful pause & resume, distributed Spark + TPU training, and AI agent sandboxes. See [`examples/README.md`](examples/README.md). |
+| [`examples/`](examples/) | End-to-end examples written for people who have never used Kubernetes: stateful pause & resume, distributed Spark + TPU training, AI agent sandboxes, and elastic Ray clusters. See [`examples/README.md`](examples/README.md). |
 | [`workspaces/`](workspaces/) | The upstream Kubeflow Workspaces controller, backend, and frontend. |
 
 ## Quick start

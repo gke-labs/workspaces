@@ -32,6 +32,7 @@ jax[cuda13]==0.11.1
 # transformers 5 renamed from_pretrained's torch_dtype argument to dtype, and
 # examples/resumable-notebooks/gpu_checkpoint_restore_example.ipynb is written against the 5.x spelling.
 transformers==5.17.0
+jupyter-server-proxy==4.6.0
 
 # Already present in the base at these exact versions; declared so the dependency is
 # explicit, and so the kubeflow[spark] extra pulls in its Spark dependencies. Keep in
