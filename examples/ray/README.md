@@ -193,7 +193,7 @@ Inside your notebook environment, install the Ray Python SDK and the official Ku
 
 ```bash
 # Core Ray SDK (client & job submission)
-pip install "ray[default,client]==2.41.0"
+pip install "ray[default,client]==2.58.0"
 
 # KubeRay Python Client SDK (cluster lifecycle management)
 pip install "git+https://github.com/ray-project/kuberay.git#subdirectory=clients/python-client"
@@ -215,7 +215,7 @@ from python_client import kuberay_cluster_api
 from python_client.utils import kuberay_cluster_builder
 
 py_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
-IMAGE = f"rayproject/ray:2.41.0-{py_tag}"
+IMAGE = f"rayproject/ray:2.58.0-{py_tag}"
 TENANT_NAMESPACE = "team-a"  # Auto-detected in notebook
 CLUSTER_NAME = "raycluster-sample"
 
@@ -226,7 +226,7 @@ cluster = (
         name=CLUSTER_NAME,
         k8s_namespace=TENANT_NAMESPACE,
         labels={"app.kubernetes.io/name": CLUSTER_NAME},
-        ray_version="2.41.0",
+        ray_version="2.58.0",
     )
     .build_head(
         ray_image=IMAGE,

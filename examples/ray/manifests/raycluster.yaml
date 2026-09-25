@@ -7,7 +7,7 @@ metadata:
     app.kubernetes.io/part-of: kubeflow-notebooks-ray
 spec:
   # Ray version must match the ray Python package installed in the notebook client
-  rayVersion: '2.41.0'
+  rayVersion: '2.58.0'
   headGroupSpec:
     # The KubeRay operator automatically creates a Service named '<cluster-name>-head-svc'
     serviceType: ClusterIP
@@ -24,7 +24,7 @@ spec:
         containers:
           - name: ray-head
             # Python 3.12 matches jupyterlab-cpu workspace image (Python 3.12)
-            image: rayproject/ray:2.41.0-py312
+            image: rayproject/ray:2.58.0-py312
             imagePullPolicy: IfNotPresent
             ports:
               - containerPort: 6379
@@ -54,7 +54,7 @@ spec:
         spec:
           containers:
             - name: ray-worker
-              image: rayproject/ray:2.41.0-py312
+              image: rayproject/ray:2.58.0-py312
               imagePullPolicy: IfNotPresent
               resources:
                 requests:
