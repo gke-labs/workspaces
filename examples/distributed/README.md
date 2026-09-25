@@ -377,7 +377,7 @@ done
 
 The notebook requires the `jobs/` folder (`__init__.py`, `pipeline.py`, `data_processing.py`, `train.py`, `serve.py`) and `inference-service.yaml` available in the Workspace environment:
 
-* **If running from local VS Code (Option A below, recommended):** You do not need to manually drag-and-drop files or use `kubectl`. Run [upload_to_jupyter.py](../upload_to_jupyter.py) with `--dir examples/distributed` to sync them directly over HTTP using your workspace connection URL.
+* **If running from local VS Code (Option A below):** You do not need to manually drag-and-drop files or use `kubectl`. Run [upload_to_jupyter.py](../upload_to_jupyter.py) with `--dir examples/distributed` to sync them directly over HTTP using your workspace connection URL.
 * **If running in the in-browser JupyterLab UI (Option B below):** Upload `distributed_tpu_example.ipynb`, the `jobs/` folder, and `inference-service.yaml` into the same directory via the JupyterLab file browser or clone the repo from a Workspace terminal:
   ```bash
   git clone <this-repo-url> /home/jovyan/gke-workspaces
@@ -434,9 +434,9 @@ All defaults below are what the code actually does when the variable is unset.
 
 You can run this notebook through either workflow:
 
-### Option A: Connect from Local VS Code with `upload_to_jupyter.py` (Recommended)
+### Option A: Connect from Local VS Code with `upload_to_jupyter.py`
 
-Run the notebook directly from your local machine while executing against the remote GKE Workspace kernel (similar to the [TPU example](../tpu/README.md#option-a-connect-from-local-vs-code-recommended)):
+Run the notebook directly from your local machine while executing against the remote GKE Workspace kernel (similar to the [TPU example](../tpu/README.md#option-a-connect-from-local-vs-code)):
 
 1. **Open local VS Code**:
    - Open this repository on your laptop in VS Code.

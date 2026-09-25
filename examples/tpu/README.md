@@ -165,7 +165,7 @@ kubectl get pods -n "${TENANT_NAMESPACE}" -l notebooks.kubeflow.org/workspace-na
 
 ## Step 2: Run the Notebook
 
-### Option A: Connect from Local VS Code (Recommended)
+### Option A: Connect from Local VS Code
 
 Run the notebook directly from your local machine without uploading any files:
 

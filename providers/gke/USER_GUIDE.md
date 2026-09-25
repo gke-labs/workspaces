@@ -970,13 +970,14 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
 
 ### Step 7.4: Pausing (Checkpointing) & Resuming (Restoring) a Workspace
 
-1. **Pause (Checkpoint) via UI or CLI**:
+1. **Pause (Checkpoint) via UI, CLI, or Inactivity Rules**:
    - **UI**: In the Kubeflow Workspaces dashboard, click **Stop** on the running Workspace.
    - **CLI**:
      ```bash
      kubectl --context="${CONTEXT}" patch workspace <workspace-name> -n "${TENANT_NAMESPACE}" \
        --type merge -p '{"spec":{"paused":true}}'
      ```
+   - **Automatic Inactivity Culling (`activityRules`)**: A `WorkspaceKind` can define `activityRules` to automatically pause idle workspaces after a configured duration of inactivity (e.g. 4 hours) to eliminate idle compute spend. See [Automatic Inactivity Pausing (activityRules)](../../examples/resumable-notebooks/README.md#automatic-inactivity-pausing-activityrules).
    - **What happens automatically**:
      - `POST /mutate-workspace` intercepts the update, keeps `spec.paused: false` temporarily, sets `podsnapshot.gke.kubeflow.org/checkpoint-state: "Checkpointing"`, and immediately flips the Pod's `podsnapshot.gke.kubeflow.org/active` readiness gate and `PodReady` condition to `False` (`READINESS GATES: 0/1`).
      - Flipping `PodReady` to `False` causes `workspaces-controller` to immediately transition `Workspace.status.state` out of `Running`, which disables the **Connect** button in the UI, hides the **Stop** action, blocks premature **Start** requests, removes the Pod from Service endpoints, and drains open WebSockets.

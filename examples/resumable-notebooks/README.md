@@ -1,23 +1,31 @@
 # Stateful Resumable Notebooks on GKE (CPU & GPU)
 
-**Pause a notebook, walk away, come back tomorrow, and find every variable,
-thread, and even GPU memory exactly where you left it — with zero cost while
-paused.**
+**Pause a JupyterLab notebook, walk away, come back tomorrow, and find every variable,
+thread, and even GPU memory exactly where you left it — eliminating the massive
+cost of keeping idle GPU machines running overnight and over weekends.**
 
 Normally, stopping a Kubernetes workload destroys it: your Python process dies,
 your variables are gone, and restarting means re-running everything from the top.
-This example demonstrates **stateful pause & resume**, where GKE takes a full
-snapshot of the running container — CPU registers, the entire process tree, RAM,
-open threads, and GPU VRAM — writes it to Cloud Storage, deletes the machine, and
-later restores the *identical* process on a fresh machine.
+Because of this friction, machine learning teams routinely leave expensive GPU
+instances running 24/7 just to avoid re-initializing their workspaces.
+
+This example demonstrates **stateful pause & resume** (supported for JupyterLab workspaces),
+where GKE takes a full snapshot of the running container — CPU registers, the entire
+process tree, RAM, open threads, and GPU VRAM — writes it to Cloud Storage, deletes the
+machine to **drop compute billing to $0**, and later restores the *identical* process on a
+fresh machine in seconds.
 
 | | Ordinary stop/start | Stateful pause/resume (this example) |
 | :--- | :--- | :--- |
-| Python variables | Lost | Preserved |
-| Process ID | New | **Same PID** |
-| Background threads | Killed | Still running |
-| Loaded model in GPU VRAM | Must reload (~30 s) | **Bit-identical, instant** |
-| Cost while paused | Zero | Zero (plus a few cents of Cloud Storage) |
+| **Python variables** | Lost | Preserved |
+| **Process ID** | New | **Same PID** |
+| **Background threads** | Killed | Still running |
+| **Loaded model in GPU VRAM** | Must reload (~30–60+ s) | **Bit-identical, instant in VRAM** |
+| **Compute cost while paused** | $0 (if stopped) | **$0 compute** (node scales to 0) |
+| **Storage cost while paused** | Standard PVC disk cost | Standard PVC + pennies for GCS snapshot |
+| **Real-world team behavior** | **Left running 24/7** to keep state | **Safely paused** overnight and weekends |
+| **Weekly GPU billed hours** | **168 hours** (70%+ idle waste) | **~40 hours** (active working hours only) |
+| **Morning ramp-up time** | 15–45 min re-executing notebooks | **~4–12 seconds** instant resume |
 
 Two self-contained verification notebooks are provided:
 
@@ -29,7 +37,55 @@ Two self-contained verification notebooks are provided:
 > [!TIP]
 > **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your cluster, storage, images, and ComputeClasses are already in place. You can skip the prerequisites and jump straight to [Registering the `jupyterlab-resumable` WorkspaceKind](#registering-the-jupyterlab-resumable-workspacekind) (or [Running the Examples](#running-the-examples) if already registered).
 
-### What survives a pause (and what does not)
+---
+
+## Why this matters: Slashing GPU cloud costs by 70%+
+
+### The idle GPU dilemma
+
+Interactive ML development is inherently bursty. Data scientists and ML engineers actively write code, run experiments, and inspect outputs for ~8 hours a day, 5 days a week (~40 hours a week).
+
+However, setting up an exploratory environment is expensive in developer time:
+1. Downloading and loading multi-gigabyte models into GPU VRAM (e.g. 5–30+ minutes).
+2. Fetching, preprocessing, and tokenizing datasets.
+3. Iteratively creating intermediate variables and calculation checkpoints.
+
+When engineers step away for lunch, meetings, or the evening, they face an uncomfortable trade-off:
+
+* **Stop the instance:** Saves compute money, but forfeits all in-memory state. Every morning begins with 20–40 minutes of frustrating re-runs, reloading weights, and waiting.
+* **Leave the instance running:** Preserves work and momentum, but burns expensive GPU hours 24/7.
+
+In practice, **almost everyone leaves their machines running**. Out of 168 hours in a week, ~128 hours (76%) are spent paying for idle GPU compute that nobody is using. Across a team of 10 engineers on dedicated GPUs, this idle tax easily burns thousands of dollars every month.
+
+### Decoupling state preservation from compute billing
+
+Stateful pause & resume eliminates the dilemma by decoupling **state preservation** from **compute billing**:
+
+1. **True $0 compute while idle:** Pausing deletes the Pod. When no other workloads need the node, GKE node autoscaling removes the VM entirely. You pay zero for GPU, CPU, and node memory.
+2. **Cloud Storage pennies vs. GPU dollars:** The memory snapshot (e.g., ~8.3 GiB for a 3B LLM in VRAM) is stored in Google Cloud Storage. At standard GCS pricing (~$0.020/GB/month), holding that 8.3 GiB snapshot costs **~$0.17 for an entire month** — or less than **half a cent ($0.005) overnight**. Leaving even an entry-level GPU VM running overnight costs $5–$25+ in idle compute.
+3. **Frictionless automated idle shutoff:** Platform administrators can safely implement aggressive auto-culling policies (e.g., auto-pausing notebooks after 30–60 minutes of inactivity). Because users know their variables, processes, and CUDA tensors are preserved bit-for-bit, auto-culling faces zero user resistance.
+4. **Zero re-computation waste:** Resuming takes seconds (4–8 s for CPU, ~11 s for GPU). No developer time or cloud compute is wasted re-executing cells or re-downloading model weights.
+
+```mermaid
+flowchart TD
+    subgraph Traditional["Traditional Workflow (24/7 GPU billing)"]
+        direction TB
+        T1["Active Work<br/>(8 hrs/day billed)"] --> T2["Idle overnight & weekends<br/>(16 hrs/day + 48 hrs weekend STILL billed)"]
+        T2 --> T3["Active Work<br/>(8 hrs/day billed)"]
+        T2 -.->|"Result"| TW["168 billed hours/wk<br/>~76% idle waste"]
+    end
+
+    subgraph Resumable["Stateful Resumable Workflow (70%+ Cost Reduction)"]
+        direction TB
+        R1["Active Work<br/>(8 hrs/day billed)"] -->|"Pause (writes snapshot to GCS)"| R2["Node scales to 0<br/>($0 compute, <$0.01 GCS snapshot storage)"]
+        R2 -->|"Resume (~10s restore)"| R3["Active Work resumed instantly<br/>(weights in VRAM, PID identical)"]
+        R2 -.->|"Result"| RW["~40 billed hours/wk<br/>Zero idle GPU compute"]
+    end
+```
+
+---
+
+## What survives a pause (and what does not)
 
 The checkpoint captures the container's **init process tree** — everything under
 the workspace's supervisor, including `jupyter-lab` and every notebook kernel it
@@ -39,7 +95,13 @@ spawned.
 | :--- | :--- |
 | A notebook kernel (any cell you ran in JupyterLab) | ✅ Yes — same PID, all Python variables, **and GPU memory** |
 | A process launched from a JupyterLab **terminal** | ✅ Yes — it is also a child of `jupyter-lab` |
+| In-browser VS Code (`codeserver` WorkspaceKind) | ❌ **No** — `codeserver` uses **stateless pause & resume** (files on `/home/jovyan` persist, but in-memory state does not) |
 | A process launched with `kubectl exec … &` from your laptop | ❌ **No** — silently gone after resume |
+
+> [!IMPORTANT]
+> **JupyterLab only (`jupyterlab` / `jupyterlab-resumable`)**:
+> Stateful memory-recoverable pause and resume is currently **only supported for JupyterLab workspaces**.
+> In-browser VS Code (`codeserver`) does **not** support stateful memory snapshots (due to gVisor CRIU pseudoterminal `/dev/pts/*` desynchronization in Node.js `libuv`), and instead uses **stateless pause and resume** (the pod scales down to 0 to eliminate compute cost, and resuming starts a fresh container where files on `/home/jovyan` persist, but in-memory variables and execution state do not). See [docs/gke-pilot-codelab.md](../../docs/gke-pilot-codelab.md#2026-09-18-deep-dive-jupyterlab-vs-vs-code-pause-resume--gvisor-criu-limitations) for the technical analysis.
 
 > [!NOTE]
 > Verified on a T4: a kernel holding both a Python variable and a live CUDA
@@ -195,6 +257,60 @@ kubectl get workspacekind jupyterlab-resumable \
   -o jsonpath='{.spec.podTemplate.options.imageConfig.values[*].spec.image}{"\n"}'
 ```
 
+### Automatic Inactivity Pausing (`activityRules`)
+
+To prevent idle workspaces from running indefinitely and driving up cloud spend, [`manifests/workspacekind-resumable.yaml`](manifests/workspacekind-resumable.yaml) configures **`activityRules`** out of the box:
+
+```yaml
+activityRules:
+  - config:
+      secondsSinceActive: 14400 # auto pauses the notebook after 4h of inactivity
+    match: {}
+    effect:
+      pauseWorkspace: true
+```
+
+#### How activity probing and auto-pausing work
+
+1. **Activity probing**: The `WorkspaceKind` defines an `activityProbe` under `spec.podTemplate`:
+   ```yaml
+   activityProbe:
+     minProbeIntervalSeconds: 100
+     probeIntervalSeconds: 300
+     jupyter:
+       lastActivity: true
+       portId: "jupyterlab"
+   ```
+   The Kubeflow Workspaces controller periodically queries the workspace's Jupyter REST API for kernel executions, open WebSocket connections, and user interactions.
+2. **Inactivity evaluation**: When a running workspace has seen no activity for longer than `secondsSinceActive` (here: `14400` seconds / 4 hours), the controller triggers the rule's effect.
+3. **Stateful pause on idle**: Because this is a resumable workspace, the `pauseWorkspace: true` effect triggers GKE Pod Snapshots to checkpoint container memory to Cloud Storage and terminate the pod. GKE node autoscaling can then scale down the underlying nodes to 0, completely stopping compute billing.
+4. **Instant resumption**: Unlike traditional notebook culling where users lose in-memory variables and loaded model weights, users can click **Resume** / **Start** in the UI at any time and resume with bit-identical state in seconds.
+
+#### Customizing rules (e.g. Culling GPUs faster than CPUs)
+
+Rules can match specific pod configurations (`matchPodConfig`) or namespaces (`matchNamespace`), evaluated top-to-bottom. For instance, to aggressively pause costly GPU instances after 1 hour (3,600 s) while giving CPU instances 4 hours (14,400 s):
+
+```yaml
+activityRules:
+  # Rule 1: Auto-pause GPU workspaces after 1 hour of inactivity
+  - config:
+      secondsSinceActive: 3600
+    match:
+      matchPodConfig:
+        selector:
+          matchLabels:
+            accelerator: gpu
+    effect:
+      pauseWorkspace: true
+
+  # Rule 2: Catch-all — auto-pause CPU and other workspaces after 4 hours
+  - config:
+      secondsSinceActive: 14400
+    match: {}
+    effect:
+      pauseWorkspace: true
+```
+
 ---
 
 ## Running the Examples
@@ -229,10 +345,14 @@ to your workspace and follow the instructions inside the notebook:
 | Checkpoint (pause) | 12–25 s, ~0.5–1.2 GB to Cloud Storage | 115–127 s, ~8.3 GiB to Cloud Storage |
 | Restore (resume) | 4–8 s | 11–12 s |
 
-> [!CAUTION]
-> Every pause writes a full memory image to Cloud Storage — 8.3 GiB for the GPU
-> example. The deployment sets a 14-day object lifecycle rule on the snapshot
-> bucket as a billing backstop; see
+> [!TIP]
+> **Snapshot storage economics:** Every pause writes a full memory image to Cloud
+> Storage — ~8.3 GiB for the GPU example. At standard GCS pricing (~$0.020/GB/month),
+> storing an 8.3 GiB snapshot for an entire 16-hour overnight pause costs
+> **under $0.005 (half a cent)**, compared to paying for a running GPU node. The
+> deployment also sets a 14-day object lifecycle rule on the snapshot bucket as an
+> automated billing backstop so decommissioned workspaces never accumulate storage
+> costs; see
 > [Changing the Controller's Default Bucket](#optional-changing-the-controllers-default-bucket-cluster-wide).
 
 ### Watching it happen
@@ -418,6 +538,7 @@ If cluster administrators want to change the fallback default bucket used by `gk
 | Workspace fails with `InvalidImageName` | The `<YOUR_CPU_IMAGE>` / `<YOUR_GPU_IMAGE>` placeholders were never substituted. | Re-apply the WorkspaceKind through the `sed` pipeline above. |
 | Pause hangs, or the workspace comes back with a fresh PID | The checkpoint failed and GKE fell back to a cold start. | `kubectl -n kubeflow-workspaces logs -l app=gke-workspace-snapshot-addon` and `kubectl -n "${TENANT_NAMESPACE}" describe podsnapshot <name>`. |
 | Snapshot errors with a Cloud Storage `403` | Workload Identity or the GKE service agent binding is missing on the snapshot bucket. | Re-run the IAM bindings from [Step 1](#step-1-prepare-the-custom-gcs-bucket--iam-permissions), including the `service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com` grant. |
+| In-memory variables or kernel state lost in VS Code (`codeserver`) | Stateful pause & resume is only supported for JupyterLab. `codeserver` uses stateless pause & resume. | Use `jupyterlab` or `jupyterlab-resumable` if you need in-memory variables and loaded models preserved across pause/resume. In `codeserver`, save your work to `/home/jovyan` before pausing. |
 | Variables survive, but a terminal you opened is gone | Expected. Only the container's own process tree is checkpointed; `kubectl exec` sessions are not. | Run long-lived work from inside the notebook. |
 | GPU notebook OOMs while pausing | Snapshotting copies GPU state through Pod memory; the node needs headroom. | The `gpu_t4_spot` pod config requests 12 CPU / 40 Gi for exactly this reason. Do not shrink it. |
 | Restore fails after switching machine types | A snapshot cannot be restored onto a different GPU model. | Resume on the same ComputeClass you paused on. |

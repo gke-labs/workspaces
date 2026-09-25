@@ -17,7 +17,7 @@ and cleanup instructions.
 
 | Example | What you get | Hardware | Roughly how long |
 | :--- | :--- | :--- | :--- |
-| [**resumable-notebooks**](resumable-notebooks/) | Pause a notebook and resume it later with every variable, thread, and even GPU VRAM bit-identical | CPU, or 1 × NVIDIA T4 | 20–40 min |
+| [**resumable-notebooks**](resumable-notebooks/) | Pause a JupyterLab notebook and resume it later with every variable, thread, and GPU VRAM bit-identical (JupyterLab only; `codeserver` is stateless) | CPU, or 1 × NVIDIA T4 | 20–40 min |
 | [**distributed**](distributed/) | A 0.1-CPU notebook drives a Spark ETL job, multi-host TPU training, and a serving Deployment — without you writing any YAML | CPU notebook + 5 Spark pods + 2 × TPU v5e host | 1–2 hours |
 | [**tpu**](tpu/) | Interactive JAX training on Cloud TPU v5e (4 chips) directly from Desktop VS Code or JupyterLab | 1 × TPU v5e (4 chips) | 10–20 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
@@ -38,7 +38,7 @@ Every example assumes the platform underneath it already exists. **Steps 1–6 a
 ```mermaid
 flowchart TD
     subgraph S1["One-time setup (steps 1–6, done once for all examples)"]
-        A["1. Create a GKE cluster"] --> B["2. Create a GCS data bucket<br/>shared storage & distributed ML"]
+        A["1. Authenticate & create a GKE cluster"] --> B["2. Create a GCS data bucket<br/>shared storage & distributed ML"]
         B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh"]
         C --> D["4. Build custom images<br/>images/build.sh"]
         D --> E["5. Register WorkspaceKinds<br/>images/workspacekinds/"]
@@ -52,9 +52,19 @@ flowchart TD
     F --> H
 ```
 
-### 1. Set environment variables & create a GKE cluster
+### 1. Authenticate, set environment variables & create a GKE cluster
 
-Export your deployment variables in your shell first. Setting them here configures all subsequent cluster, storage, deployment, and image steps consistently:
+First, authenticate your account with Google Cloud. Run `gcloud auth login` to authenticate the CLI and `gcloud auth application-default login` to configure Application Default Credentials (ADC) for Google Cloud client libraries and tools:
+
+```bash
+# Authenticate the gcloud CLI with your Google user account
+gcloud auth login
+
+# Set up Application Default Credentials (ADC) for client libraries and SDKs
+gcloud auth application-default login
+```
+
+Next, export your deployment variables in your shell. Setting them here configures all subsequent cluster, storage, deployment, and image steps consistently:
 
 ```bash
 # Core coordinates
