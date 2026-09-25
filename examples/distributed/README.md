@@ -81,13 +81,15 @@ flowchart LR
 | [`jobs/train.py`](jobs/train.py) | The JAX training function. Runs on every TPU host. |
 | [`jobs/serve.py`](jobs/serve.py) | The inference HTTP server. Injected into the serving pods via a ConfigMap. |
 | [`inference-service.yaml`](inference-service.yaml) | The Stage 3 `Deployment` + `Service`. `BUCKET_NAME_PLACEHOLDER` is substituted by the notebook. |
+| [upload_to_jupyter.py](../upload_to_jupyter.py) | Utility script to sync local `jobs/` and manifests to the remote workspace over HTTP without `kubectl`. |
 
 > [!IMPORTANT]
 > The notebook and the `jobs/` folder must be uploaded into the **same
-> directory** inside the Workspace (or synced to `/home/jovyan/distributed` if
-> connecting from local VS Code). The notebook searches the working directory,
-> its parents, and `$HOME` (plus one level of subdirectories) for
-> `jobs/pipeline.py`, and stops with instructions if it cannot find it.
+> directory** inside the Workspace (or synced to `/home/jovyan` via
+> [upload_to_jupyter.py](../upload_to_jupyter.py) if connecting from local VS Code).
+> The notebook searches the working directory, its parents, and `$HOME`
+> (plus one level of subdirectories) for `jobs/pipeline.py`, and stops with
+> instructions if it cannot find it.
 
 ---
 
@@ -373,26 +375,19 @@ done
 
 ### 8. Get the notebook and `jobs/` into the Workspace
 
-Upload the files into the **same directory** on the Workspace:
+The notebook requires the `jobs/` folder (`__init__.py`, `pipeline.py`, `data_processing.py`, `train.py`, `serve.py`) and `inference-service.yaml` available in the Workspace environment:
 
-* `distributed_tpu_example.ipynb`
-* the whole `jobs/` folder (`__init__.py`, `pipeline.py`, `data_processing.py`, `train.py`, `serve.py`)
-* `inference-service.yaml` (Stage 3 reads it from the same directory)
-
-Either drag them into the JupyterLab file browser, or from a terminal inside the
-Workspace:
-
-```bash
-git clone <this-repo-url> /home/jovyan/gke-workspaces
-cd /home/jovyan/gke-workspaces/examples/distributed
-```
-
-Sanity check from the Workspace terminal:
-
-```bash
-ls            # distributed_tpu_example.ipynb  inference-service.yaml  jobs/
-ls jobs       # __init__.py data_processing.py pipeline.py serve.py train.py
-```
+* **If running from local VS Code (Option A below, recommended):** You do not need to manually drag-and-drop files or use `kubectl`. Run [upload_to_jupyter.py](../upload_to_jupyter.py) with `--dir examples/distributed` to sync them directly over HTTP using your workspace connection URL.
+* **If running in the in-browser JupyterLab UI (Option B below):** Upload `distributed_tpu_example.ipynb`, the `jobs/` folder, and `inference-service.yaml` into the same directory via the JupyterLab file browser or clone the repo from a Workspace terminal:
+  ```bash
+  git clone <this-repo-url> /home/jovyan/gke-workspaces
+  cd /home/jovyan/gke-workspaces/examples/distributed
+  ```
+  Sanity check from the Workspace terminal:
+  ```bash
+  ls            # distributed_tpu_example.ipynb  inference-service.yaml  jobs/
+  ls jobs       # __init__.py data_processing.py pipeline.py serve.py train.py
+  ```
 
 ---
 
@@ -437,8 +432,57 @@ All defaults below are what the code actually does when the variable is unset.
 >    happens the TrainJob pods die; re-run Stage 2 (Stage 1's output in GCS is
 >    still there, so you do not have to redo the ETL).
 
-Open `distributed_tpu_example.ipynb` in the JupyterLab UI and run the cells top to
-bottom. Keep a terminal open next to it for the `kubectl` watches below.
+You can run this notebook through either workflow:
+
+### Option A: Connect from Local VS Code with `upload_to_jupyter.py` (Recommended)
+
+Run the notebook directly from your local machine while executing against the remote GKE Workspace kernel (similar to the [TPU example](../tpu/README.md#option-a-connect-from-local-vs-code-recommended)):
+
+1. **Open local VS Code**:
+   - Open this repository on your laptop in VS Code.
+   - Ensure the **Jupyter** extension (`ms-toolsai.jupyter`) is installed.
+   - Open [`distributed_tpu_example.ipynb`](distributed_tpu_example.ipynb).
+
+2. **Generate a connection token**:
+   - In your browser, navigate to `https://${WORKSPACES_HOST}/workspaces/connections` and sign in with Google.
+   - Select your running workspace (e.g. `distributed-workspace` or `test-workspace`).
+   - Select the port: **`jupyterlab`**.
+   - Choose a token duration (e.g. 8 hours), click **Generate connection**, and click **Copy URL**.
+   - The copied URL has the format:
+     ```
+     https://${DESKTOP_HOST}/workspace/connect/<tenant-namespace>/<workspace-name>/jupyterlab/?token=<token>
+     ```
+
+3. **Sync `jobs/` and manifests to the remote workspace**:
+   - Because the remote kernel executes on the GKE pod, it needs `jobs/` and `inference-service.yaml` on the remote filesystem.
+   - In your local terminal, run [upload_to_jupyter.py](../upload_to_jupyter.py) with the connection URL you just copied (no `kubectl` needed):
+     ```bash
+     python3 examples/upload_to_jupyter.py "<copied-connection-url>" --dir examples/distributed
+     ```
+   - *Tip (Auto-sync during development)*: Add `--watch` to keep syncing any local edits to `jobs/` or `inference-service.yaml` automatically whenever you save them:
+     ```bash
+     python3 examples/upload_to_jupyter.py "<copied-connection-url>" --dir examples/distributed --watch
+     ```
+   - Files are placed in the remote user's home directory (`~`, matching Jupyter's root), where the notebook discovers them automatically.
+
+4. **Connect to the remote kernel in VS Code**:
+   - In the upper right corner of the notebook editor in VS Code, click **Select Kernel** (or the current kernel indicator).
+   - Choose **Select Another Kernel...** → **Existing Jupyter Server...**.
+   - Paste the connection URL (including `?token=...`) and press **Enter**.
+   - Select the remote kernel: **`Python 3 (ipykernel)`**.
+
+5. **Execute cells**:
+   - Run the cells top to bottom! Keep a terminal open next to it for the `kubectl` watches below.
+
+### Option B: Run in JupyterLab UI (In-Browser)
+
+If you prefer to work inside the browser:
+
+1. In the Kubeflow Workspaces UI (`https://${WORKSPACES_HOST}/workspaces/`), click **Connect** on your workspace to open JupyterLab in your browser.
+2. Upload `distributed_tpu_example.ipynb`, the `jobs/` folder, and `inference-service.yaml` into the same directory (see [Step 8](#8-get-the-notebook-and-jobs-into-the-workspace) above).
+3. Open `distributed_tpu_example.ipynb` in the JupyterLab UI and run the cells top to bottom. Keep a terminal open next to it for the `kubectl` watches below.
+
+---
 
 ### Step 0 — Setup cell
 

@@ -22,11 +22,12 @@ and cleanup instructions.
 | [**tpu**](tpu/) | Interactive JAX training on Cloud TPU v5e (4 chips) directly from Desktop VS Code or JupyterLab | 1 × TPU v5e (4 chips) | 10–20 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
 
-Plus one shared building block:
+Plus shared utilities and building blocks:
 
-| Folder | Purpose |
+| Path | Purpose |
 | :--- | :--- |
 | [**compute-classes**](compute-classes/) | GKE ComputeClasses that let the cluster auto-create GPU and TPU machines on demand. Needed by the GPU and TPU examples. |
+| [**upload_to_jupyter.py**](upload_to_jupyter.py) | CLI utility to upload local `.py` and `.yaml` files into a remote Jupyter workspace over HTTP, preserving directory structure (no `kubectl` needed). |
 
 ---
 
@@ -234,6 +235,20 @@ the file-browser upload button, then follow that example's README. The
 `agent-sandbox` example is driven by a script and a set of manifests rather than
 a single notebook, and its commands use paths relative to the repository root —
 for that one, clone or upload the whole repository.
+
+#### Tip: Uploading & syncing files from local VS Code ([upload_to_jupyter.py](upload_to_jupyter.py))
+
+If you develop locally in VS Code and connect the Jupyter extension to a remote workspace kernel, you do not need `kubectl` access or manual file uploads to keep library files in sync. Use [upload_to_jupyter.py](upload_to_jupyter.py) to push all `.py` and `.yaml` files into your remote workspace over HTTP while preserving the folder hierarchy:
+
+```bash
+# One-time sync (token and base URL are automatically parsed from your connection link):
+python3 examples/upload_to_jupyter.py "https://<connect-host>/workspace/connect/.../?token=..." --dir examples/distributed
+
+# Auto-sync on save (continuously watches local directory and pushes changes on save):
+python3 examples/upload_to_jupyter.py "https://<connect-host>/workspace/connect/.../?token=..." --dir examples/distributed --watch
+```
+
+By default, files are placed in the remote user's home directory (`~`, matching the Jupyter root), so `jobs/` and manifests land right where the notebooks search for them.
 
 ---
 
