@@ -4,16 +4,25 @@
 
 ---
 
+## Demo Walkthrough
+
+![Interactive & Distributed TPU Workspaces Demo](demo_tpu_workspaces.gif)
+
+*Watch how easy it is to spin up an interactive development environment for 1 TPU or 4 TPUs in the Kubeflow Workspaces UI, test training interactively in JupyterLab using `jax.pmap`, and scale out to a distributed multi-host TPU slice using the Kubeflow Trainer Python SDK—reusing the exact same `train_mlp` training function.*
+
+---
+
 ## What this example does
 
-This example demonstrates interactive, multi-device neural network training with **JAX on Cloud TPU v5e** inside a Kubeflow Workspace on GKE.
+This example demonstrates interactive, multi-device neural network training with **JAX on Cloud TPU v5e** inside a Kubeflow Workspace on GKE, and scaling to a distributed multi-host cluster.
 
 | Property | Details |
 | :--- | :--- |
 | **Model** | 3-layer MLP (`784 -> 256 -> 128 -> 10`) implemented in pure JAX |
-| **Hardware** | **Cloud TPU v5e slice**: 1 host × 4 chips = 4 chips (2x2 topology) |
-| **Parallelism** | Data-parallel training across all 4 TPU chips using `jax.pmap` and `jax.lax.pmean` |
-| **Workflow** | Self-contained notebook (`jax_tpu_training.ipynb`) executed remotely via VS Code or in-browser JupyterLab |
+| **Interactive Hardware** | **1 TPU**: TPU v5 1x1 (`tpu_1`, 1 chip) or **4 TPU**: TPU v5 2x2 (`tpu_4`, 4 chips) |
+| **Multi-Host Hardware** | **8 TPU slice**: 2 hosts × 4 chips = 8 chips (`tpu-v5-8-multi-host`) via Kubeflow Trainer |
+| **Parallelism** | Data-parallel training across local chips (`jax.pmap`) and multi-host collective reduction (`jax.lax.pmean`) |
+| **Workflow** | Self-contained notebook (`jax_tpu_training.ipynb`) executed remotely via VS Code or in-browser JupyterLab, scaling out via the Kubeflow Trainer Python SDK |
 
 > [!TIP]
 > **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClass, TPU image, and `jupyterlab` WorkspaceKind are already configured. You can skip the prerequisites checklist and jump straight to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
@@ -169,6 +178,8 @@ kubectl get pods -n "${TENANT_NAMESPACE}" -l notebooks.kubeflow.org/workspace-na
 
 Run the notebook directly from your local machine without uploading any files:
 
+![Connecting from Local VS Code to Remote TPU Kernel](demo_vscode_remote_tpu.gif)
+
 1. **Open local VS Code**:
    - Open this repository on your laptop in VS Code.
    - Ensure the **Jupyter** extension (`ms-toolsai.jupyter`) is installed.
@@ -213,47 +224,78 @@ If you prefer using the browser:
 
 ## What the Notebook Does
 
-The notebook walks through a complete multi-device JAX training workflow:
+The notebook walks through a complete end-to-end interactive and distributed JAX training workflow:
 
 ### 1. TPU Hardware Discovery
 ```python
 import jax
 devices = jax.devices()
 print(f"Available devices ({len(devices)}): {devices}")
-# Output: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), ...]
 ```
-Confirms all 4 TPU v5e chips are detected and ready.
+Confirms connected TPU v5e cores (1 core for `tpu_1`, 4 cores for `tpu_4`).
 
 ### 2. Dataset Generation
 Generates a self-contained multi-class classification dataset (8,192 training samples, 1,024 test samples, 784 features, 10 classes) using NumPy.
 
 ### 3. Model Architecture
-Defines a 3-layer MLP (`784 -> 256 -> 128 -> 10`) with ReLU activations and initializes weights using He normal scaling.
+Defines a 3-layer MLP (`784 -> 256 -> 128 -> 10`) with ReLU activations and cross-entropy loss.
 
-### 4. Parallel Training Step with `jax.pmap`
+### 4. Reusable JAX Training Function (`train_mlp`)
 ```python
-from functools import partial
+def train_mlp(epochs=5, global_batch_size=256, lr=0.05):
+    # 1. Automatic multi-host coordinator initialization (if running in Kubeflow TrainJob)
+    if "JAX_COORDINATOR_ADDRESS" in os.environ:
+        import jax.distributed as dist
+        dist.initialize(...)
 
-@partial(jax.pmap, axis_name="devices", in_axes=(0, 0, 0, None))
-def update_step(params, x, y_one_hot, lr):
-    loss, grads = jax.value_and_grad(loss_fn)(params, x, y_one_hot)
-    grads = jax.lax.pmean(grads, axis_name="devices")
-    loss = jax.lax.pmean(loss, axis_name="devices")
-    new_params = jax.tree_util.tree_map(lambda p, g: p - lr * g, params, grads)
-    return new_params, loss
+    # 2. Replicate model and data-parallel update step across local chips
+    @partial(jax.pmap, axis_name="devices", in_axes=(0, 0, 0, None))
+    def step(p, x, y, lr_rate):
+        loss, grads = jax.value_and_grad(loss_fn)(p, x, y)
+        grads = jax.lax.pmean(grads, axis_name="devices")
+        loss = jax.lax.pmean(loss, axis_name="devices")
+        return jax.tree_util.tree_map(lambda param, grad: param - lr_rate * grad, p, grads), loss
+    ...
 ```
-- Replicates weights across all 4 chips.
-- Simultaneously computes gradients on 4 parallel data shards.
-- Synchronizes gradients across chips with `jax.lax.pmean`.
+This function is **100% universal**:
+- Automatically works on local 1 TPU or 4 TPUs via `jax.pmap`.
+- Automatically connects across distributed multi-host nodes via `jax.distributed.initialize` when run by Kubeflow Trainer.
 
-### 5. Multi-Device Training Loop
-Batches of 256 samples are reshaped to `(4, 64, 784)` and dispatched across all 4 chips. The notebook trains for 10 epochs, reporting throughput (samples/second) and accuracy.
+### 5. Interactive Local Training
+```python
+trained_params = train_mlp(epochs=5, global_batch_size=256, lr=0.05)
+```
+Executes directly in the notebook across your workspace's attached TPU cores, reporting epoch loss and throughput.
 
 ### 6. Evaluation & Inference
-Computes test set accuracy and displays sample predictions alongside ground truth.
+Computes test set accuracy and displays sample predictions alongside ground truth labels.
 
-### 7. Parameter Saving
-Saves the trained weights to `/home/jovyan/jax_tpu_model_params.npz` and verifies reloading.
+### 7. Scale to Multi-Host TPU Slice with Kubeflow Trainer Python SDK
+Scale the **EXACT SAME** `train_mlp` function to a 2-node, 8-TPU multi-host slice (`tpu-v5-8-multi-host`) without writing raw Kubernetes YAML:
+
+```python
+from kubeflow.trainer import CustomTrainer, TrainerClient
+from kubeflow.trainer.options import kubernetes as k8s_options
+
+trainer_client = TrainerClient(backend_config=KubernetesBackendConfig(namespace="kubeflow-user"))
+
+train_job = trainer_client.train(
+    runtime="jax-distributed",
+    trainer=CustomTrainer(
+        func=train_mlp,  # Reuses the exact same Python function!
+        image="us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest",
+        num_nodes=2,
+        resources_per_node={"google.com/tpu": 4},
+        env={"JAX_PLATFORMS": "tpu,cpu", "ENABLE_PJRT_COMPATIBILITY": "true"},
+    ),
+    options=[tpu_placement_patch],
+)
+
+# Stream multi-host logs from all TPU pods
+trainer_client.wait_for_job_status(train_job, timeout=600)
+for log_line in trainer_client.get_job_logs(train_job):
+    print(log_line)
+```
 
 ---
 

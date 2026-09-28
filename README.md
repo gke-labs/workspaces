@@ -2,6 +2,32 @@
 
 The Kubernetes-native interactive dev environment for Notebooks, IDEs, and AI Agents — standalone, lightweight, and optimized for GKE.
 
+## Interactive R&D: Easy, Safe Access to Cluster & Distributed Compute
+
+Kubeflow Workspaces bridges the gap between infrastructure complexity and developer velocity. It gives researchers, ML engineers, and data scientists **easy, self-service access to high-performance Kubernetes compute** (CPUs, GPUs, Cloud TPUs) and **distributed compute resources**, while giving platform administrators **enterprise-grade safety, security, and isolation**.
+
+### 1. Interactive Cloud IDEs That Scale Easily to Distributed Compute
+
+Kubeflow Workspaces is **cloud-first**: users get instant, zero-install interactive development environments directly in the browser—co-located with high-throughput cluster storage, accelerators, and network fabrics. Each workspace is also the launchpad for distributed training and inference: prototype interactively on a single "VM", then scale the exact same code across multi-host cluster resources.
+
+![Interactive Dev & Scaling to Distributed Multi-Host Training](examples/tpu/demo_tpu_workspaces.gif)
+
+- **In-Browser Cloud IDEs**: Launch fully-featured **JupyterLab** or browser-based **VS Code (`code-server`)** environments in one click. No local CUDA/TPU driver installations, no environment drift across team members, and no massive datasets downloaded to laptops.
+- **Instant Hardware Sizing**: Spin up interactive dev environments tailored to any workload shape—from 1 CPU or 1 TPU to multi-chip topologies (such as TPU v5e 2x2 or multi-GPU instances)—without writing Kubernetes YAML manifests.
+- **Unified Code from Dev to Distributed Scale**: Prototype and test models interactively (e.g. using `jax.pmap` or PyTorch DDP), then submit multi-host training jobs (via the Kubeflow Trainer Python SDK, Ray, or Spark Operator) that reuse the **exact same training functions** across distributed nodes.
+- **Safe & Auditable by Default**: Access is protected end-to-end by Google Identity-Aware Proxy (IAP) and Kubernetes RBAC (`SubjectAccessReview`). No SSH keys, no bastion hosts, no open node ports, and no cluster-admin kubeconfig credentials are required on developer laptops.
+- **Tenant Isolation**: Each team runs their workspaces in their own tenant namespace with strict `NetworkPolicy` enforcement, persistent volume storage, and automated lifecycle management.
+
+### 2. Supplementary Local Dev Mode for Jupyter Notebooks
+
+For developers who prefer writing notebooks in their local desktop editor, Workspaces provides supplementary support to connect desktop VS Code (via the Jupyter extension) directly to remote in-cluster Jupyter kernels—keeping the familiar local editing experience while code runs on cluster accelerators.
+
+![Connecting Local VS Code to Remote Cluster Accelerators](examples/tpu/demo_vscode_remote_tpu.gif)
+
+- **Same Security Guarantees**: Local connections go through the same IAP + Kubernetes RBAC path as the cloud IDEs—no SSH keys, tunnels, or kubeconfig credentials on the laptop.
+
+---
+
 ## Overview
 
 This project is derived from upstream [Kubeflow Workspaces (Notebooks V2)](https://www.kubeflow.org/docs/components/workspaces/), the next-generation controller, backend, and web interface for interactive development environments on Kubernetes.
