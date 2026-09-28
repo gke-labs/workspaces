@@ -48,3 +48,5 @@ __pycache__/
 *$py.class
 .pytest_cache/
 .ipynb_checkpoints/
+.gstack/
+scratch/

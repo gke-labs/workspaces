@@ -3,6 +3,13 @@
 **Audience:** engineers who know Python and ML but have never used Kubernetes.
 Everything Kubernetes-specific is explained in the [Glossary](#glossary) below.
 
+> [!TIP]
+> **Demo Walkthrough:**
+>
+> ![Kubeflow Workspaces Distributed ML Demo](demo_workspaces_distributed.gif)
+>
+> *A complete 3-minute narrated walkthrough is available at [`demo_workspaces_distributed.mp4`](demo_workspaces_distributed.mp4).*
+
 ---
 
 ## What this example does
@@ -75,6 +82,8 @@ flowchart LR
 
 | File | What it is |
 | :--- | :--- |
+| [`demo_workspaces_distributed.mp4`](demo_workspaces_distributed.mp4) | Full video walkthrough showcasing the end-to-end distributed ML pipeline from a lightweight workspace. |
+| [`demo_workspaces_distributed.gif`](demo_workspaces_distributed.gif) | Animated GIF preview of key workflow milestones (workspace creation, Spark ETL, TPU training, inference). |
 | [`distributed_tpu_example.ipynb`](distributed_tpu_example.ipynb) | The notebook you run. Cells for setup, Stage 1, Stage 2, Stage 3, and cleanup. |
 | [`jobs/pipeline.py`](jobs/pipeline.py) | Orchestration helpers: `run_data_processing()`, `run_training()`, log printers. Also resolves the namespace, bucket, and images. |
 | [`jobs/data_processing.py`](jobs/data_processing.py) | The Spark ETL logic (`run_etl`). Runs on the Spark driver/executors. |
