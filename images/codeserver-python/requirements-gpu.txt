@@ -5,6 +5,7 @@ torch
 torchvision
 kfp==2.16.1
 kubeflow[spark]==0.4.0
+marimo
 matplotlib
 numpy
 pandas

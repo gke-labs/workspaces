@@ -42,6 +42,8 @@ kubeflow[spark]==0.4.0
 
 # Base-supplied. Intentionally unpinned -- read the note above before adding a version.
 google-cloud-storage
+marimo
+marimo-jupyter-extension
 matplotlib
 numpy
 pandas

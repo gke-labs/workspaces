@@ -149,7 +149,7 @@ In the Kubeflow Workspaces UI (`https://${WORKSPACES_HOST}/workspaces/`):
 | **Workspace Name** | `tpu-workspace` | Unique name in your namespace |
 | **WorkspaceKind** | **`jupyterlab`** | |
 | **Image** | **`jupyterlab (TPU)`** (`jupyterlab-tpu`) | Contains Python 3.12, JAX, and `libtpu` |
-| **Pod Config** | **`TPU v5 2x2`** (`tpu`) | Requests 4 TPU chips via `tpu-v5-4-single-host` |
+| **Pod Config** | **`TPU v5 1x1`** (`tpu_1`) or **`TPU v5 2x2`** (`tpu`) | Requests 1 chip via `tpu-v5-1-single-host` or 4 chips via `tpu-v5-4-single-host` |
 
 3. Click **Create**.
 4. GKE will automatically create a TPU node pool and schedule the workspace pod. The pod will transition from `Pending` to `Running` once the node pool is ready (typically 5–10 minutes for the initial TPU node pool creation).

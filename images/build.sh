@@ -46,6 +46,8 @@ TARGET_HARDWARE=()
 USE_CLOUD_BUILD=false
 PUSH_IMAGE=true
 DRY_RUN=false
+INSTALL_TORCH_TPU="${INSTALL_TORCH_TPU:-false}"
+TORCH_TPU_TOKEN="${TORCH_TPU_TOKEN:-}"
 
 show_usage() {
   cat <<EOF
@@ -77,6 +79,10 @@ Hardware Accelerator Options:
   --cpu                     Shorthand for hardware variant 'cpu'
   --gpu                     Shorthand for hardware variant 'gpu'
   --tpu                     Shorthand for hardware variant 'tpu'
+  --torch-tpu               Install optional torch_tpu in TPU images
+                            (requires access to https://github.com/google-pytorch/torch_tpu
+                            and gcloud auth; auto-fetches access token)
+  --torch-tpu-token <token> Explicit access token for torch_tpu registry
 
 Registry & Tag Options:
   --registry-path, -r <path> Container registry path (aliases: --registry; or pass as a
@@ -171,6 +177,15 @@ while [[ $# -gt 0 ]]; do
     --tpu)
       TARGET_HARDWARE+=("tpu")
       shift
+      ;;
+    --torch-tpu|--install-torch-tpu)
+      INSTALL_TORCH_TPU=true
+      shift
+      ;;
+    --torch-tpu-token)
+      TORCH_TPU_TOKEN="$2"
+      INSTALL_TORCH_TPU=true
+      shift 2
       ;;
     --registry-path|--registry|-r)
       REGISTRY_PATH="$2"
@@ -340,6 +355,7 @@ echo "  Target Hardware:  ${RESOLVED_HARDWARE[*]}"
 echo "  Tag:              ${IMAGE_TAG}"
 echo "  Push Image:       ${PUSH_IMAGE}"
 echo "  Use Cloud Build:  ${USE_CLOUD_BUILD}"
+echo "  Install torch_tpu: ${INSTALL_TORCH_TPU}"
 echo "  Samples Dir:      ${SAMPLES_DIR}"
 for t in "${RESOLVED_IMAGES[@]}"; do
   echo "  Image [${t}]:     $(get_target_image_base "${t}")"
@@ -524,6 +540,20 @@ build_and_tag_image() {
 # Execute Builds
 # ==============================================================================
 
+# Helper to resolve TPU build args (e.g. optional torch_tpu installation)
+get_tpu_build_args() {
+  local tpu_args=""
+  if [[ "${INSTALL_TORCH_TPU}" == "true" ]]; then
+    local tpu_token="${TORCH_TPU_TOKEN}"
+    if [[ -z "${tpu_token}" ]]; then
+      tpu_token="$(gcloud auth application-default print-access-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true)"
+      tpu_token="$(echo "${tpu_token}" | tr -d '[:space:]')"
+    fi
+    tpu_args="INSTALL_TORCH_TPU=true TORCH_TPU_TOKEN=${tpu_token}"
+  fi
+  echo "${tpu_args}"
+}
+
 # A. Build Code-Server Python variants
 if [[ " ${RESOLVED_IMAGES[*]} " =~ " codeserver " ]]; then
   cs_base="$(get_target_image_base "codeserver")"
@@ -536,7 +566,7 @@ if [[ " ${RESOLVED_IMAGES[*]} " =~ " codeserver " ]]; then
         build_and_tag_image "${CODESERVER_DIR}" "Dockerfile.gpu" "${cs_base}" "-gpu" "VS Code (codeserver-python) CUDA GPU" "false" "false"
         ;;
       tpu)
-        build_and_tag_image "${CODESERVER_DIR}" "Dockerfile.tpu" "${cs_base}" "-tpu" "VS Code (codeserver-python) TPU" "false" "false"
+        build_and_tag_image "${CODESERVER_DIR}" "Dockerfile.tpu" "${cs_base}" "-tpu" "VS Code (codeserver-python) TPU" "false" "false" "$(get_tpu_build_args)"
         ;;
     esac
   done
@@ -554,7 +584,7 @@ if [[ " ${RESOLVED_IMAGES[*]} " =~ " jupyterlab " ]]; then
         build_and_tag_image "${JUPYTERLAB_DIR}" "Dockerfile.gpu" "${jl_base}" "-gpu" "JupyterLab CUDA GPU" "false" "false"
         ;;
       tpu)
-        build_and_tag_image "${JUPYTERLAB_DIR}" "Dockerfile.tpu" "${jl_base}" "-tpu" "JupyterLab TPU" "false" "false"
+        build_and_tag_image "${JUPYTERLAB_DIR}" "Dockerfile.tpu" "${jl_base}" "-tpu" "JupyterLab TPU" "false" "false" "$(get_tpu_build_args)"
         ;;
     esac
   done

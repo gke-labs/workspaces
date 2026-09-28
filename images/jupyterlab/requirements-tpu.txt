@@ -34,6 +34,12 @@ kubeflow[spark]==0.4.0
 # verified not to touch google-cloud-storage at all -- it is just an older base. So
 # there is nothing to preserve here, and pinning 2.19.0 would force a real downgrade.
 google-cloud-storage
+keyrings.google-artifactregistry-auth
+marimo
+marimo-jupyter-extension
 matplotlib
 numpy
 pandas
+portpicker
+scikit-learn
+tensorboard

@@ -40,9 +40,10 @@ RUN PIP_NO_CACHE_DIR=off python3 -m pip install -r /tmp/requirements.txt --quiet
  && rm -f /tmp/requirements.txt \
  && pip config --site set install.user true
 
-# Install additional VS Code extension (Gemini Code Assist)
+# Install additional VS Code extensions (Gemini Code Assist, Marimo)
 # NOTE: XDG_DATA_HOME in Kubeflow codeserver is set to /tmp/data-${NB_USER} (non-PVC)
 RUN code-server --install-extension "Google.geminicodeassist@${GEMINICODEASSIST_VERSION}" --force \
+ && code-server --install-extension "marimo-team.vscode-marimo" --force \
  && code-server --list-extensions --show-versions
 
 # Pre-populate home with samples, and sync to $HOME_TMP for s6 01-copy-tmp-home

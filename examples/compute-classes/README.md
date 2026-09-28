@@ -74,6 +74,7 @@ ComputeClass name.
 
 | Name | TPU type | Chips per node (`count`) | Topology | Nodes (hosts) | Total chips | Used by |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `tpu-v5-1-single-host` | `tpu-v5-lite-podslice` (Spot) | 1 | 1x1 | 1 | 1 | `tpu_1` pod option in the JupyterLab/VS Code WorkspaceKinds |
 | `tpu-v5-4-single-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 2x2 | 1 | 4 | `tpu` pod option in the JupyterLab/VS Code WorkspaceKinds |
 | `tpu-v5-8-single-host` | `tpu-v5-lite-podslice` (Spot) | 8 | 2x4 | 1 | 8 | Larger single-host training |
 | `tpu-v5-8-multi-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 2x4 | 2 | 8 | [`distributed`](../distributed/) multi-host TPU training |
@@ -154,6 +155,7 @@ kubectl get computeclasses
 # NAME                    AGE
 # gpu-l4-spot             5s
 # gpu-t4-spot             5s
+# tpu-v5-1-single-host    5s
 # tpu-v5-32-multi-host    5s
 # tpu-v5-4-single-host    5s
 # tpu-v5-8-multi-host     5s

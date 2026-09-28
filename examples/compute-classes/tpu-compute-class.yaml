@@ -16,6 +16,20 @@
 apiVersion: cloud.google.com/v1
 kind: ComputeClass
 metadata:
+  name: tpu-v5-1-single-host
+spec:
+  priorities:
+  - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 1
+      topology: 1x1
+  nodePoolAutoCreation:
+    enabled: true
+---
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
   name: tpu-v5-8-single-host
 spec:
   priorities:

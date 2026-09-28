@@ -221,6 +221,9 @@ spec:
       - name: "NB_PREFIX"
         value: |-
           {{ httpPathPrefix "jupyterlab" }}
+      - name: "JUPYTERHUB_SERVICE_PREFIX"
+        value: |-
+          {{ httpPathPrefix "jupyterlab" }}
       - name: "LD_LIBRARY_PATH"
         value: "/usr/local/nvidia/lib64"
       - name: "PATH"
@@ -408,7 +411,25 @@ spec:
                   cpu: 12
                   memory: 40Gi
                   nvidia.com/gpu: 1
-          - id: "tpu"
+          - id: "tpu_1"
+            spawner:
+              displayName: "TPU v5 1x1"
+              description: "Pod with 1 TPU v5 lite chip"
+              labels:
+                - key: "accelerator"
+                  value: "tpu"
+            spec:
+              nodeSelector:
+                cloud.google.com/compute-class: "tpu-v5-1-single-host"
+              resources:
+                requests:
+                  cpu: 20
+                  memory: 40Gi
+                limits:
+                  cpu: 20
+                  memory: 40Gi
+                  google.com/tpu: 1
+          - id: "tpu_4"
             spawner:
               displayName: "TPU v5 2x2"
               description: "Pod with 4 TPU v5 lite chips"
@@ -420,9 +441,9 @@ spec:
                 cloud.google.com/compute-class: "tpu-v5-4-single-host"
               resources:
                 requests:
-                  cpu: 12
-                  memory: 24Gi
+                  cpu: 100
+                  memory: 180Gi
                 limits:
-                  cpu: 12
-                  memory: 24Gi
+                  cpu: 100
+                  memory: 180Gi
                   google.com/tpu: 4

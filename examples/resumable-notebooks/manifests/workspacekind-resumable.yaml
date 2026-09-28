@@ -177,6 +177,9 @@ spec:
       - name: "NB_PREFIX"
         value: |-
           {{ httpPathPrefix "jupyterlab" }}
+      - name: "JUPYTERHUB_SERVICE_PREFIX"
+        value: |-
+          {{ httpPathPrefix "jupyterlab" }}
       - name: "LD_LIBRARY_PATH"
         value: "/usr/local/nvidia/lib64"
       - name: "PATH"

@@ -1,8 +1,13 @@
 # Kubeflow packages (TPU)
 google-cloud-storage
 jax[tpu]
+keyrings.google-artifactregistry-auth
 kfp==2.16.1
 kubeflow[spark]==0.4.0
+marimo
 matplotlib
 numpy
 pandas
+portpicker
+scikit-learn
+tensorboard

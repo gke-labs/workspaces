@@ -39,13 +39,14 @@ This repository builds four custom image targets:
      browser tab. It is not the VS Code application installed on your laptop.
    - Pre-installed VS Code extensions:
      - **Gemini Code Assist** (`Google.geminicodeassist`) for AI code completion and chat
+     - **Marimo** (`marimo-team.vscode-marimo`) reactive notebook extension
      - **Python** (`ms-python.python`) and **Jupyter** (`ms-toolsai.jupyter`)
    - Pre-installed Gemini CLI tool (`@google/gemini-cli`).
    - Supports **CPU**, **CUDA GPU**, and **Cloud TPU**.
 
 2. **JupyterLab (`jupyterlab`)**:
    - Extends upstream Kubeflow `jupyter-scipy:v1.11.0` (CPU/TPU) and `jupyter-pytorch-cuda-full:v1.11.0` (GPU) pinned by immutable digests.
-   - Pre-installed data science packages: JAX, PyTorch, Pandas, Matplotlib, Kubeflow SDKs (`kubeflow[spark]`, `kfp`).
+   - Pre-installed data science packages: JAX, PyTorch, Pandas, Matplotlib, Marimo (`marimo`, `marimo-jupyter-extension`), Kubeflow SDKs (`kubeflow[spark]`, `kfp`).
    - Supports **CPU**, **CUDA GPU**, and **Cloud TPU**.
 
 3. **Apache Spark (`spark-py312`)**:
@@ -70,7 +71,7 @@ This repository builds four custom image targets:
 | :--- | :--- | :--- |
 | **CPU** | `Dockerfile` | Lightweight CPU stack (`jax[cpu]`, `numpy`, `pandas`, `matplotlib`, `kfp`, `kubeflow[spark]`) |
 | **CUDA GPU** | `Dockerfile.gpu` | CUDA 12, `NVIDIA_VISIBLE_DEVICES=all`, PyTorch (`torch`, `torchvision`), `jax[cuda12]` |
-| **Cloud TPU** | `Dockerfile.tpu` | Cloud TPU driver (`libtpu`), `jax[tpu]`, Kubeflow SDKs |
+| **Cloud TPU** | `Dockerfile.tpu` | Cloud TPU driver (`libtpu`), `jax[tpu]`, Kubeflow SDKs (optional: `torch_tpu`, PyTorch) |
 
 ### Bundled Samples
 
@@ -221,6 +222,9 @@ Hardware Accelerator Options:
   --cpu                     Shorthand for hardware variant 'cpu'
   --gpu                     Shorthand for hardware variant 'gpu'
   --tpu                     Shorthand for hardware variant 'tpu'
+  --torch-tpu               Install optional torch_tpu in TPU images
+                            (requires gcloud auth; auto-fetches access token)
+  --torch-tpu-token <token> Explicit access token for torch_tpu registry
 
 Registry & Tag Options:
   --registry-path, -r <path> Container registry path (aliases: --registry; or pass as a
@@ -270,6 +274,12 @@ Execution Options:
 ```bash
 # Pass registry as a positional argument:
 ./build.sh --jupyterlab --tpu "${REGISTRY}"
+```
+
+#### 3b. Build JupyterLab for Cloud TPU with optional torch_tpu
+```bash
+# Requires gcloud authentication (gcloud auth login) to access private Artifact Registry:
+./build.sh --jupyterlab --tpu --torch-tpu "${REGISTRY}"
 ```
 
 #### 4. Build Apache Spark
@@ -404,6 +414,34 @@ Then rebuild the affected image:
 ./build.sh --codeserver --gpu --registry-path "${REGISTRY}"
 ```
 
+#### Optional `torch_tpu` (PyTorch TPU Backend)
+
+Both `jupyterlab/Dockerfile.tpu` and `codeserver-python/Dockerfile.tpu` support installing the optional `torch_tpu` package (which pulls PyTorch CPU automatically) from Google's private Artifact Registry virtual repository. Supporting utilities (`keyrings.google-artifactregistry-auth`, `portpicker`, `marimo`, `scikit-learn`, `pandas`, `jax`, `tensorboard`) are included in `requirements-tpu.txt`.
+
+> [!IMPORTANT]
+> Users must have access to [google-pytorch/torch_tpu](https://github.com/google-pytorch/torch_tpu) to be able to install this package. Without access to the private repository and its Artifact Registry virtual repository, installation will fail with `403 Forbidden`.
+
+To include `torch_tpu`, authenticate via `gcloud` first:
+```bash
+gcloud auth login
+gcloud auth application-default login
+```
+
+Then build using `build.sh` with `--torch-tpu`:
+```bash
+./build.sh --jupyterlab --tpu --torch-tpu --registry-path "${REGISTRY}"
+```
+
+Or build directly with `docker build`:
+```bash
+docker build \
+  --build-arg INSTALL_TORCH_TPU=true \
+  --build-arg TORCH_TPU_TOKEN="$(gcloud auth application-default print-access-token)" \
+  -f images/jupyterlab/Dockerfile.tpu \
+  -t "${REGISTRY}/jupyterlab:latest-tpu" \
+  images/jupyterlab
+```
+
 ### Adding Sample Notebooks & Datasets
 
 Any file placed inside [`samples/`](samples/) is automatically copied into the image at build time.
@@ -480,8 +518,8 @@ the [`examples/`](../examples/) walkthroughs expect to find in the cluster.
 
 | Template | `WorkspaceKind` name | Image options (`id`) | Pod options (`id`) |
 | :--- | :--- | :--- | :--- |
-| [`workspacekinds/jupyterlab.yaml`](workspacekinds/jupyterlab.yaml) | `jupyterlab` | `jupyterlab-cpu`, `jupyterlab-gpu`, `jupyterlab-tpu`, `jupyter-scipy:v1.10.0` | `tiny_cpu`, `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu` |
-| [`workspacekinds/codeserver-python.yaml`](workspacekinds/codeserver-python.yaml) | `codeserver` | `codeserver-python-cpu`, `codeserver-python-gpu`, `codeserver-python-tpu`, `codeserver-python:v1.11.0` | `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu` |
+| [`workspacekinds/jupyterlab.yaml`](workspacekinds/jupyterlab.yaml) | `jupyterlab` | `jupyterlab-cpu`, `jupyterlab-gpu`, `jupyterlab-tpu`, `jupyter-scipy:v1.10.0` | `tiny_cpu`, `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu_1`, `tpu` |
+| [`workspacekinds/codeserver-python.yaml`](workspacekinds/codeserver-python.yaml) | `codeserver` | `codeserver-python-cpu`, `codeserver-python-gpu`, `codeserver-python-tpu`, `codeserver-python:v1.11.0` | `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu_1`, `tpu` |
 
 > [!IMPORTANT]
 > The second template's file is `codeserver-python.yaml` and its image is
