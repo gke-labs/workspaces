@@ -3,6 +3,8 @@
 Run untrusted, agent-generated code in throwaway Linux boxes inside your GKE
 cluster — and fan a single agent out into 20 of them at once.
 
+![Agent Sandbox Demo](agent_sandbox_demo.gif)
+
 **Quick start** (after the [one-time platform setup](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in)):
 
 1. From the repository root: `./examples/agent-sandbox/deploy_agent_sandbox.sh`
@@ -329,7 +331,7 @@ Read by the walkthrough:
 
 | Variable | Default | Meaning |
 | :--- | :--- | :--- |
-| `TENANT_NAMESPACE` | `kubeflow-user` | Must match the deploy script's value. |
+| `TENANT_NAMESPACE` | `kubeflow-user` | Only used outside a pod. Inside the workspace, the namespace is detected from the pod's ServiceAccount mount. |
 | `MCP_SERVER_URL` | `http://agent-sandbox-mcp-server.${TENANT_NAMESPACE}.svc.cluster.local:8000/mcp` | MCP server address. |
 | `WARMPOOL_NAME` | `python-warmpool` | Warm pool to claim from. |
 | `NUM_AGENTS` | `20` | Parallel agents (maximum 20). |

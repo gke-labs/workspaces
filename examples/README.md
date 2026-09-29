@@ -9,9 +9,9 @@ exact commands to run, what the output should look like, a troubleshooting table
 and cleanup instructions.
 
 > [!TIP]
-> **One-time platform setup:** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–6**) **once**. After that, the cluster, storage, images, and templates are in place, and you can run any (or all) of the examples without repeating the setup.
+> **One-time platform setup (~20–30 min without custom images, ~35–60 min with them):** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–6**) **once**. After that, the cluster, storage, images, and templates are in place, and you can run any (or all) of the examples without repeating the setup.
 >
-> **Steps 4–5 (custom images) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you.)
+> **Steps 4–5 (custom images, ~15–30 min) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you.)
 
 ---
 
@@ -40,21 +40,37 @@ Every example assumes the platform underneath it already exists. **Steps 1–6 a
 
 ```mermaid
 flowchart TD
-    subgraph S1["One-time setup (steps 1–6, done once for all examples)"]
-        A["1. Authenticate & create a GKE cluster"] --> B["2. Create a GCS data bucket<br/>shared storage & distributed ML"]
-        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh<br/>(registers jupyterlab + codeserver on base images,<br/>applies ComputeClasses)"]
-        C -. "optional: preinstalled deps" .-> D["4. Build custom images<br/>images/build.sh"]
-        D --> E["5. Register WorkspaceKinds<br/>on the custom images<br/>images/workspacekinds/"]
-        E --> G["6. ComputeClasses<br/>(already applied by step 3)"]
+    subgraph S1["One-time setup (steps 1–6, done once for all examples) — ~20–30 min"]
+        A["1. Authenticate & create a GKE cluster<br/>(~10–15 min)"] --> B["2. Create a GCS data bucket<br/>(~1–2 min)"]
+        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh<br/>(~5–10 min)"]
+        C -. "optional: preinstalled deps" .-> D["4. Build custom images<br/>images/build.sh<br/>(~15–30 min)"]
+        D --> E["5. Register WorkspaceKinds<br/>images/workspacekinds/<br/>(~1 min)"]
+        E --> G["6. ComputeClasses<br/>(already applied by step 3)<br/>(~1 min)"]
         C --> G
     end
     subgraph S2["Per-example workflow (repeat for each example)"]
-        H["7. Create a Workspace in the UI"] --> I["8. Upload and run an example"]
+        H["7. Create a Workspace in the UI<br/>(~2–5 min)"] --> I["8. Upload and run an example<br/>(10–60+ min, varies)"]
     end
     G --> H
 ```
 
-### 1. Authenticate, set environment variables & create a GKE cluster
+### Steps at a glance
+
+| Step | Action | Frequency | Estimated Time |
+| :--- | :--- | :--- | :--- |
+| **Step 1** | [Authenticate, set env vars & create GKE cluster](#1-authenticate-set-environment-variables--create-a-gke-cluster) | Once | **~10–15 min** |
+| **Step 2** | [Create Cloud Storage (GCS) data bucket](#2-create-the-cloud-storage-gcs-data-bucket) | Once | **~1–2 min** |
+| **Step 3** | [Deploy the standalone platform](#3-deploy-the-standalone-platform) (`deploy_standalone.sh`) | Once | **~5–10 min** |
+| **Step 4** | *(Optional)* [Build custom images](#4-optional-build-custom-images) (`build.sh`) | Once | **~15–30 min** |
+| **Step 5** | *(Optional)* [Register WorkspaceKinds](#5-optional-register-the-workspacekinds-that-expose-those-images) for custom images | Once | **~1 min** |
+| **Step 6** | [Apply ComputeClasses](#6-apply-the-computeclasses-gpu--tpu-examples-only) *(GPU/TPU; applied in step 3)* | Once | **~1 min** |
+| **Step 7** | [Create a Workspace](#7-create-a-workspace) in the Kubeflow UI | Per example | **~2–5 min** |
+| **Step 8** | [Upload and run the example](#8-run-the-example) | Per example | **10–60+ min** *(see [table above](#the-examples))* |
+
+---
+
+<a id="1-authenticate-set-environment-variables--create-a-gke-cluster"></a>
+### 1. Authenticate, set environment variables & create a GKE cluster (~10–15 min)
 
 First, authenticate your account with Google Cloud. Run `gcloud auth login` to authenticate the CLI and `gcloud auth application-default login` to configure Application Default Credentials (ADC) for Google Cloud client libraries and tools:
 
@@ -86,7 +102,7 @@ export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 # export DESKTOP_HOST="connect.example.com"
 ```
 
-Create the VPC-native cluster with Gateway API, Workload Identity Federation, and HTTP Load Balancing enabled. You can create either a **Standard** or an **Autopilot** cluster:
+Create the VPC-native cluster with Gateway API, and Workload Identity Federation enabled. You can create either a **Standard** or an **Autopilot** cluster:
 
 #### Option A: GKE Standard (recommended)
 
@@ -101,7 +117,6 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --gateway-api=standard `# Required: Enables GKE Gateway API controller` \
   --workload-pool="${PROJECT_ID}.svc.id.goog" `# Required: Workload Identity for GCS` \
   --workload-metadata=GKE_METADATA \
-  --addons=HttpLoadBalancing,GcePersistentDiskCsiDriver,GcsFuseCsiDriver \
   --num-nodes=1 \
   --machine-type=e2-standard-4 \
   --enable-image-streaming
@@ -136,7 +151,8 @@ gcloud container clusters create-auto "${CLUSTER_NAME}" \
 > [!NOTE]
 > Autopilot's security policies reject a few things the upstream manifests do (cert-manager leader election in `kube-system`, and Kubeflow Trainer RBAC bindings to `system:authenticated`). `deploy_standalone.sh` detects Autopilot and adapts those manifests automatically; no extra steps are needed.
 
-### 2. Create the Cloud Storage (GCS) data bucket
+<a id="2-create-the-cloud-storage-gcs-data-bucket"></a>
+### 2. Create the Cloud Storage (GCS) data bucket (~1–2 min)
 
 Cloud Storage (`gs://...`) is Google Cloud's scalable object storage. While each Workspace pod mounts a persistent disk for its home directory (`/home/jovyan`), sharing datasets across users, saving model checkpoints, and running distributed workloads (such as Spark ETL and multi-host TPU training) require shared object storage.
 
@@ -172,7 +188,8 @@ gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
 
 With `roles/storage.objectUser` granted via the `principalSet` binding, every pod in `${TENANT_NAMESPACE}` (notebooks, Spark executors, Trainer TPU pods, inference deployments) can seamlessly read and write objects in `gs://${GCS_BUCKET}` with zero secret keys to manage.
 
-### 3. Deploy the standalone platform
+<a id="3-deploy-the-standalone-platform"></a>
+### 3. Deploy the standalone platform (~5–10 min)
 
 Run the standalone deployment:
 
@@ -203,7 +220,8 @@ did not exist when the kernel started.
   * **No custom domain:** Leave `WORKSPACES_HOST` unset. `deploy_standalone.sh` automatically generates a domain using `sslip.io` (`notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io`) and provisions a Google-managed SSL certificate via Certificate Manager with zero DNS configuration needed.
   * **With a custom domain:** Set `export WORKSPACES_HOST="workspaces.example.com"` (and optionally `export DESKTOP_HOST="connect.example.com"`). The script configures the GKE Gateway and Certificate Manager for your host. After deployment finishes, add a DNS `A` record pointing `workspaces.example.com` to the static external IP printed by the script.
 
-### 4. (Optional) Build custom images
+<a id="4-optional-build-custom-images"></a>
+### 4. (Optional) Build custom images (~15–30 min)
 
 > [!NOTE]
 > Skip steps 4–5 if you are fine installing dependencies yourself inside the
@@ -227,7 +245,8 @@ workspace images — `codeserver-python`, `jupyterlab` and `spark-py312`. The
 `agent-sandbox-mcp-server` image is deliberately **not** in `--all`; the
 `agent-sandbox` example's `deploy_agent_sandbox.sh` builds it (`./build.sh --mcp-server`).
 
-### 5. (Optional) Register the WorkspaceKinds that expose those images
+<a id="5-optional-register-the-workspacekinds-that-expose-those-images"></a>
+### 5. (Optional) Register the WorkspaceKinds that expose those images (~1 min)
 
 Register the ready-made templates for **JupyterLab** and **VS Code (code-server)**.
 They use the same names and option ids as the kinds registered in step 3, so this
@@ -261,7 +280,8 @@ kubectl get workspacekinds
 
 See [Ready-made WorkspaceKind templates](../images/README.md#ready-made-workspacekind-templates).
 
-### 6. Apply the ComputeClasses (GPU / TPU examples only)
+<a id="6-apply-the-computeclasses-gpu--tpu-examples-only"></a>
+### 6. Apply the ComputeClasses (GPU / TPU examples only) (~1 min)
 
 `deploy_standalone.sh` already applies these in step 3 (unless you set
 `APPLY_COMPUTE_CLASSES=false`), so you normally have nothing to do here. To apply
@@ -281,12 +301,14 @@ See [`compute-classes/README.md`](compute-classes/README.md).
 
 The one-time platform setup is complete. For each example you want to try, you only follow steps 7–8:
 
-### 7. Create a Workspace
+<a id="7-create-a-workspace"></a>
+### 7. Create a Workspace (~2–5 min)
 
 Open `https://<your-workspaces-host>/workspaces/`, click **Create Workspace**, pick
 the WorkspaceKind, image, and pod size that the example's README asks for.
 
-### 8. Run the example
+<a id="8-run-the-example"></a>
+### 8. Run the example (10–60+ min, varies by example)
 
 Upload the notebook (and any `jobs/` package next to it) into the workspace using
 the file-browser upload button, then follow that example's README. The

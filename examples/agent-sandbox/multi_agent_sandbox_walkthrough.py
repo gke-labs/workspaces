@@ -77,7 +77,27 @@ YELLOW = "\033[33m"
 RED = "\033[31m"
 MAGENTA = "\033[35m"
 
-TENANT_NAMESPACE = os.environ.get("TENANT_NAMESPACE", "kubeflow-user")
+SA_NAMESPACE_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+
+
+def detect_namespace() -> str:
+    """Returns the namespace of the pod this script runs in.
+
+    Reads the namespace from the ServiceAccount mount inside the workspace pod.
+    Falls back to the TENANT_NAMESPACE env var (or "kubeflow-user") when run
+    outside a pod.
+    """
+    try:
+        with open(SA_NAMESPACE_FILE, encoding="utf-8") as f:
+            namespace = f.read().strip()
+        if namespace:
+            return namespace
+    except OSError:
+        pass
+    return os.environ.get("TENANT_NAMESPACE", "kubeflow-user")
+
+
+TENANT_NAMESPACE = detect_namespace()
 DEFAULT_MCP_URL = f"http://agent-sandbox-mcp-server.{TENANT_NAMESPACE}.svc.cluster.local:8000/mcp"
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", DEFAULT_MCP_URL)
 WARMPOOL_NAME = os.environ.get("WARMPOOL_NAME", "python-warmpool")

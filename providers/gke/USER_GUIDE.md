@@ -69,7 +69,7 @@ gcloud resource-manager org-policies describe compute.restrictLoadBalancerCreati
 - **Remediation**: Request an organization policy exemption for your project (e.g., via your organization's policy administrator, or Google-internally via [go/overground-quickstart#project-level](http://go/overground-quickstart#project-level) / [go/gcp-control-gclb](http://go/gcp-control-gclb)) to allow `GLOBAL_EXTERNAL_MANAGED_HTTP_HTTPS`, or deploy into an already-exempted project/folder (such as projects under `teams/gke/dev/dev_projects`).
 
 ### Create or Select a GKE Cluster
-You need a VPC-native GKE cluster with **Dataplane V2** (`ADVANCED_DATAPATH`), **Workload Identity Federation for GKE**, **HTTP Load Balancing**, **GCE Persistent Disk CSI Driver**, and **Gateway API (`--gateway-api=standard`)** enabled.
+You need a VPC-native GKE cluster with **Dataplane V2** (`ADVANCED_DATAPATH`), **Workload Identity Federation for GKE**, **HTTP Load Balancing** and **GCE Persistent Disk CSI Driver** (both on by default), and **Gateway API (`--gateway-api=standard`)** enabled.
 
 If you do not have a cluster yet, create one using `gcloud`:
 
@@ -87,7 +87,6 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --gateway-api=standard `# Required: Enables GKE Gateway API controller` \
   --workload-pool="${PROJECT_ID}.svc.id.goog" `# Required: Enables Workload Identity for GCS access` \
   --workload-metadata=GKE_METADATA \
-  --addons=HttpLoadBalancing,GcePersistentDiskCsiDriver,GcsFuseCsiDriver \
   --num-nodes=1 \
   --machine-type=e2-standard-4 \
   --enable-image-streaming
