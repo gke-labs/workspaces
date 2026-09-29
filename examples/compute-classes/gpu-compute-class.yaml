@@ -39,3 +39,35 @@ spec:
       count: 1
   nodePoolAutoCreation:
     enabled: true
+---
+# Best-available single-GPU ComputeClass, used by the "GPU (best available)"
+# (gpu_best_available) pod option in the example WorkspaceKinds. GKE tries each
+# priority in order and falls back to the next when one is stocked out or out of
+# quota, so Workspaces still start when Spot T4 capacity runs dry.
+# Default order (cheapest first): T4 Spot -> L4 Spot -> T4 on-demand -> L4 on-demand.
+# Add, remove, or reorder entries to use other GPU types (e.g. nvidia-a100-80gb);
+# keep the pod option's CPU/memory requests within what every listed shape can fit.
+apiVersion: cloud.google.com/v1
+kind: ComputeClass
+metadata:
+  name: gpu-best-available
+spec:
+  priorities:
+  - spot: true
+    gpu:
+      type: nvidia-tesla-t4
+      count: 1
+  - spot: true
+    gpu:
+      type: nvidia-l4
+      count: 1
+  - spot: false
+    gpu:
+      type: nvidia-tesla-t4
+      count: 1
+  - spot: false
+    gpu:
+      type: nvidia-l4
+      count: 1
+  nodePoolAutoCreation:
+    enabled: true

@@ -176,10 +176,22 @@ kubectl get podsnapshotstorageconfigs
 # kubeflow-pod-snapshot-storage-config    True
 ```
 
-### 3. Workspace images
+### 3. Workspace images (custom images optional)
 
-Build and push the JupyterLab CPU and GPU images with
-[`../../images/build.sh`](../../images/build.sh) and note the tags it prints:
+Neither notebook needs a custom image. The public upstream Kubeflow base images
+are enough:
+
+| Notebook | Base image | Extra dependencies |
+| :--- | :--- | :--- |
+| CPU | `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0` | None (only `numpy`, already included) |
+| GPU | `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0` | `transformers>=5`, installed by the notebook's **Step 0** cell (`pip install --user`, so it lands on the home PVC and survives restarts) |
+
+These are the images the registration command below uses by default.
+
+If you would rather have everything preinstalled, build the custom JupyterLab CPU
+and GPU images with [`../../images/build.sh`](../../images/build.sh) (the GPU
+image ships `transformers`, `accelerate`, and JAX on CUDA) and note the tags it
+prints:
 
 ```bash
 cd images
@@ -188,15 +200,11 @@ cd images
 
 See [`../../images/README.md`](../../images/README.md) for the full reference.
 
-> [!NOTE]
-> For the CPU notebook you may instead use the public upstream image
-> `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0`. The GPU
-> notebook needs CUDA and `transformers`, so it requires the custom GPU image.
-
 ### 4. The GPU ComputeClass (GPU notebook only)
 
 The `GPU T4 Spot` pod option selects nodes through the `gpu-t4-spot`
 ComputeClass. Without it, the workspace Pod stays `Pending` forever.
+`deploy_standalone.sh` applies it for you; to apply it by hand:
 
 ```bash
 kubectl apply -f ../compute-classes/gpu-compute-class.yaml
@@ -205,6 +213,14 @@ kubectl get computeclass gpu-t4-spot
 
 You also need **T4 Spot quota** in your region. See
 [`../compute-classes/README.md`](../compute-classes/README.md).
+
+> [!NOTE]
+> This example deliberately pins the GPU to **T4** rather than using the
+> `gpu-best-available` ComputeClass that the other WorkspaceKinds use. A GPU
+> snapshot can only be restored onto the **same GPU model** it was taken on, so a
+> class that may pick a T4 on pause and an L4 on resume would break the restore.
+> The trade-off: when Spot T4 is stocked out (`FailedScaleUp ... GCE out of
+> resources`), the workspace waits until capacity returns.
 
 ### 5. Internet access from the workspace (GPU notebook only)
 
@@ -224,17 +240,23 @@ podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-conf
 ```
 
 It contains three placeholders you must replace. Run this from the repository
-root:
+root. By default it uses the public upstream base images (see
+[Workspace images](#3-workspace-images-custom-images-optional)):
 
 ```bash
 export PROJECT_ID="my-project"
-export REGION="us-west1"
-export REPO_NAME="kubeflow-repo"
 export TENANT_NAMESPACE="kubeflow-user"
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
-export CPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-cpu"
-export GPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-gpu"
+# Public upstream base images (no build needed)
+export CPU_IMAGE="ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0"
+export GPU_IMAGE="ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0"
+
+# Or, if you built the custom images with images/build.sh:
+# export REGION="us-west1"
+# export REPO_NAME="kubeflow-repo"
+# export CPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-cpu"
+# export GPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-gpu"
 
 sed -e "s|<YOUR_CPU_IMAGE>|${CPU_IMAGE}|g" \
     -e "s|<YOUR_GPU_IMAGE>|${GPU_IMAGE}|g" \
@@ -329,6 +351,7 @@ to your workspace and follow the instructions inside the notebook:
 2. **GPU Example**:
    - Create or open a **GPU workspace** using the `GPU T4 Spot` pod config and the GPU image.
    - Upload [`gpu_checkpoint_restore_example.ipynb`](gpu_checkpoint_restore_example.ipynb).
+   - Run **Step 0** to install `transformers` (needed on the upstream base image; a quick no-op on the custom GPU image).
    - Run **Steps 1 & 2** to load the model into VRAM and compute initial tokens and weight fingerprint.
    - Pause the workspace using the **Stop** / **Pause** button in the UI, then resume it using the **Start** / **Resume** button.
    - Run **Step 3** to verify that model weights in VRAM remain bit-identical and generation continues without reloading.
@@ -533,7 +556,7 @@ If cluster administrators want to change the fallback default bucket used by `gk
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | Workspace shows **`Error`** (not `Pending`) within a minute of creation, with `stateMessage: Workspace Pod is unschedulable: 0/N nodes are available…` | **Usually normal.** No GPU node exists yet, so the scheduler reports the pod unschedulable and the controller surfaces that as `Error` — *while* GKE provisions one in the background. A cold T4 Spot node typically takes 5–10 minutes. | Confirm a node really is coming: `kubectl describe pod <pod> -n "${TENANT_NAMESPACE}"` and look for a `TriggeredScaleUp` event (e.g. `nap-n1-standard-16-spot-gpu1-… 0->1`). If you see `TriggeredScaleUp`, just wait — the state flips to `Running` on its own. Only if there is **no** `TriggeredScaleUp`, or you see `FailedScaleUp`, is something actually wrong: see the next row. |
-| Workspace Pod stuck `Pending` for >10 min (GPU) | The `gpu-t4-spot` ComputeClass is missing, or you have no T4 Spot quota in the region. | `kubectl apply -f ../compute-classes/gpu-compute-class.yaml`; check quota per [`../compute-classes/README.md`](../compute-classes/README.md). `kubectl describe pod <pod>` shows the real reason under `Events`. |
+| Workspace Pod stuck `Pending` for >10 min (GPU) | The `gpu-t4-spot` ComputeClass is missing, you have no T4 Spot quota in the region, or Spot T4 is stocked out (`FailedScaleUp ... GCE out of resources`; wait for capacity). | `kubectl apply -f ../compute-classes/gpu-compute-class.yaml`; check quota per [`../compute-classes/README.md`](../compute-classes/README.md). `kubectl describe pod <pod>` shows the real reason under `Events`. |
 | Pod starts, but `runtimeClassName` is empty | The `gke-workspace-snapshot-addon` mutating webhook did not fire. | Check the addon is running (`kubectl -n kubeflow-workspaces get deploy gke-workspace-snapshot-addon`) and that the WorkspaceKind or Workspace carries `podsnapshot.gke.kubeflow.org/enabled: "true"`. |
 | Workspace fails with `InvalidImageName` | The `<YOUR_CPU_IMAGE>` / `<YOUR_GPU_IMAGE>` placeholders were never substituted. | Re-apply the WorkspaceKind through the `sed` pipeline above. |
 | Pause hangs, or the workspace comes back with a fresh PID | The checkpoint failed and GKE fell back to a cold start. | `kubectl -n kubeflow-workspaces logs -l app=gke-workspace-snapshot-addon` and `kubectl -n "${TENANT_NAMESPACE}" describe podsnapshot <name>`. |
@@ -541,7 +564,7 @@ If cluster administrators want to change the fallback default bucket used by `gk
 | In-memory variables or kernel state lost in VS Code (`codeserver`) | Stateful pause & resume is only supported for JupyterLab. `codeserver` uses stateless pause & resume. | Use `jupyterlab` or `jupyterlab-resumable` if you need in-memory variables and loaded models preserved across pause/resume. In `codeserver`, save your work to `/home/jovyan` before pausing. |
 | Variables survive, but a terminal you opened is gone | Expected. Only the container's own process tree is checkpointed; `kubectl exec` sessions are not. | Run long-lived work from inside the notebook. |
 | GPU notebook OOMs while pausing | Snapshotting copies GPU state through Pod memory; the node needs headroom. | The `gpu_t4_spot` pod config requests 12 CPU / 40 Gi for exactly this reason. Do not shrink it. |
-| Restore fails after switching machine types | A snapshot cannot be restored onto a different GPU model. | Resume on the same ComputeClass you paused on. |
+| Restore fails after switching machine types | A snapshot cannot be restored onto a different GPU model. | Resume on the same GPU model you paused on. This is why the example pins `gpu-t4-spot` instead of `gpu-best-available` (see [the GPU ComputeClass prerequisite](#4-the-gpu-computeclass-gpu-notebook-only)). |
 
 > [!NOTE]
 > Known constraints: fp16 only on Turing (T4), multi-GPU only on L4, MIG is not
@@ -569,7 +592,7 @@ Optional — delete the checkpoint data from Cloud Storage.
 
 `SNAPSHOT_GCS_BUCKET` is the snapshot bucket created by
 [`deploy_standalone.sh`](../../providers/gke/deploy_standalone.sh); it defaults to
-`<tenant-namespace>-snapshots-bucket`. Read the value the cluster is actually using
+`<project-id>-<tenant-namespace>-snapshots-bucket`. Read the value the cluster is actually using
 rather than guessing:
 
 ```bash

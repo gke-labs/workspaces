@@ -25,7 +25,7 @@ This example demonstrates interactive, multi-device neural network training with
 | **Workflow** | Self-contained notebook (`jax_tpu_training.ipynb`) executed remotely via VS Code or in-browser JupyterLab, scaling out via the Kubeflow Trainer Python SDK |
 
 > [!TIP]
-> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClass, TPU image, and `jupyterlab` WorkspaceKind are already configured. You can skip the prerequisites checklist and jump straight to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
+> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClasses, and `jupyterlab` WorkspaceKind are already configured (`deploy_standalone.sh` applies the ComputeClasses and registers the WorkspaceKind by default). Jump to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
 
 ### Architecture Flow
 
@@ -40,7 +40,7 @@ flowchart TD
       PROXY["GKE Access Proxy<br/>(connect.example.com / DESKTOP_HOST)"]
       
       subgraph Pod["Workspace Pod (jupyterlab-tpu)"]
-        JUPYTER["JupyterLab Server / Kernel<br/>(Python 3.12 + JAX + libtpu)"]
+        JUPYTER["JupyterLab Server / Kernel<br/>(JAX + libtpu)"]
       end
 
       subgraph TPU["Auto-Created TPU v5e Node (tpu-v5-4-single-host)"]
@@ -93,7 +93,7 @@ export NS="${TENANT_NAMESPACE}"
 
 ### 1. Check TPU v5e Spot Quota
 
-Verify that your project has at least 4 chips of TPU v5e Spot quota in your region:
+Verify that your project has at least 4 chips of TPU v5e Spot quota in your region (8 chips if you also run the multi-host TrainJob in [section 6](#6-scale-to-multi-host-tpu-slice-with-kubeflow-trainer-python-sdk)):
 
 ```bash
 gcloud compute regions describe "${REGION}" --project="${PROJECT_ID}" \
@@ -102,43 +102,51 @@ gcloud compute regions describe "${REGION}" --project="${PROJECT_ID}" \
 
 Look for **`PREEMPTIBLE_TPU_LITE_PODSLICE_V5`** (limit $\ge$ 4).
 
-### 2. Apply the TPU ComputeClass
+### 2. Verify the TPU ComputeClasses
 
-The `tpu-v5-4-single-host` ComputeClass enables GKE to auto-provision the TPU node pool when the workspace starts:
+`deploy_standalone.sh` applies `examples/compute-classes/` by default (`APPLY_COMPUTE_CLASSES=true`). The `tpu-v5-1-single-host` / `tpu-v5-4-single-host` ComputeClasses let GKE auto-provision the TPU node pool when the workspace starts, on both GKE Standard and Autopilot:
+
+```bash
+kubectl get computeclass tpu-v5-1-single-host tpu-v5-4-single-host tpu-v5-8-multi-host
+```
+
+If they are missing (for example you deployed with `APPLY_COMPUTE_CLASSES=false`), apply them:
 
 ```bash
 kubectl apply -f examples/compute-classes/tpu-compute-class.yaml
-kubectl get computeclass tpu-v5-4-single-host
 ```
 
-### 3. Build & Push the TPU JupyterLab Image
+### 3. Get `jax[tpu]` into the Workspace
 
-Ensure the custom TPU JupyterLab image is built and pushed (it includes `jax[tpu]` and `libtpu`):
+`deploy_standalone.sh` registers the `jupyterlab` WorkspaceKind by default, and its **TPU image option (`jupyterlab-tpu`) runs the upstream CPU base image** (`jupyter-scipy`): there is no public TPU variant, so `jax[tpu]`/`libtpu` are **not** preinstalled (the Kubeflow SDK, `kubeflow 0.4.0`, already is). Pick one:
 
-```bash
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+- **Option A — install in the workspace (no image build).** Run the notebook's Step 0 cell, or in a JupyterLab terminal:
 
-./images/build.sh --jupyterlab --tpu --registry-path "${REGISTRY}"
-```
+  ```bash
+  pip install --user "jax[tpu]==0.10.2"
+  ```
 
-Verify the image in Artifact Registry:
+  `--user` installs into `~/.local` on the home volume, so the packages survive workspace restarts. Restart the kernel afterwards.
 
-```bash
-gcloud artifacts docker images list "${REGISTRY}" --include-tags | grep -E 'jupyterlab.*tpu'
-```
+- **Option B — build the custom TPU image** (includes `jax[tpu]`, `libtpu`, and the Kubeflow SDK):
 
-### 4. Register the `jupyterlab` WorkspaceKind
+  ```bash
+  export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
-Register the WorkspaceKind template so the UI offers the TPU option:
+  ./images/build.sh --jupyterlab --tpu --registry-path "${REGISTRY}"
+  gcloud artifacts docker images list "${REGISTRY}" --include-tags | grep -E 'jupyterlab.*tpu'
+  ```
 
-```bash
-cd images
-IMAGE_NAME="jupyterlab" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < workspacekinds/jupyterlab.yaml | kubectl apply -f -
-cd ..
-```
+  Then re-apply the `jupyterlab` template so its image options point at your custom images (same kind name and option ids, updated in place). This repoints the CPU and GPU options too, so build those tags as well (`./images/build.sh --jupyterlab`) or they will fail to pull:
 
-Verify:
+  ```bash
+  cd images
+  IMAGE_NAME="jupyterlab" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
+    envsubst < workspacekinds/jupyterlab.yaml | kubectl apply -f -
+  cd ..
+  ```
+
+Verify the WorkspaceKind exists:
 
 ```bash
 kubectl get workspacekinds jupyterlab
@@ -157,8 +165,8 @@ In the Kubeflow Workspaces UI (`https://${WORKSPACES_HOST}/workspaces/`):
 | :--- | :--- | :--- |
 | **Workspace Name** | `tpu-workspace` | Unique name in your namespace |
 | **WorkspaceKind** | **`jupyterlab`** | |
-| **Image** | **`jupyterlab (TPU)`** (`jupyterlab-tpu`) | Contains Python 3.12, JAX, and `libtpu` |
-| **Pod Config** | **`TPU v5 1x1`** (`tpu_1`) or **`TPU v5 2x2`** (`tpu`) | Requests 1 chip via `tpu-v5-1-single-host` or 4 chips via `tpu-v5-4-single-host` |
+| **Image** | The TPU option (`jupyterlab-tpu`): **`jupyter-scipy:v1.11.0 (TPU)`** on the default kind, or **`jupyterlab (TPU)`** after you register the custom images | Default: CPU base image, install `jax[tpu]` yourself ([Prerequisites step 3](#3-get-jaxtpu-into-the-workspace)). Custom: JAX and `libtpu` preinstalled |
+| **Pod Config** | **`TPU v5 1x1`** (`tpu_1`) or **`TPU v5 2x2`** (`tpu_4`) | Requests 1 chip via `tpu-v5-1-single-host` or 4 chips via `tpu-v5-4-single-host` |
 
 3. Click **Create**.
 4. GKE will automatically create a TPU node pool and schedule the workspace pod. The pod will transition from `Pending` to `Running` once the node pool is ready (typically 5–10 minutes for the initial TPU node pool creation).
@@ -203,7 +211,8 @@ Run the notebook directly from your local machine without uploading any files:
 
 4. **Execute cells**:
    - Run the notebook cells top to bottom!
-   - Cell 1 verifies that `jax.devices()` discovers all 4 TPU v5e chips.
+   - The Step 0 cell installs `jax[tpu]` with `pip install --user` and adds `~/.local` to `sys.path`, so no kernel restart is needed (a no-op on the custom TPU image).
+   - The next cell verifies that `jax.devices()` discovers the TPU v5e chips (1 for `tpu_1`, 4 for `tpu_4`).
    - All computation executes directly on the remote TPU hardware while your notebook stays local.
 
 > [!TIP]
@@ -226,7 +235,9 @@ If you prefer using the browser:
 
 The notebook walks through a complete end-to-end interactive and distributed JAX training workflow:
 
-### 1. TPU Hardware Discovery
+### 0. Install JAX for TPU & Discover the Hardware
+The Step 0 cell installs `jax[tpu]==0.10.2` with `pip install --user` (the base image already ships the Kubeflow SDK) and adds `~/.local` to `sys.path`, so no kernel restart is needed (a quick no-op on the custom TPU image). The next cell checks the devices:
+
 ```python
 import jax
 devices = jax.devices()
@@ -234,13 +245,13 @@ print(f"Available devices ({len(devices)}): {devices}")
 ```
 Confirms connected TPU v5e cores (1 core for `tpu_1`, 4 cores for `tpu_4`).
 
-### 2. Dataset Generation
+### 1. Dataset Generation
 Generates a self-contained multi-class classification dataset (8,192 training samples, 1,024 test samples, 784 features, 10 classes) using NumPy.
 
-### 3. Model Architecture
+### 2. Model Architecture
 Defines a 3-layer MLP (`784 -> 256 -> 128 -> 10`) with ReLU activations and cross-entropy loss.
 
-### 4. Reusable JAX Training Function (`train_mlp`)
+### 3. Reusable JAX Training Function (`train_mlp`)
 ```python
 def train_mlp(epochs=5, global_batch_size=256, lr=0.05):
     # 1. Automatic multi-host coordinator initialization (if running in Kubeflow TrainJob)
@@ -261,21 +272,22 @@ This function is **100% universal**:
 - Automatically works on local 1 TPU or 4 TPUs via `jax.pmap`.
 - Automatically connects across distributed multi-host nodes via `jax.distributed.initialize` when run by Kubeflow Trainer.
 
-### 5. Interactive Local Training
+### 4. Interactive Local Training
 ```python
 trained_params = train_mlp(epochs=5, global_batch_size=256, lr=0.05)
 ```
 Executes directly in the notebook across your workspace's attached TPU cores, reporting epoch loss and throughput.
 
-### 6. Evaluation & Inference
+### 5. Evaluation & Inference
 Computes test set accuracy and displays sample predictions alongside ground truth labels.
 
-### 7. Scale to Multi-Host TPU Slice with Kubeflow Trainer Python SDK
+### 6. Scale to Multi-Host TPU Slice with Kubeflow Trainer Python SDK
 Scale the **EXACT SAME** `train_mlp` function to a 2-node, 8-TPU multi-host slice (`tpu-v5-8-multi-host`) without writing raw Kubernetes YAML:
 
 ```python
 from kubeflow.trainer import CustomTrainer, TrainerClient
 from kubeflow.trainer.options import kubernetes as k8s_options
+from kubeflow.common.types import KubernetesBackendConfig
 
 trainer_client = TrainerClient(backend_config=KubernetesBackendConfig(namespace="kubeflow-user"))
 
@@ -305,7 +317,7 @@ for log_line in trainer_client.get_job_logs(train_job):
 | :--- | :--- | :--- |
 | Workspace pod stuck in `Pending` with `0/N nodes are available` | The `tpu-v5-4-single-host` ComputeClass is missing. | Run `kubectl apply -f examples/compute-classes/tpu-compute-class.yaml` and verify with `kubectl get computeclass`. |
 | Workspace pod stuck in `Pending` for 10+ minutes with quota events | No TPU v5e Spot quota available in the region. | Check quota with `gcloud compute regions describe "${REGION}" --format="value(quotas)" \| tr ',' '\n' \| grep -i podslice`. Request `PREEMPTIBLE_TPU_LITE_PODSLICE_V5` quota in the Cloud Console. |
-| `AssertionError: No accelerator devices found!` or devices show `CpuDevice` | The workspace was created with a CPU image or CPU pod config instead of TPU. | Ensure the workspace uses Image **`jupyterlab (TPU)`** and Pod Config **`TPU v5 2x2`**. |
+| `ModuleNotFoundError: No module named 'jax'`, or JAX backend is `cpu` / devices show `CpuDevice` | `jax[tpu]` is not installed (the default kind's TPU option uses the CPU base image), the kernel was not restarted after installing it, or the workspace uses a CPU pod config. | Run the Step 0 cell (`pip install --user "jax[tpu]==0.10.2"`) and restart the kernel; ensure the workspace uses the TPU image option (`jupyterlab-tpu`) and Pod Config **`TPU v5 1x1`** / **`TPU v5 2x2`**. |
 | VS Code reports `unable to get issuer certificate` | Node.js on macOS does not trust the system keychain by default. | In VS Code `settings.json`, set `"http.systemCertificatesNode": true` and reload the window. |
 | VS Code reports `Failed to connect to Jupyter server` or `401 Unauthorized` | The connection token has expired or is invalid. | Generate a fresh token at `https://${WORKSPACES_HOST}/workspaces/connections` and reconnect. |
 

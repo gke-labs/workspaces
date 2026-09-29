@@ -109,7 +109,7 @@ If your GKE cluster uses **GKE Sandbox (gVisor)** (`--sandbox type=gvisor`) for 
 * **Kernel & Memory Requirements**: Ray relies on native Linux kernel capabilities—specifically POSIX shared memory (`/dev/shm` for the Plasma in-memory object store), high-frequency inter-process communication (IPC), and raw socket / epoll performance. Running Ray within a gVisor sandboxed kernel is unsupported and will degrade performance.
 
 #### Create an Autoscaling Non-gVisor Node Pool:
-If your cluster does not already have a standard (non-sandboxed) worker node pool, create one:
+If your cluster does not already have a standard (non-sandboxed) worker node pool, create one (GKE Standard only — on **GKE Autopilot** skip this step: you cannot create node pools, and Autopilot provisions regular non-gVisor nodes for pods that do not request `runtimeClassName: gvisor`):
 
 ```bash
 gcloud container node-pools create ray-worker-pool \
@@ -154,9 +154,11 @@ kubectl patch workspacekind jupyterlab --type='merge' -p='{
 }'
 ```
 
+> **Note:** The `jupyterlab` WorkspaceKind is registered by `deploy_standalone.sh` with server-side apply (`--force-conflicts`), so re-running the deploy script resets `serviceAccount.clusterRoles` to just `kubeflow-edit`; re-applying `images/workspacekinds/jupyterlab.yaml` (when switching to custom images) can do the same. Re-run this patch afterwards.
+
 #### 3.3 Verify Workspace ServiceAccount Permissions
 ```bash
-export TENANT_NAMESPACE="team-a"  # or your user tenant namespace
+export TENANT_NAMESPACE="kubeflow-user"  # or your user tenant namespace
 export WORKSPACE_NAME="my-notebook"
 
 kubectl auth can-i create rayclusters.ray.io \
@@ -189,17 +191,17 @@ You can run this entire workflow directly inside [`ray_example.ipynb`](./ray_exa
 
 ### 1. Install SDKs via `pip`
 
-Inside your notebook environment, install the Ray Python SDK and the official KubeRay Python Client:
+Inside your notebook environment, install the Ray Python SDK and the official KubeRay Python Client (`--user` installs into `~/.local` on the home volume, so the packages persist across workspace restarts):
 
 ```bash
 # Core Ray SDK (client & job submission)
-pip install "ray[default,client]==2.58.0"
+pip install --user "ray[default,client]==2.58.0"
 
 # KubeRay Python Client SDK (cluster lifecycle management)
-pip install "git+https://github.com/ray-project/kuberay.git#subdirectory=clients/python-client"
+pip install --user "git+https://github.com/ray-project/kuberay.git#subdirectory=clients/python-client"
 
 # Or if working from a local repository checkout:
-# pip install /path/to/kuberay/clients/python-client
+# pip install --user /path/to/kuberay/clients/python-client
 ```
 
 > [!TIP]
@@ -216,7 +218,7 @@ from python_client.utils import kuberay_cluster_builder
 
 py_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
 IMAGE = f"rayproject/ray:2.58.0-{py_tag}"
-TENANT_NAMESPACE = "team-a"  # Auto-detected in notebook
+TENANT_NAMESPACE = "kubeflow-user"  # Auto-detected in notebook
 CLUSTER_NAME = "raycluster-sample"
 
 # Build the Ray cluster definition
@@ -467,13 +469,14 @@ If you navigate to `https://<endpoint>/workspace/connect/<tenant-namespace>/<wor
    * **With `jupyter-server-proxy`**: JupyterLab registers an extension handler that intercepts `/proxy/<port>/` and proxies HTTP and WebSocket traffic to `127.0.0.1:<port>`.
 
 #### Fix
-Install and enable `jupyter-server-proxy` in the workspace pod (via workspace terminal tab or by rebuilding the workspace image):
+Install and enable `jupyter-server-proxy` in the workspace pod (via workspace terminal tab or by rebuilding the workspace image). `--user` and the `~/.jupyter` config keep both on the home volume, so they persist across restarts:
 ```bash
-pip install jupyter-server-proxy
-echo '{"ServerApp": {"jpserver_extensions": {"jupyter_server_proxy": true}}}' > /opt/conda/etc/jupyter/jupyter_server_config.d/jupyter_server_proxy.json
+pip install --user jupyter-server-proxy
+mkdir -p ~/.jupyter/jupyter_server_config.d
+echo '{"ServerApp": {"jpserver_extensions": {"jupyter_server_proxy": true}}}' > ~/.jupyter/jupyter_server_config.d/jupyter_server_proxy.json
 /package/admin/s6/command/s6-svc -r /run/service/jupyterlab
 ```
-*(In images built from `images/jupyterlab/requirements.txt`, `jupyter-server-proxy` is installed by default).*
+*(In the custom images built from `images/jupyterlab/requirements*.txt`, `jupyter-server-proxy` is installed by default. The custom images add it explicitly because the upstream base image that `deploy_standalone.sh` registers by default does not include it.)*
 
 ### Resolving Port Conflicts (`bind: address already in use`)
 

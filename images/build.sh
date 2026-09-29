@@ -88,7 +88,7 @@ Registry & Tag Options:
   --registry-path, -r <path> Container registry path (aliases: --registry; or pass as a
                              positional argument, or set REGISTRY_PATH or REGISTRY).
                              The flag wins over the environment.
-                             Example: us-central1-docker.pkg.dev/my-proj/notebooks
+                             Example: us-central1-docker.pkg.dev/my-proj/kubeflow-repo
                              Images produced:
                                <registry-path>/codeserver-python:<tag>
                                <registry-path>/jupyterlab:<tag>
@@ -112,25 +112,25 @@ Execution Options:
 
 Examples:
   # 1. Build all images under a registry path:
-  ./build.sh --all --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
+  ./build.sh --all --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 2. Build only VS Code for NVIDIA GPU:
-  ./build.sh --codeserver --gpu --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
+  ./build.sh --codeserver --gpu --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 3. Build JupyterLab for Cloud TPU passing registry as positional argument:
-  ./build.sh --jupyterlab --tpu us-central1-docker.pkg.dev/my-proj/notebooks
+  ./build.sh --jupyterlab --tpu us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 4. Build Apache Spark:
-  ./build.sh --spark --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
+  ./build.sh --spark --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 4b. Build the Agent Sandbox MCP server (for examples/agent-sandbox):
-  ./build.sh --mcp-server --registry-path us-central1-docker.pkg.dev/my-proj/notebooks
+  ./build.sh --mcp-server --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 5. Build locally without pushing (local testing):
   ./build.sh --codeserver --cpu --no-push my-local-repo
 
   # 6. Dry run preview of all commands:
-  ./build.sh --all --registry-path us-central1-docker.pkg.dev/my-proj/notebooks --dry-run
+  ./build.sh --all --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo --dry-run
 EOF
 }
 

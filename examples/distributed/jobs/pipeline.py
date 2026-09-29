@@ -107,7 +107,7 @@ Fix it in one of these ways:
 
   1. Launch the Workspace from the `jupyterlab` WorkspaceKind registered from
      images/workspacekinds/jupyterlab.yaml — it injects REGISTRY (and GCS_BUCKET)
-     into the pod for you. The upstream sample WorkspaceKind does not.
+     into the pod for you. Other kinds (e.g. jupyterlab-resumable) do not.
   2. Set it for this kernel before importing the pipeline:
          import os; os.environ["REGISTRY"] = "us-west1-docker.pkg.dev/proj/repo"
   3. Override the full image directly:

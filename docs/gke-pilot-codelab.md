@@ -23,9 +23,9 @@ export CLUSTER_NAME="kubeflow-notebooks"
 export LOCATION="us-central1-c"             # Cluster zone or region
 export REGION="us-central1"                 # Artifact Registry & GCS region
 export PILOT_USERS="user1@example.com,user2@example.com"  # Comma- or space-separated Google emails to grant IAP & RBAC access
-export TENANT_NAMESPACE="team-a"            # Tenant namespace
-export REPO_NAME="notebooks"                # Artifact Registry Docker repository name
-export SNAPSHOT_GCS_BUCKET="${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GKE Pod Snapshot bucket (created by the script)
+export TENANT_NAMESPACE="kubeflow-user"     # Tenant namespace
+export REPO_NAME="kubeflow-repo"            # Artifact Registry Docker repository name
+export SNAPSHOT_GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GKE Pod Snapshot bucket (created by the script)
 ```
 
 > [!NOTE]

@@ -6,7 +6,7 @@ accelerators available to your cluster — *without* you having to create node
 pools by hand.
 
 > [!TIP]
-> **Already completed the one-time platform setup?** Applying these manifests is **step 6** of the [one-time setup in Examples README](../README.md#6-apply-the-computeclasses-gpu--tpu-examples-only). If you already ran `kubectl apply -f examples/compute-classes/` during platform setup, they are already applied and you can jump straight to verifying them under [Apply them](#apply-them) or proceed to your GPU/TPU example.
+> **Already completed the one-time platform setup?** `deploy_standalone.sh` applies these manifests by default (step 3 of the [one-time setup in Examples README](../README.md#3-deploy-the-standalone-platform); skipped only with `APPLY_COMPUTE_CLASSES=false`). If so, they are already applied and you can jump straight to verifying them under [Apply them](#apply-them) or proceed to your GPU/TPU example.
 
 ---
 
@@ -26,12 +26,12 @@ You use a ComputeClass by putting its name in a Pod's `nodeSelector`:
 
 ```yaml
 nodeSelector:
-  cloud.google.com/compute-class: "gpu-t4-spot"
+  cloud.google.com/compute-class: "gpu-best-available"
 ```
 
 The `WorkspaceKind` pod options shipped in
 [`images/workspacekinds/`](../../images/workspacekinds/) already do this for you:
-picking the **GPU T4 Spot** or **TPU v5 2x2** pod option in the Kubeflow UI
+picking the **GPU (best available)** or **TPU v5 2x2** pod option in the Kubeflow UI
 selects the matching ComputeClass.
 
 ### ComputeClass vs node pool vs machine type
@@ -41,15 +41,16 @@ things:
 
 | Term | What it is | Who creates it | Example |
 | :--- | :--- | :--- | :--- |
-| **ComputeClass** | The *recipe* you apply to the cluster. A Kubernetes object (`kind: ComputeClass`), and the only thing in this folder. | You, with `kubectl apply` | `gpu-t4-spot` |
-| **Node pool** | A group of identical VMs in your GKE cluster. Because each recipe sets `nodePoolAutoCreation.enabled: true`, GKE creates and deletes these for you when a Pod matches the ComputeClass. | GKE, automatically | an auto-created pool backing `gpu-t4-spot` |
+| **ComputeClass** | The *recipe* you apply to the cluster. A Kubernetes object (`kind: ComputeClass`), and the only thing in this folder. | You, with `kubectl apply` | `gpu-best-available` |
+| **Node pool** | A group of identical VMs in your GKE cluster. Because each recipe sets `nodePoolAutoCreation.enabled: true`, GKE creates and deletes these for you when a Pod matches the ComputeClass. | GKE, automatically | an auto-created pool backing `gpu-best-available` |
 | **Machine type / accelerator** | The hardware the VMs in that pool actually are. The ComputeClass asks for the accelerator (`gpu.type`, `tpu.type`); GKE picks a compatible machine shape. | GKE, from the recipe | `nvidia-tesla-t4`, `tpu-v5-lite-podslice` |
 
 You never name a node pool or a machine type in these manifests — you name the
 ComputeClass in a Pod's `nodeSelector` and GKE works backwards to the hardware.
 
 > [!IMPORTANT]
-> All ComputeClasses here request **Spot** capacity. Spot VMs are 60–91% cheaper
+> All ComputeClasses here request **Spot** capacity, except `gpu-best-available`,
+> which falls back to on-demand when Spot is stocked out. Spot VMs are 60–91% cheaper
 > than on-demand, but Google can reclaim them at any time with 30 seconds'
 > notice. That is fine for the examples; do not use them for production jobs you
 > cannot afford to lose.
@@ -63,7 +64,15 @@ ComputeClass in a Pod's `nodeSelector` and GKE works backwards to the hardware.
 | Name | Accelerator | GPUs per node | Used by |
 | :--- | :--- | :--- | :--- |
 | `gpu-l4-spot` | NVIDIA L4 (Spot) | 1 | General GPU workloads |
-| `gpu-t4-spot` | NVIDIA T4 (Spot) | 1 | `gpu_t4_spot` pod option; [`resumable-notebooks`](../resumable-notebooks/) GPU example |
+| `gpu-t4-spot` | NVIDIA T4 (Spot) | 1 | `gpu_t4_spot` pod option in `jupyterlab-resumable` ([`resumable-notebooks`](../resumable-notebooks/) GPU example), which must restore snapshots onto the same GPU model |
+| `gpu-best-available` | First with capacity, in order: T4 Spot → L4 Spot → T4 on-demand → L4 on-demand | 1 | `gpu_best_available` pod option ("GPU (best available)") in the JupyterLab and VS Code WorkspaceKinds |
+
+`gpu-best-available` keeps GPU Workspaces starting when one tier is stocked out
+(the autoscaler reports `GCE out of resources` /
+`no.scale.up.nap.capacity.constraints`) by falling back to the next priority. Edit
+its `priorities` list to add or swap GPU types (for example `nvidia-a100-80gb`);
+keep the pod option's CPU/memory requests within what every listed machine shape
+can fit.
 
 ### [`tpu-compute-class.yaml`](tpu-compute-class.yaml)
 
@@ -75,7 +84,7 @@ ComputeClass name.
 | Name | TPU type | Chips per node (`count`) | Topology | Nodes (hosts) | Total chips | Used by |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `tpu-v5-1-single-host` | `tpu-v5-lite-podslice` (Spot) | 1 | 1x1 | 1 | 1 | `tpu_1` pod option in the JupyterLab/VS Code WorkspaceKinds |
-| `tpu-v5-4-single-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 2x2 | 1 | 4 | `tpu` pod option in the JupyterLab/VS Code WorkspaceKinds |
+| `tpu-v5-4-single-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 2x2 | 1 | 4 | `tpu_4` pod option in the JupyterLab/VS Code WorkspaceKinds |
 | `tpu-v5-8-single-host` | `tpu-v5-lite-podslice` (Spot) | 8 | 2x4 | 1 | 8 | Larger single-host training |
 | `tpu-v5-8-multi-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 2x4 | 2 | 8 | [`distributed`](../distributed/) multi-host TPU training |
 | `tpu-v5-32-multi-host` | `tpu-v5-lite-podslice` (Spot) | 4 | 4x8 | 8 | 32 | Large multi-host training |
@@ -88,7 +97,7 @@ ComputeClass name.
 > The commands on this page use `${CLUSTER_NAME}`, `${LOCATION}`, `${REGION}` and
 > `${PROJECT_ID}`. Nothing here sets them — export them yourself first, with the
 > same values you used for the platform deployment (see
-> [`../README.md`](../README.md#1-set-environment-variables--create-a-gke-cluster)):
+> [`../README.md`](../README.md#1-authenticate-set-environment-variables--create-a-gke-cluster)):
 >
 > ```bash
 > export PROJECT_ID="my-project"
@@ -97,10 +106,11 @@ ComputeClass name.
 > export REGION="us-west1"
 > ```
 
-1. **A GKE cluster with node auto-provisioning / Autopilot-style autoscaling.**
-   ComputeClass node pool auto-creation requires GKE 1.30.3-gke.1451000 or later
-   on a Standard cluster with node auto-provisioning enabled, or an Autopilot
-   cluster. Check your version:
+1. **A GKE version that supports ComputeClass node pool auto-creation.**
+   On an Autopilot cluster this always works. On a Standard cluster it needs GKE
+   1.33.3-gke.1136000 or later (no cluster-level node auto-provisioning required),
+   or 1.30.3-gke.1451000 or later with node auto-provisioning enabled. Check your
+   version:
 
    ```bash
    gcloud container clusters describe "${CLUSTER_NAME}" \
@@ -121,7 +131,9 @@ ComputeClass name.
    Request more at
    [IAM & Admin → Quotas](https://console.cloud.google.com/iam-admin/quotas).
    The relevant quota names are `PREEMPTIBLE_NVIDIA_T4_GPUS`,
-   `PREEMPTIBLE_NVIDIA_L4_GPUS`, and `PREEMPTIBLE_TPU_V5_LITE_PODSLICE_CHIPS`.
+   `PREEMPTIBLE_NVIDIA_L4_GPUS`, and `PREEMPTIBLE_TPU_V5_LITE_PODSLICE_CHIPS`
+   (plus `NVIDIA_T4_GPUS` / `NVIDIA_L4_GPUS` for the on-demand fallbacks in
+   `gpu-best-available`).
 
 3. **`kubectl` pointed at your cluster:**
 
@@ -154,6 +166,7 @@ Verify:
 kubectl get computeclasses
 # NAME                    AGE
 # gpu-l4-spot             5s
+# gpu-best-available      5s
 # gpu-t4-spot             5s
 # tpu-v5-1-single-host    5s
 # tpu-v5-32-multi-host    5s
@@ -172,9 +185,9 @@ actually asks for one.
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | `error: no matches for kind "ComputeClass"` | The `cloud.google.com/v1` ComputeClass CRD is not installed; your GKE version is too old. | Upgrade the cluster to 1.30.3-gke.1451000 or later. |
-| Workspace Pod stuck in `Pending` for more than ~10 minutes | No capacity or no quota for the requested accelerator. | `kubectl describe pod <pod>` and read the `Events`. Look for `Insufficient nvidia.com/gpu`, `SchedulingFailed`, or quota errors. |
+| Workspace Pod stuck in `Pending` for more than ~10 minutes | No capacity or no quota for the requested accelerator. | `kubectl describe pod <pod>` and read the `Events`. Look for `Insufficient nvidia.com/gpu`, `SchedulingFailed`, or quota errors. `FailedScaleUp ... GCE out of resources` means a Spot stockout: wait, or add more GPU types / on-demand fallbacks to the `gpu-best-available` priorities. |
 | Pod `Pending` with `0/N nodes are available: node(s) didn't match Pod's node affinity/selector` | The ComputeClass named in the `nodeSelector` does not exist. | `kubectl get computeclasses` and apply the manifests above. |
-| Node appears, then disappears, and the Pod restarts | Spot VM was reclaimed by Google. | Retry, or edit the manifest and set `spot: false` (costs more). |
+| Node appears, then disappears, and the Pod restarts | Spot VM was reclaimed by Google. | Retry, or edit the manifest and set `spot: false` (costs more). `gpu-best-available` already falls back to on-demand. |
 | Node pool creation takes a long time | Normal. GPU node pool creation takes 3–7 minutes; TPU slices can take 10+ minutes. | Watch with `kubectl get nodes -w`. |
 
 ---
