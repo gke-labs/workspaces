@@ -62,8 +62,9 @@ This repository builds four custom image targets:
      (`AGENT_SANDBOX_VERSION`, default `v1.0.3`), because upstream ships the
      source at `clients/integrations/mcp-server/` but does not publish a
      prebuilt image to `registry.k8s.io`.
-   - **Not built by `--all`.** Opt in with `--mcp-server`. Single generic image —
-     no CPU/GPU/TPU variants.
+   - **Not built by `--all`.** `examples/agent-sandbox/deploy_agent_sandbox.sh`
+     builds and pushes it for you; to build it by hand, opt in with
+     `--mcp-server`. Single generic image — no CPU/GPU/TPU variants.
 
 ### Hardware Accelerator Variants
 
@@ -95,7 +96,7 @@ export PROJECT_ID="your-gcp-project-id"
 export REGION="us-central1"
 
 # Repository name
-export REPO_NAME="notebooks"
+export REPO_NAME="kubeflow-repo"
 
 # Construct REGISTRY path from the environment variables:
 export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
@@ -230,7 +231,7 @@ Registry & Tag Options:
   --registry-path, -r <path> Container registry path (aliases: --registry; or pass as a
                              positional argument, or set REGISTRY_PATH or REGISTRY).
                              The flag wins over the environment.
-                             Example: us-central1-docker.pkg.dev/my-proj/notebooks
+                             Example: us-central1-docker.pkg.dev/my-proj/kubeflow-repo
                              Images produced:
                                <registry-path>/codeserver-python:<tag>
                                <registry-path>/jupyterlab:<tag>
@@ -367,7 +368,7 @@ tools to an AI agent — `create_sandbox`, `upload_file`, `execute_command`,
 | Property | Value |
 | :--- | :--- |
 | Image name | `${REGISTRY}/agent-sandbox-mcp-server` |
-| Built by `--all`? | **No.** Opt in with `--mcp-server` / `--agent-sandbox-mcp-server` / `--image mcp-server`. |
+| Built by `--all`? | **No.** `examples/agent-sandbox/deploy_agent_sandbox.sh` runs `--mcp-server` for you; by hand, opt in with `--mcp-server` / `--agent-sandbox-mcp-server` / `--image mcp-server`. |
 | Hardware variants | None. Single generic image; `--cpu`/`--gpu`/`--tpu` are ignored. |
 | Base image | `python:3.12-slim`, runs as non-root `appuser`, `EXPOSE 8000` |
 | Upstream pin | `ARG AGENT_SANDBOX_VERSION` (default `v1.0.3`) |
@@ -386,16 +387,11 @@ source is vendored into this repository.
 > `agent-sandbox-controller` and `python-runtime-sandbox` are published upstream.
 
 > [!TIP]
-> `build.sh` does not pass `--build-arg`, so to target a different upstream
-> release either edit the `ARG AGENT_SANDBOX_VERSION=` line in the Dockerfile or
-> build directly:
-> ```bash
-> docker build --build-arg AGENT_SANDBOX_VERSION=v1.0.4 \
->   -t "${REGISTRY}/agent-sandbox-mcp-server:v1.0.4" agent-sandbox-mcp-server
-> ```
-> Keep it in step with `AGENT_SANDBOX_VERSION` in
-> `examples/agent-sandbox/deploy_agent_sandbox.sh`, which pins the operator and
-> the sandbox runtime image.
+> To target a different upstream release, pass `--agent-sandbox-version v1.0.4`
+> (or set `AGENT_SANDBOX_VERSION`); `build.sh` forwards it as the Docker build
+> arg. `examples/agent-sandbox/deploy_agent_sandbox.sh` already passes its own
+> `AGENT_SANDBOX_VERSION`, so the operator, the sandbox runtime image and the MCP
+> server stay in step when the image is built by that script.
 
 ---
 
@@ -499,7 +495,7 @@ spec:
       values:
         - id: "codeserver-python-cpu"
           spec:
-            image: "us-central1-docker.pkg.dev/my-project/notebooks/codeserver-python:latest-cpu"
+            image: "us-central1-docker.pkg.dev/my-project/kubeflow-repo/codeserver-python:latest-cpu"
             imagePullPolicy: "IfNotPresent"
 ```
 
@@ -518,8 +514,8 @@ the [`examples/`](../examples/) walkthroughs expect to find in the cluster.
 
 | Template | `WorkspaceKind` name | Image options (`id`) | Pod options (`id`) |
 | :--- | :--- | :--- | :--- |
-| [`workspacekinds/jupyterlab.yaml`](workspacekinds/jupyterlab.yaml) | `jupyterlab` | `jupyterlab-cpu`, `jupyterlab-gpu`, `jupyterlab-tpu`, `jupyter-scipy:v1.10.0` | `tiny_cpu`, `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu_1`, `tpu` |
-| [`workspacekinds/codeserver-python.yaml`](workspacekinds/codeserver-python.yaml) | `codeserver` | `codeserver-python-cpu`, `codeserver-python-gpu`, `codeserver-python-tpu`, `codeserver-python:v1.11.0` | `small_cpu`, `medium_cpu`, `gpu_t4_spot`, `tpu_1`, `tpu` |
+| [`workspacekinds/jupyterlab.yaml`](workspacekinds/jupyterlab.yaml) | `jupyterlab` | `jupyterlab-cpu`, `jupyterlab-gpu`, `jupyterlab-tpu`, `jupyter-scipy:v1.10.0` | `tiny_cpu`, `small_cpu`, `medium_cpu`, `gpu_best_available`, `tpu_1`, `tpu` |
+| [`workspacekinds/codeserver-python.yaml`](workspacekinds/codeserver-python.yaml) | `codeserver` | `codeserver-python-cpu`, `codeserver-python-gpu`, `codeserver-python-tpu`, `codeserver-python:v1.11.0` | `small_cpu`, `medium_cpu`, `gpu_best_available`, `tpu_1`, `tpu` |
 
 > [!IMPORTANT]
 > The second template's file is `codeserver-python.yaml` and its image is
@@ -556,7 +552,7 @@ neither has a default for any of them.
 | `REPO_NAME` | Artifact Registry repository name | You — exported in [step 1](#1-set-environment-variables--construct-registry) | `kubeflow-repo` |
 | `IMAGE_NAME` | Image name inside the repository; differs per template | You — set inline on the `envsubst` command below | `jupyterlab` or `codeserver-python` |
 | `CPU_IMAGE_TAG` / `GPU_IMAGE_TAG` / `TPU_IMAGE_TAG` | Tag per accelerator variant; must name tags `build.sh` actually pushed | You — set inline on the `envsubst` command below | `latest-cpu` / `latest-gpu` / `latest-tpu` |
-| `GCS_BUCKET` | Bucket name injected into every Workspace Pod as the `$GCS_BUCKET` environment variable | You — exported in the command below. Nothing here creates the bucket | `kubeflow-user-bucket` |
+| `GCS_BUCKET` | Bucket name injected into every Workspace Pod as the `$GCS_BUCKET` environment variable | You — exported in the command below. Nothing here creates the bucket | `${PROJECT_ID}-${TENANT_NAMESPACE}-bucket` (the `deploy_standalone.sh` default) |
 
 > [!NOTE]
 > Both templates also inject a `REGISTRY` environment variable into every Workspace
@@ -588,7 +584,8 @@ in a fresh shell; adjust the values to your own:
 export PROJECT_ID="my-project"
 export REGION="us-west1"
 export REPO_NAME="kubeflow-repo"
-export GCS_BUCKET="kubeflow-user-bucket"
+export TENANT_NAMESPACE="kubeflow-user"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
 IMAGE_NAME="jupyterlab" \
 CPU_IMAGE_TAG="latest-cpu" \
@@ -626,7 +623,7 @@ kubectl get workspacekinds
 
 ### Accelerator prerequisites (GPU / TPU pod options)
 
-The `gpu_t4_spot` and `tpu` pod options select nodes through GKE
+The `gpu_best_available` and `tpu` pod options select nodes through GKE
 [ComputeClasses](https://cloud.google.com/kubernetes-engine/docs/concepts/about-custom-compute-classes).
 If those ComputeClasses do not exist in the cluster, the Workspace Pod stays
 `Pending` forever. Apply them before using a GPU/TPU option:

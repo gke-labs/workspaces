@@ -10,6 +10,8 @@ and cleanup instructions.
 
 > [!TIP]
 > **One-time platform setup:** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–6**) **once**. After that, the cluster, storage, images, and templates are in place, and you can run any (or all) of the examples without repeating the setup.
+>
+> **Steps 4–5 (custom images) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you.)
 
 ---
 
@@ -40,17 +42,16 @@ Every example assumes the platform underneath it already exists. **Steps 1–6 a
 flowchart TD
     subgraph S1["One-time setup (steps 1–6, done once for all examples)"]
         A["1. Authenticate & create a GKE cluster"] --> B["2. Create a GCS data bucket<br/>shared storage & distributed ML"]
-        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh"]
-        C --> D["4. Build custom images<br/>images/build.sh"]
-        D --> E["5. Register WorkspaceKinds<br/>images/workspacekinds/"]
-        C --> F["5b. Or use sample WorkspaceKind<br/>registered automatically by step 3"]
-        E --> G["6. Apply ComputeClasses<br/>examples/compute-classes/<br/>(only for GPU / TPU)"]
+        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh<br/>(registers jupyterlab + codeserver on base images,<br/>applies ComputeClasses)"]
+        C -. "optional: preinstalled deps" .-> D["4. Build custom images<br/>images/build.sh"]
+        D --> E["5. Register WorkspaceKinds<br/>on the custom images<br/>images/workspacekinds/"]
+        E --> G["6. ComputeClasses<br/>(already applied by step 3)"]
+        C --> G
     end
     subgraph S2["Per-example workflow (repeat for each example)"]
         H["7. Create a Workspace in the UI"] --> I["8. Upload and run an example"]
     end
     G --> H
-    F --> H
 ```
 
 ### 1. Authenticate, set environment variables & create a GKE cluster
@@ -72,20 +73,24 @@ Next, export your deployment variables in your shell. Setting them here configur
 export PROJECT_ID="my-project"                # Your Google Cloud Project ID (Required)
 export PILOT_USERS="you@example.com"          # Google accounts to grant IAP & UI access (Required)
 export CLUSTER_NAME="kubeflow-notebooks"      # GKE cluster name
-export LOCATION="us-west1"                    # GKE cluster location (zone or region)
+export LOCATION="us-west1"                    # GKE cluster location (zone or region; must be a region for Autopilot)
 export REGION="us-west1"                      # GCP region for Artifact Registry and GCS
 export TENANT_NAMESPACE="kubeflow-user"        # Namespace where your workspaces run
 export REPO_NAME="kubeflow-repo"              # Artifact Registry repository name
 
 # Workload data bucket (used by WorkspaceKinds and distributed ML examples)
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
 # Optional: Custom domain name (leave unset to auto-generate a zero-DNS sslip.io domain)
 # export WORKSPACES_HOST="workspaces.example.com"
 # export DESKTOP_HOST="connect.example.com"
 ```
 
-Create the VPC-native cluster with Gateway API, Workload Identity Federation, and HTTP Load Balancing enabled:
+Create the VPC-native cluster with Gateway API, Workload Identity Federation, and HTTP Load Balancing enabled. You can create either a **Standard** or an **Autopilot** cluster:
+
+#### Option A: GKE Standard (recommended)
+
+Standard gives you full control over node pools and runs the upstream Kubeflow manifests unmodified. It is the most widely tested path for these examples:
 
 ```bash
 gcloud container clusters create "${CLUSTER_NAME}" \
@@ -103,7 +108,8 @@ gcloud container clusters create "${CLUSTER_NAME}" \
 ```
 
 > [!NOTE]
-> If you plan to try the [resumable-notebooks](resumable-notebooks/) example, GKE Pod Snapshots requires a gVisor-enabled node pool. Create one with:
+> **gVisor node pool (Standard clusters only):**
+> If you plan to try the [resumable-notebooks](resumable-notebooks/) example on a **GKE Standard** cluster, GKE Pod Snapshots requires a gVisor-enabled node pool. Create one with:
 > ```bash
 > gcloud container node-pools create gvisor-pool \
 >   --cluster="${CLUSTER_NAME}" \
@@ -114,6 +120,21 @@ gcloud container clusters create "${CLUSTER_NAME}" \
 >   --machine-type=e2-standard-4 \
 >   --enable-autoscaling --min-nodes=0 --max-nodes=3
 > ```
+> *(On GKE Autopilot, you do not need to create this node pool—Autopilot automatically provisions and scales gVisor sandboxed nodes on demand when Pods specify `runtimeClassName: gvisor`.)*
+
+#### Option B: GKE Autopilot
+
+Autopilot automatically manages node provisioning, scaling, Dataplane V2, Gateway API, Workload Identity, and CSI storage drivers. `LOCATION` must be a region:
+
+```bash
+gcloud container clusters create-auto "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" \
+  --region="${REGION}" \
+  --enable-pod-snapshots `# Required for stateful Pause & Resume`
+```
+
+> [!NOTE]
+> Autopilot's security policies reject a few things the upstream manifests do (cert-manager leader election in `kube-system`, and Kubeflow Trainer RBAC bindings to `system:authenticated`). `deploy_standalone.sh` detects Autopilot and adapts those manifests automatically; no extra steps are needed.
 
 ### 2. Create the Cloud Storage (GCS) data bucket
 
@@ -132,7 +153,7 @@ bucket = client.bucket(os.environ["GCS_BUCKET"])
 
 > [!NOTE]
 > **Data bucket vs. Snapshot bucket:**
-> `deploy_standalone.sh` automatically creates a dedicated snapshot bucket (`SNAPSHOT_GCS_BUCKET`, default `${TENANT_NAMESPACE}-snapshots-bucket`) solely for container memory checkpoints during stateful Pause & Resume (with an automated 14-day deletion lifecycle rule).
+> `deploy_standalone.sh` automatically creates a dedicated snapshot bucket (`SNAPSHOT_GCS_BUCKET`, default `${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket`) solely for container memory checkpoints during stateful Pause & Resume (with an automated 14-day deletion lifecycle rule).
 > The script does **not** create a general data storage bucket. You create the data bucket here.
 
 Create the regional bucket and grant Workload Identity access to all pods in your tenant namespace:
@@ -161,18 +182,40 @@ Run the standalone deployment:
 
 This installs the Workspaces controller, backend, frontend, the IAP-authenticated
 access proxy, the Pod snapshot add-on, Kubeflow Trainer v2, the Spark Operator,
-and registers the upstream sample `jupyterlab` WorkspaceKind so you have
-something to launch straight away.
+and the GPU/TPU [ComputeClasses](compute-classes/). It also registers the
+`jupyterlab` and `codeserver` WorkspaceKinds from
+[`../images/workspacekinds/`](../images/workspacekinds/) so you have something to
+launch straight away. Their image options point at the **public upstream Kubeflow
+base images** (`jupyter-scipy`, `jupyter-pytorch-cuda-full`, `codeserver-python`;
+the TPU option uses the CPU image), so no image build is needed. Install anything
+an example needs that the base image lacks with `pip install --user` from a
+notebook cell or terminal inside the Workspace. `--user` puts it in `~/.local` on
+the home volume, so it persists across restarts. The first `--user` install in a
+new Workspace is not importable until you restart the kernel (or run
+`import site; site.addsitedir(site.getusersitepackages())`), because `~/.local`
+did not exist when the kernel started.
 
 #### Deployment Options
 
 * **Are these the only required env vars to begin with?**
-  In `deploy_standalone.sh`, only `PROJECT_ID` and `PILOT_USERS` are strictly required with no defaults. `CLUSTER_NAME`, `LOCATION`, `REGION`, `TENANT_NAMESPACE`, and `REPO_NAME` have built-in defaults (`kubeflow-notebooks`, `us-central1-c`, `us-central1`, `kubeflow-user`, `notebooks`), but defining them explicitly avoids unexpected locations or collisions.
+  In `deploy_standalone.sh`, only `PROJECT_ID` and `PILOT_USERS` are strictly required with no defaults. `CLUSTER_NAME`, `LOCATION`, `REGION`, `TENANT_NAMESPACE`, and `REPO_NAME` have built-in defaults (`kubeflow-notebooks`, `us-central1-c`, `us-central1`, `kubeflow-user`, `kubeflow-repo`), but defining them explicitly avoids unexpected locations or collisions.
 * **What if you have a custom domain name?**
   * **No custom domain:** Leave `WORKSPACES_HOST` unset. `deploy_standalone.sh` automatically generates a domain using `sslip.io` (`notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io`) and provisions a Google-managed SSL certificate via Certificate Manager with zero DNS configuration needed.
   * **With a custom domain:** Set `export WORKSPACES_HOST="workspaces.example.com"` (and optionally `export DESKTOP_HOST="connect.example.com"`). The script configures the GKE Gateway and Certificate Manager for your host. After deployment finishes, add a DNS `A` record pointing `workspaces.example.com` to the static external IP printed by the script.
 
-### 4. Build custom images (needed by `distributed` and the GPU/TPU options)
+### 4. (Optional) Build custom images
+
+> [!NOTE]
+> Skip steps 4–5 if you are fine installing dependencies yourself inside the
+> Workspace; step 3 already gave you working `jupyterlab` and `codeserver`
+> WorkspaceKinds on the upstream base images. Do steps 4–5 when you want the
+> example stacks **preinstalled** (JAX, PyTorch, `transformers`, `libtpu`/`jax[tpu]`,
+> Kubeflow SDKs, Gemini Code Assist, …) so every new Workspace is ready without a
+> `pip install`. One image is required regardless, because it does not run as
+> the Workspace and has no public substitute: `spark-py312`
+> ([distributed](distributed/), `./build.sh --spark`). The
+> [agent-sandbox](agent-sandbox/) example also needs `agent-sandbox-mcp-server`,
+> but its deploy script builds and pushes that for you.
 
 ```bash
 cd images
@@ -182,11 +225,13 @@ cd images
 See [`../images/README.md`](../images/README.md). `--all` means the three
 workspace images — `codeserver-python`, `jupyterlab` and `spark-py312`. The
 `agent-sandbox-mcp-server` image is deliberately **not** in `--all`; the
-`agent-sandbox` example builds it separately with `./build.sh --mcp-server`.
+`agent-sandbox` example's `deploy_agent_sandbox.sh` builds it (`./build.sh --mcp-server`).
 
-### 5. Register the WorkspaceKinds that expose those images
+### 5. (Optional) Register the WorkspaceKinds that expose those images
 
-Register the ready-made templates for **JupyterLab** and **VS Code (code-server)**:
+Register the ready-made templates for **JupyterLab** and **VS Code (code-server)**.
+They use the same names and option ids as the kinds registered in step 3, so this
+simply repoints them at your custom images:
 
 ```bash
 cd images
@@ -218,8 +263,10 @@ See [Ready-made WorkspaceKind templates](../images/README.md#ready-made-workspac
 
 ### 6. Apply the ComputeClasses (GPU / TPU examples only)
 
-Steps 4 and 5 left you in `images/`; this path is relative to the repository
-root, so go back up first:
+`deploy_standalone.sh` already applies these in step 3 (unless you set
+`APPLY_COMPUTE_CLASSES=false`), so you normally have nothing to do here. To apply
+them by hand — steps 4 and 5 left you in `images/`, and this path is relative to
+the repository root, so go back up first:
 
 ```bash
 cd ..
@@ -265,19 +312,19 @@ By default, files are placed in the remote user's home directory (`~`, matching 
 
 ## What each example needs
 
-The platform and components configured in the **one-time setup** (steps 1–6) provide everything these examples require:
+The platform and components configured in the **one-time setup** (steps 1–6) provide everything these examples require. Custom images are optional except where marked **required**:
 
 | | resumable-notebooks | distributed | tpu | agent-sandbox | ray |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Custom images from `images/build.sh` | JupyterLab CPU + GPU | JupyterLab CPU + `spark-py312` | JupyterLab TPU | VS Code (`codeserver-python`) CPU **+ `agent-sandbox-mcp-server`** (opt-in; not built by `--all`) | JupyterLab CPU (with `jupyter-server-proxy`) |
+| Custom images from `images/build.sh` (optional unless marked **required**; otherwise `pip install` into the base image) | Not needed: CPU notebook runs on the base image as-is; GPU notebook installs `transformers` in its Step 0 cell | JupyterLab CPU + **`spark-py312` (required)** | JupyterLab TPU | VS Code (`codeserver-python`) CPU + `agent-sandbox-mcp-server` (required; built and pushed by `deploy_agent_sandbox.sh`) | JupyterLab CPU (with `jupyter-server-proxy`) |
 | WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` |
 | ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none | none (standard CPU node pool) |
 | GKE Pod Snapshots + gVisor | ✅ | — | — | — | — (requires standard non-gVisor node pool) |
 | Kubeflow Trainer v2 | — | ✅ | — | — | — |
 | Kubeflow Spark Operator | — | ✅ | — | — | — |
 | Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) | — |
-| KubeRay operator | — | — | — | — | ✅ (installed via Helm in Step 1) |
+| KubeRay operator | — | — | — | — | ✅ (GKE Ray add-on or Helm, in that example's Step 1) |
 | Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — | — |
 | Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — | — |
 
@@ -318,7 +365,7 @@ needs, so you can also just dive into one.
 | **Workload Identity** | Lets a Pod call Google Cloud APIs as a Google identity with no key files. |
 | **WorkspaceKind** | A cluster-wide template of the images and machine sizes a user may pick when creating a Workspace. |
 | **ComputeClass** | A named recipe telling GKE what kind of machine to auto-create when a Pod asks for it. |
-| **Spot VM** | A deeply discounted machine that Google may reclaim at 30 seconds' notice. All ComputeClasses here use Spot. |
+| **Spot VM** | A deeply discounted machine that Google may reclaim at 30 seconds' notice. All ComputeClasses here use Spot; `gpu-best-available` falls back to on-demand when Spot is stocked out. |
 | **Artifact Registry** | Google Cloud's container image registry, where `images/build.sh` pushes. |
 | **GCS bucket** | Cloud Storage: where datasets, model checkpoints, and pod snapshots are kept. |
 | **Agent Sandbox** (`Sandbox`) | The operator and Custom Resource used by the `agent-sandbox` example: each `Sandbox` is one disposable Pod an AI agent can run code in. |

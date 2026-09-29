@@ -4,7 +4,7 @@ This directory contains the standalone deployment and access integration for **K
 
 > [!NOTE]
 > **Terminology & Scope: "Workspaces" and "Notebooks"**
-> The terms **workspaces** and **notebooks** are used interchangeably throughout this directory, scripts, manifests, and upstream Kubeflow. Legacy defaults and upstream API contracts retain the "notebooks" prefix (e.g. `CLUSTER_NAME="kubeflow-notebooks"`, `REPO_NAME="notebooks"`, `notebooks-gke-global`, and the upstream CRD label `notebooks.kubeflow.org/workspace-name`).
+> The terms **workspaces** and **notebooks** are used interchangeably throughout this directory, scripts, manifests, and upstream Kubeflow. Legacy defaults and upstream API contracts retain the "notebooks" prefix (e.g. `CLUSTER_NAME="kubeflow-notebooks"`, `notebooks-gke-global`, and the upstream CRD label `notebooks.kubeflow.org/workspace-name`).
 >
 > Importantly, **the platform is not limited to Jupyter notebooks**. Through customizable `WorkspaceKind` resources, it natively supports browser-based VS Code (`codeserver`), remote desktop VS Code via token-minted connection URLs, autonomous AI agent sandboxes (with Model Context Protocol / MCP tooling), and distributed ML/data workloads (Kubeflow Trainer v2 and Apache Spark) across CPU, GPU, and TPU environments.
 

@@ -32,8 +32,8 @@ export LOCATION="${LOCATION:-us-central1-c}"
 export REGION="${REGION:-us-central1}"
 # Comma- or space-separated list of Google account emails to grant IAP & RBAC access
 export PILOT_USERS="${PILOT_USERS:-${PILOT_USER:-}}"
-export TENANT_NAMESPACE="${TENANT_NAMESPACE:-team-a}"
-export REPO_NAME="${REPO_NAME:-${REPOSITORY:-notebooks}}"
+export TENANT_NAMESPACE="${TENANT_NAMESPACE:-kubeflow-user}"
+export REPO_NAME="${REPO_NAME:-${REPOSITORY:-kubeflow-repo}}"
 export ADDRESS_NAME="${ADDRESS_NAME:-notebooks-gke-global}"
 export CERTIFICATE_NAME="${CERTIFICATE_NAME:-notebooks-gke}"
 export CERTIFICATE_MAP="${CERTIFICATE_MAP:-notebooks-gke}"
@@ -67,17 +67,27 @@ export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
 # Custom workspace images (JupyterLab / VS Code / Spark) are NOT built here; see ../../images/build.sh.
 export BUILD_IMAGES="${BUILD_IMAGES:-true}"
 
-# Optional: Register the upstream sample JupyterLab WorkspaceKind so users have
-# something to launch immediately after the deployment finishes.
+# Optional: Register the example WorkspaceKinds from ../../images/workspacekinds/
+# (jupyterlab, codeserver) so users have something to launch immediately after the
+# deployment finishes. They are rendered by scripts/render_workspacekinds.py onto the
+# public upstream Kubeflow base images (no images/build.sh run needed; TPU options use
+# the CPU base image). Their GPU/TPU options use the ComputeClasses in
+# ../../examples/compute-classes/, applied when APPLY_COMPUTE_CLASSES=true.
 export APPLY_SAMPLE_WORKSPACEKIND="${APPLY_SAMPLE_WORKSPACEKIND:-true}"
-export SAMPLE_WORKSPACEKIND="${SAMPLE_WORKSPACEKIND:-${REPO_ROOT}/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml}"
+export SAMPLE_WORKSPACEKINDS="${SAMPLE_WORKSPACEKINDS:-${REPO_ROOT}/images/workspacekinds/jupyterlab.yaml ${REPO_ROOT}/images/workspacekinds/codeserver-python.yaml}"
+export APPLY_COMPUTE_CLASSES="${APPLY_COMPUTE_CLASSES:-true}"
+export COMPUTE_CLASSES_DIR="${COMPUTE_CLASSES_DIR:-${REPO_ROOT}/examples/compute-classes}"
+# Bucket name injected into every Workspace Pod as $GCS_BUCKET (not created here; see
+# ../../examples/README.md). Kept separate from SNAPSHOT_GCS_BUCKET, whose lifecycle
+# rule deletes objects after SNAPSHOT_RETENTION_DAYS.
+export GCS_BUCKET="${GCS_BUCKET:-${PROJECT_ID}-${TENANT_NAMESPACE}-bucket}"
 
 # Optional: Kubernetes client QPS & Burst for gke-access-proxy
 export KUBE_CLIENT_QPS="${KUBE_CLIENT_QPS:-100}"
 export KUBE_CLIENT_BURST="${KUBE_CLIENT_BURST:-200}"
 
 # Dedicated GCS Bucket for GKE Pod Snapshots (stateful Workspace Pause & Resume)
-export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
+export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket}"
 
 # Optional: Skip organization policy check for external load balancer types
 export SKIP_ORG_POLICY_CHECK="${SKIP_ORG_POLICY_CHECK:-false}"
@@ -162,6 +172,16 @@ gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --location="${LOCATION}" \
   --project="${PROJECT_ID}"
 
+# GKE Autopilot needs a few manifest adaptations (see steps 2 and 7); Standard clusters
+# apply the upstream manifests unmodified.
+IS_AUTOPILOT=false
+if [[ "$(gcloud container clusters describe "${CLUSTER_NAME}" \
+    --location="${LOCATION}" --project="${PROJECT_ID}" \
+    --format='value(autopilot.enabled)')" == "True" ]]; then
+  IS_AUTOPILOT=true
+fi
+echo "Cluster '${CLUSTER_NAME}' is Autopilot: ${IS_AUTOPILOT}"
+
 if kubectl --context="${CONTEXT}" get gatewayclass/gke-l7-global-external-managed -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null | grep -q "True"; then
   echo "GatewayClass 'gke-l7-global-external-managed' is already Accepted on cluster '${CLUSTER_NAME}'; skipping cluster update."
 else
@@ -209,14 +229,28 @@ fi
 echo "=================================================================="
 echo "Step 2: Installing Cert-Manager (v1.21.2)..."
 echo "=================================================================="
-if ! kubectl --context="${CONTEXT}" get namespace cert-manager >/dev/null 2>&1; then
+CERT_MANAGER_MANIFEST="${SCRIPT_DIR}/bin/cert-manager-v1.21.2.yaml"
+download_cert_manager() {
   mkdir -p "${SCRIPT_DIR}/bin"
   curl -fsSL https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml \
-    -o "${SCRIPT_DIR}/bin/cert-manager-v1.21.2.yaml"
+    -o "${CERT_MANAGER_MANIFEST}"
   printf '%s  %s\n' e03b668ec8675214af6b0a671699d088f2601fa3878e0dbe1b41d3feafd1879f \
-    "${SCRIPT_DIR}/bin/cert-manager-v1.21.2.yaml" | sha256sum --check
+    "${CERT_MANAGER_MANIFEST}" | sha256sum --check
+}
+
+if [[ "${IS_AUTOPILOT}" == "true" ]]; then
+  # Autopilot forbids writes to kube-system, where cert-manager does leader election by
+  # default; cainjector then never injects the webhook caBundle ("x509: certificate
+  # signed by unknown authority"). Move leader election to the cert-manager namespace
+  # (the manifest's only kube-system references) and always apply, to repair old installs.
+  download_cert_manager
+  sed 's/kube-system/cert-manager/g' "${CERT_MANAGER_MANIFEST}" | \
+    kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
+      --field-manager=notebooks-gke-platform -f -
+elif ! kubectl --context="${CONTEXT}" get namespace cert-manager >/dev/null 2>&1; then
+  download_cert_manager
   kubectl --context="${CONTEXT}" apply --server-side \
-    --field-manager=notebooks-gke-platform -f "${SCRIPT_DIR}/bin/cert-manager-v1.21.2.yaml"
+    --field-manager=notebooks-gke-platform -f "${CERT_MANAGER_MANIFEST}"
 else
   echo "cert-manager namespace already exists; skipping install."
 fi
@@ -224,6 +258,23 @@ fi
 for component in cert-manager cert-manager-webhook cert-manager-cainjector; do
   kubectl --context="${CONTEXT}" -n cert-manager rollout status \
     deployment/"${component}" --timeout=5m
+done
+
+# Deployments being Ready does not guarantee the webhook CA has been injected yet.
+echo "Waiting for cert-manager-cainjector to inject the webhook caBundle..."
+for i in {1..60}; do
+  CA_BUNDLE=$(kubectl --context="${CONTEXT}" get validatingwebhookconfiguration cert-manager-webhook \
+    -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null || true)
+  if [[ -n "${CA_BUNDLE}" ]]; then
+    echo "cert-manager webhook caBundle injected."
+    break
+  fi
+  if [[ "${i}" -eq 60 ]]; then
+    echo "ERROR: cert-manager webhook caBundle was not injected after 5m. Check:" >&2
+    echo "  kubectl --context=${CONTEXT} -n cert-manager logs deploy/cert-manager-cainjector" >&2
+    exit 1
+  fi
+  sleep 5
 done
 
 # ==============================================================================
@@ -566,11 +617,29 @@ if [[ "${INSTALL_TRAINER}" == "true" || "${INSTALL_SPARK_OPERATOR}" == "true" ]]
 
   if [[ "${INSTALL_TRAINER}" == "true" ]]; then
     echo "Deploying Kubeflow Trainer (v2) in kubeflow-system..."
-    kubectl --context="${CONTEXT}" apply -k "${DIST_DIR}/applications/trainer/overlays" --server-side --force-conflicts || true
+    TRAINER_SOURCE=(-k "${DIST_DIR}/applications/trainer/overlays")
+    if [[ "${IS_AUTOPILOT}" == "true" ]]; then
+      # Autopilot's GKE Warden rejects bindings to Group "system:authenticated", which
+      # upstream Trainer uses for two read-only bindings. Rewrite those subjects to the
+      # closest allowed equivalent: all ServiceAccounts plus the human PILOT_USERS.
+      TRAINER_RENDERED="${SCRIPT_DIR}/rendered/ready/trainer.json"
+      kubectl kustomize "${DIST_DIR}/applications/trainer/overlays" | \
+        python3 -c 'import yaml, json, sys; print(json.dumps({"apiVersion": "v1", "kind": "List", "items": [d for d in yaml.safe_load_all(sys.stdin) if d]}))' | \
+        jq --arg users "${PILOT_USERS}" \
+          '([ $users | split(",")[] | split(" ")[] | select(length > 0) | {kind: "User", name: ., apiGroup: "rbac.authorization.k8s.io"} ]
+            + [{kind: "Group", name: "system:serviceaccounts", apiGroup: "rbac.authorization.k8s.io"}]) as $allowed_subjects |
+           .items |= map(
+             if (.kind == "RoleBinding" or .kind == "ClusterRoleBinding")
+                and any(.subjects[]?; .kind == "Group" and .name == "system:authenticated") then
+               .subjects = ([.subjects[] | select(.kind != "Group" or .name != "system:authenticated")] + $allowed_subjects)
+             else . end)' > "${TRAINER_RENDERED}"
+      TRAINER_SOURCE=(-f "${TRAINER_RENDERED}")
+    fi
+    kubectl --context="${CONTEXT}" apply "${TRAINER_SOURCE[@]}" --server-side --force-conflicts || true
     kubectl --context="${CONTEXT}" wait --for=condition=Established crd/clustertrainingruntimes.trainer.kubeflow.org --timeout=60s
     kubectl --context="${CONTEXT}" wait --for=condition=Established crd/trainingruntimes.trainer.kubeflow.org --timeout=60s
     kubectl --context="${CONTEXT}" wait --for=condition=Established crd/trainjobs.trainer.kubeflow.org --timeout=60s
-    kubectl --context="${CONTEXT}" apply -k "${DIST_DIR}/applications/trainer/overlays" --server-side --force-conflicts
+    kubectl --context="${CONTEXT}" apply "${TRAINER_SOURCE[@]}" --server-side --force-conflicts
     kubectl --context="${CONTEXT}" rollout status deployment/kubeflow-trainer-controller-manager -n kubeflow-system --timeout=180s
     kubectl --context="${CONTEXT}" rollout status deployment/jobset-controller-manager -n kubeflow-system --timeout=180s
   fi
@@ -623,19 +692,36 @@ kubectl kustomize --load-restrictor=LoadRestrictionsNone "${SCRIPT_DIR}/manifest
 kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke-pilot \
   -f "${SCRIPT_DIR}/rendered/ready/customer-pilot.json"
 
-# Register the upstream sample JupyterLab WorkspaceKind so that the tenant has a
-# ready-to-use Workspace option as soon as the deployment finishes. It only uses
-# public ghcr.io/kubeflow images, so no custom image build is required.
-# To register the custom (JupyterLab / VS Code) WorkspaceKinds that back the
-# examples, build the images with ../../images/build.sh and apply the templates
-# in ../../images/workspacekinds/.
+# Register the example WorkspaceKinds from ../../images/workspacekinds/ so that the
+# tenant has ready-to-use Workspace options as soon as the deployment finishes.
+# scripts/render_workspacekinds.py points the custom image options at the public
+# upstream ghcr.io/kubeflow base images (TPU uses the CPU base image), so no custom
+# image build is required. GPU/TPU pod options select nodes through the GKE
+# ComputeClasses in ../../examples/compute-classes/ (supported on both Autopilot and
+# Standard), which are applied first so those options do not stay Pending.
+# To switch to the custom images later, build them with ../../images/build.sh and
+# re-apply the templates as described in ../../images/README.md.
 if [[ "${APPLY_SAMPLE_WORKSPACEKIND}" == "true" ]]; then
-  if [[ -f "${SAMPLE_WORKSPACEKIND}" ]]; then
-    echo "Registering sample WorkspaceKind from ${SAMPLE_WORKSPACEKIND}..."
+  if [[ "${APPLY_COMPUTE_CLASSES}" == "true" ]]; then
+    echo "Applying GPU/TPU ComputeClasses from ${COMPUTE_CLASSES_DIR}..."
     kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
-      --field-manager=notebooks-gke-pilot -f "${SAMPLE_WORKSPACEKIND}"
-  else
-    echo "WARNING: SAMPLE_WORKSPACEKIND '${SAMPLE_WORKSPACEKIND}' not found; skipping." >&2
+      --field-manager=notebooks-gke-pilot -f "${COMPUTE_CLASSES_DIR}"
+  fi
+
+  WORKSPACEKIND_TEMPLATES=()
+  for template in ${SAMPLE_WORKSPACEKINDS}; do
+    if [[ -f "${template}" ]]; then
+      WORKSPACEKIND_TEMPLATES+=("${template}")
+    else
+      echo "WARNING: WorkspaceKind template '${template}' not found; skipping." >&2
+    fi
+  done
+  if [[ ${#WORKSPACEKIND_TEMPLATES[@]} -gt 0 ]]; then
+    echo "Registering example WorkspaceKinds (upstream base images): ${WORKSPACEKIND_TEMPLATES[*]}"
+    python3 "${SCRIPT_DIR}/scripts/render_workspacekinds.py" "${WORKSPACEKIND_TEMPLATES[@]}" \
+      > "${SCRIPT_DIR}/rendered/ready/workspacekinds.json"
+    kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
+      --field-manager=notebooks-gke-pilot -f "${SCRIPT_DIR}/rendered/ready/workspacekinds.json"
   fi
 fi
 

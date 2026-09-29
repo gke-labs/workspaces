@@ -20,12 +20,14 @@
 # 1. Agent Sandbox Operator (CRDs + Controller in agent-sandbox-system from release artifacts)
 # 2. Aggregated RBAC ClusterRole (agent-sandbox-kubeflow-edit)
 # 3. Tenant SandboxTemplate (official release image) and SandboxWarmPool
-# 4. Tenant Agent Sandbox MCP Server (streamable HTTP on port 8000)
+# 4. Tenant Agent Sandbox MCP Server (streamable HTTP on port 8000), building and
+#    pushing its image (images/build.sh --mcp-server) first
 # Note: Gemini in the workspace is configured separately via setup_gemini.sh
 # ==============================================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # ------------------------------------------------------------------------------
 # 1. Configuration & Defaults
@@ -41,7 +43,7 @@ export CLUSTER_NAME="${CLUSTER_NAME:-${CLUSTER:-kubeflow-notebooks}}"
 export LOCATION="${LOCATION:-us-central1-c}"
 export REGION="${REGION:-us-central1}"
 export TENANT_NAMESPACE="${TENANT_NAMESPACE:-kubeflow-user}"
-export REPO_NAME="${REPO_NAME:-${REPOSITORY:-notebooks}}"
+export REPO_NAME="${REPO_NAME:-${REPOSITORY:-kubeflow-repo}}"
 export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
 export REGISTRY="${REGISTRY:-${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}}"
 
@@ -50,7 +52,19 @@ export WARMPOOL_REPLICAS="${WARMPOOL_REPLICAS:-1}"
 
 # Use official release container image from https://github.com/kubernetes-sigs/agent-sandbox/releases#release-v1.0.3
 export SANDBOX_RUNTIME_IMAGE="${SANDBOX_RUNTIME_IMAGE:-registry.k8s.io/agent-sandbox/python-runtime-sandbox:${AGENT_SANDBOX_VERSION}}"
+
+# The MCP server image has no public build, so this script builds and pushes it to
+# ${REGISTRY} with ../../images/build.sh --mcp-server (needs Docker, or set
+# MCP_BUILD_FLAGS="--cloud-build"). Set BUILD_MCP_SERVER_IMAGE=false to reuse an image
+# that is already pushed. If you point AGENT_SANDBOX_MCP_IMAGE at your own image, the
+# build is skipped by default.
+if [[ -n "${AGENT_SANDBOX_MCP_IMAGE:-}" ]]; then
+  export BUILD_MCP_SERVER_IMAGE="${BUILD_MCP_SERVER_IMAGE:-false}"
+else
+  export BUILD_MCP_SERVER_IMAGE="${BUILD_MCP_SERVER_IMAGE:-true}"
+fi
 export AGENT_SANDBOX_MCP_IMAGE="${AGENT_SANDBOX_MCP_IMAGE:-${REGISTRY}/agent-sandbox-mcp-server:latest}"
+export MCP_BUILD_FLAGS="${MCP_BUILD_FLAGS:-}"
 
 if [[ -z "${PROJECT_ID}" ]]; then
   echo "ERROR: PROJECT_ID is not set. Please run: export PROJECT_ID=your-gcp-project-id" >&2
@@ -64,6 +78,7 @@ echo "  Cluster:          ${CLUSTER_NAME} (${LOCATION})"
 echo "  Tenant Namespace: ${TENANT_NAMESPACE}"
 echo "  Artifact Reg:     ${REGISTRY}"
 echo "  Operator Version: ${AGENT_SANDBOX_VERSION}"
+echo "  MCP Server Image: ${AGENT_SANDBOX_MCP_IMAGE} (build: ${BUILD_MCP_SERVER_IMAGE})"
 echo "=============================================================================="
 
 # ------------------------------------------------------------------------------
@@ -75,6 +90,22 @@ gcloud container clusters get-credentials "${CLUSTER_NAME}" \
   --project="${PROJECT_ID}"
 
 kubectl config use-context "${CONTEXT}" || true
+
+# ------------------------------------------------------------------------------
+# 2b. Build & Push the Agent Sandbox MCP Server Image
+# ------------------------------------------------------------------------------
+if [[ "${BUILD_MCP_SERVER_IMAGE}" == "true" ]]; then
+  echo "==> Building and pushing the Agent Sandbox MCP server image to ${REGISTRY}..."
+  registry_host="${REGISTRY%%/*}"
+  if [[ "${registry_host}" == *-docker.pkg.dev ]]; then
+    gcloud auth configure-docker "${registry_host}" --quiet
+  fi
+  # shellcheck disable=SC2086 # MCP_BUILD_FLAGS is intentionally word-split
+  "${REPO_ROOT}/images/build.sh" --mcp-server --registry-path "${REGISTRY}" \
+    --agent-sandbox-version "${AGENT_SANDBOX_VERSION}" ${MCP_BUILD_FLAGS}
+else
+  echo "==> Skipping MCP server image build (BUILD_MCP_SERVER_IMAGE=false); using ${AGENT_SANDBOX_MCP_IMAGE}"
+fi
 
 # ------------------------------------------------------------------------------
 # 3. Deploy Agent Sandbox Operator
@@ -112,7 +143,7 @@ kubectl --context="${CONTEXT}" apply -f "${SCRIPT_DIR}/manifests/clusterrole.yam
 # cluster and applied a merge patch setting clusterRoles to a fixed two-element
 # list. That was both unnecessary and harmful: a merge patch REPLACES a list, so
 # any additional role an operator had added was silently dropped, and kinds that
-# deliberately carry no clusterRoles (such as the upstream sample) were granted
+# deliberately carry no clusterRoles were granted
 # `kubeflow-edit` in every tenant namespace.
 echo "==> Verifying WorkspaceKinds inherit the aggregated permissions..."
 missing_kinds=()
@@ -158,6 +189,12 @@ envsubst < "${SCRIPT_DIR}/manifests/sandbox-template.yaml" | kubectl --context="
 # ------------------------------------------------------------------------------
 echo "==> Deploying Agent Sandbox MCP Server in ${TENANT_NAMESPACE}..."
 envsubst < "${SCRIPT_DIR}/manifests/mcp-server.yaml" | kubectl --context="${CONTEXT}" apply -f -
+if [[ "${BUILD_MCP_SERVER_IMAGE}" == "true" ]]; then
+  # The image tag (:latest) did not change, so apply alone does not roll the pods.
+  # Restart them so they pull the image that was just pushed (imagePullPolicy: Always).
+  kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" rollout restart \
+    deployment/agent-sandbox-mcp-server
+fi
 
 echo "==> Waiting for MCP Server rollout in ${TENANT_NAMESPACE}..."
 kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" rollout status \

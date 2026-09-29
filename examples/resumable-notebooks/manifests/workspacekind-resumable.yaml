@@ -15,10 +15,11 @@
 # WorkspaceKind manifest for jupyterlab-resumable.
 #
 # Before applying this manifest to your cluster, set the image path placeholders:
-#   <YOUR_CPU_IMAGE>: e.g. "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-cpu"
-#                     or upstream "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.10.0"
-#   <YOUR_GPU_IMAGE>: e.g. "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-gpu"
-#   <YOUR_GCS_BUCKET>: e.g. "kubeflow-user-bucket" (shared GCS bucket for workspace data)
+#   <YOUR_CPU_IMAGE>: upstream "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0"
+#                     or custom "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-cpu"
+#   <YOUR_GPU_IMAGE>: upstream "ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0"
+#                     or custom "us-central1-docker.pkg.dev/<PROJECT_ID>/<REPO>/jupyterlab:latest-gpu"
+#   <YOUR_GCS_BUCKET>: e.g. "<PROJECT_ID>-<TENANT_NAMESPACE>-bucket" (shared GCS bucket for workspace data)
 #
 # You can edit the placeholders directly in this file, or apply with sed (run from
 # the repository root):
@@ -214,10 +215,10 @@ spec:
           - id: "jupyterlab-cpu"
             spawner:
               displayName: "jupyterlab (CPU)"
-              description: "JupyterLab with SciPy, JAX (CPU), and Kubeflow Spark SDK"
+              # Generic on purpose: <YOUR_CPU_IMAGE> may be the upstream base image or
+              # the custom image from images/build.sh, whose package sets differ.
+              description: "JupyterLab (CPU image)"
               labels:
-                - key: "python_version"
-                  value: "3.12.9"
                 - key: "accelerator"
                   value: "cpu"
             spec:
@@ -229,16 +230,10 @@ spec:
           - id: "jupyterlab-gpu"
             spawner:
               displayName: "jupyterlab (GPU)"
-              description: "JupyterLab with PyTorch (CUDA 13.0), JAX (CUDA), Transformers, and Kubeflow Spark SDK"
+              # Generic on purpose: <YOUR_GPU_IMAGE> may be the upstream
+              # jupyter-pytorch-cuda-full base image or the custom GPU image.
+              description: "JupyterLab with PyTorch and CUDA (GPU image)"
               labels:
-                - key: "python_version"
-                  value: "3.12.13"
-                - key: "pytorch_version"
-                  value: "2.12.0"
-                - key: "cuda_version"
-                  value: "13.0"
-                - key: "nccl_version"
-                  value: "2.29.7"
                 - key: "accelerator"
                   value: "gpu"
             spec:
@@ -334,6 +329,9 @@ spec:
                   value: "40Gi"
             spec:
               nodeSelector:
+                # T4 only (not gpu-best-available): a GPU snapshot can only be restored
+                # onto the same GPU model it was taken on, so pause/resume must never
+                # switch between T4 and L4.
                 cloud.google.com/compute-class: "gpu-t4-spot"
               # Sized to land on n1-standard-16 (16 vCPU / 60 GB, ~51 GiB allocatable),
               # the T4-capable N1 shape. The generous memory is not just for the model:

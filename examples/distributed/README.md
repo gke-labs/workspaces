@@ -37,7 +37,13 @@ network disk** — every read and write is an ordinary object-storage call,
 authorized by Workload Identity.
 
 > [!TIP]
-> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, GCS bucket, custom images, `jupyterlab` WorkspaceKind, and TPU ComputeClass are already set up. You can skip the setup prerequisites and jump straight to [Create the Workspace](#7-create-the-workspace-with-the-right-options) or [Running it](#running-it).
+> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, GCS bucket, `jupyterlab` WorkspaceKind, and TPU ComputeClass are already set up. You can skip the setup prerequisites and jump straight to [Create the Workspace](#7-create-the-workspace-with-the-right-options) or [Running it](#running-it).
+>
+> **One exception: the Spark image.** The custom images are optional in the one-time setup, but this example needs `spark-py312` for Stage 1. If you haven't pushed it yet, build it first (see [3. The Spark image is built and pushed](#3-the-spark-image-is-built-and-pushed)):
+>
+> ```bash
+> ./images/build.sh --spark --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+> ```
 
 ### Flow
 
@@ -117,7 +123,7 @@ Read this once if Kubernetes is new to you; the rest of the document assumes it.
 | **Operator** | A program running in the cluster that watches custom resources and makes them real. The Spark Operator sees a `SparkConnect` object and creates the driver and executor pods. Kubeflow Trainer sees a `TrainJob` and creates the JobSet of TPU pods. |
 | **ComputeClass** | A GKE feature: a named recipe for a kind of machine ("4 TPU v5e chips, Spot, 2x4 topology"). A pod asks for it via `nodeSelector`, and GKE **auto-creates the node pool**. Without the right ComputeClass, TPU pods sit in `Pending` forever. See [`../compute-classes/README.md`](../compute-classes/README.md). |
 | **Node pool** | A group of identical VMs in your cluster. The TPU node pool here is created on demand and removed when nothing needs it. |
-| **Spot VM** | Heavily discounted, interruptible capacity. Google can reclaim it with ~30 seconds' notice. All ComputeClasses in this repo are Spot. |
+| **Spot VM** | Heavily discounted, interruptible capacity. Google can reclaim it with ~30 seconds' notice. The TPU ComputeClass this example uses is Spot. |
 | **Workload Identity** | The mechanism that lets a Kubernetes ServiceAccount act as a Google Cloud identity — no service-account key files. This is how the pods get permission on your GCS bucket. |
 | **GCS bucket** | Google Cloud Storage. Object storage (`gs://bucket/path/object`), not a filesystem. This example uses it as the data bus between stages. |
 | **Spark Connect** | A Spark client/server protocol. `SparkClient.connect()` gives your notebook a `spark` session object whose work actually executes in the remote driver/executor pods. The Spark Operator models the server side as a `SparkConnect` custom resource. |
@@ -195,23 +201,23 @@ kubectl get clustertrainingruntimes
 > complete. Re-run the deploy script with `INSTALL_TRAINER=true` and re-check.
 > Without the runtime the TrainJob is rejected and Stage 2 never starts a pod.
 
-### 3. The custom images are built and pushed
+### 3. The Spark image is built and pushed
 
-Build with [`../../images/build.sh`](../../images/build.sh); details in
+Stage 1 needs a custom Spark image, `spark-py312`. Build it with
+[`../../images/build.sh`](../../images/build.sh); details in
 [`../../images/README.md`](../../images/README.md).
 
 ```bash
 export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
-./images/build.sh --spark      --registry-path "${REGISTRY}"   # REQUIRED for Stage 1
-./images/build.sh --jupyterlab --cpu --registry-path "${REGISTRY}"  # the Workspace image
+./images/build.sh --spark --registry-path "${REGISTRY}"   # REQUIRED for Stage 1
 ```
 
 Verify:
 
 ```bash
 gcloud artifacts docker images list "${REGISTRY}" --include-tags \
-  | grep -E 'spark-py312|jupyterlab'
+  | grep spark-py312
 ```
 
 > [!WARNING]
@@ -219,18 +225,28 @@ gcloud artifacts docker images list "${REGISTRY}" --include-tags \
 > PySpark 4 with Python 3.12 on both driver and executors; the stock Apache Spark
 > images ship a different Python and the Spark Connect session will fail to start.
 
+The custom `jupyterlab` Workspace image is **optional**. The Workspace runs on
+the upstream base image by default, and the notebook's setup cell installs the
+missing SDKs (`kubeflow[spark]`) on first run. To use the custom image instead,
+build it with `./images/build.sh --jupyterlab --cpu --registry-path "${REGISTRY}"`
+and re-apply the WorkspaceKind as described in
+[`../../images/README.md`](../../images/README.md).
+
 ### 4. The `jupyterlab` WorkspaceKind is registered
 
-Register it from [`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml)
-(an `envsubst` template — see [`../../images/README.md`](../../images/README.md) for the exact command).
+`deploy_standalone.sh` registers it by default from
+[`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml),
+using the upstream base images. Confirm it:
 
 ```bash
 kubectl get workspacekind jupyterlab
 ```
 
+If it is missing (for example, you deployed with `APPLY_SAMPLE_WORKSPACEKIND=false`),
+register it as described in [`../../images/README.md`](../../images/README.md).
+
 > [!IMPORTANT]
-> You must use **this** WorkspaceKind. Not the upstream sample kind that
-> `deploy_standalone.sh` registers by default, and not `jupyterlab-resumable`.
+> You must use **this** WorkspaceKind, not `jupyterlab-resumable`.
 > Only this template injects two environment variables the notebook reads:
 > * **`REGISTRY`** — without it `jobs/pipeline.py` raises a `RuntimeError` rather
 >   than guessing a registry, and Stage 1 cannot start.
@@ -241,15 +257,16 @@ kubectl get workspacekind jupyterlab
 >
 > ```bash
 > echo "$REGISTRY" "$GCS_BUCKET"
-> # us-west1-docker.pkg.dev/<your-project>/kubeflow-repo  <your-namespace>-bucket
+> # us-west1-docker.pkg.dev/<your-project>/kubeflow-repo  <your-project>-<your-namespace>-bucket
 > ```
 
 > [!TIP]
-> The custom `jupyterlab` CPU image already ships everything the notebook needs —
+> On the default upstream base image, the `pip install` guard in the notebook's
+> setup cell installs `kubeflow[spark]` on first run. The optional custom
+> `jupyterlab` CPU image already ships everything the notebook needs —
 > `kubeflow 0.4.0`, `kubeflow_spark_api 2.4.0`, `kubeflow_trainer_api 2.2.0`,
-> `kfp 2.16.1`, `google-cloud-storage 3.11.0`, and `jax`/`jaxlib 0.11.1`. The
-> `pip install` guard in the notebook's setup cell is therefore a **no-op** on
-> this image; it only does real work if you run the notebook somewhere else.
+> `kfp 2.16.1`, `google-cloud-storage 3.11.0`, and `jax`/`jaxlib 0.11.1` — so on
+> that image the guard is a **no-op**.
 
 ### 5. The TPU ComputeClass is applied
 
@@ -266,7 +283,7 @@ kubectl get computeclass tpu-v5-8-multi-host
 Background and troubleshooting: [`../compute-classes/README.md`](../compute-classes/README.md).
 
 You also need **TPU v5e Spot quota** in your region — the relevant quota is
-`PREEMPTIBLE_TPU_V5_LITE_PODSLICE_CHIPS`, and this example needs at least 8 chips:
+`PREEMPTIBLE_TPU_LITE_PODSLICE_V5`, and this example needs at least 8 chips:
 
 ```bash
 gcloud compute regions describe "${REGION}" --project="${PROJECT_ID}" \
@@ -279,8 +296,9 @@ Applying a ComputeClass costs nothing; machines appear only when a pod asks.
 
 > [!CAUTION]
 > The core deploy script does **not** create this bucket. It only creates the
-> unrelated snapshot bucket (`<tenant>-snapshots-bucket`) used by pause/resume.
-> Creating the data bucket and granting access is part of *this* example.
+> unrelated snapshot bucket (`<project>-<tenant>-snapshots-bucket`) used by pause/resume.
+> Create the data bucket and grant access here, unless you already did in
+> [step 2 of the Examples README](../README.md#2-create-the-cloud-storage-gcs-data-bucket).
 
 #### First: one bucket, three variable names
 
@@ -289,7 +307,7 @@ are. This trips people up, so it is worth 30 seconds now:
 
 | Name | Where it lives | Who sets it | Default |
 | :--- | :--- | :--- | :--- |
-| `GCS_BUCKET` | Environment variable **inside the Workspace pod** | Injected automatically by the `jupyterlab` WorkspaceKind ([prerequisite 4](#4-the-jupyterlab-workspacekind-is-registered)) — you do not set it by hand | `<namespace>-bucket` |
+| `GCS_BUCKET` | Environment variable **inside the Workspace pod** | Injected automatically by the `jupyterlab` WorkspaceKind ([prerequisite 4](#4-the-jupyterlab-workspacekind-is-registered)) — you do not set it by hand | `<project-id>-<namespace>-bucket` (deploy's `GCS_BUCKET` default) |
 | `GCS_BUCKET` | Shell variable **on your laptop**, used only by the `gcloud` commands below | **You**, with the `export` in the next code block | — |
 | `BUCKET_NAME` | Environment variable **inside the Spark / TrainJob / inference pods** | Set programmatically by `run_training()` and by the `inference-service.yaml` substitution — you never set it | — |
 
@@ -312,11 +330,12 @@ passes down to every job it launches.
 #### Create the bucket and grant access
 
 Run these **on your laptop**. `GCS_BUCKET` here must match what the Workspace
-reports above; the default `<namespace>-bucket` is what the WorkspaceKind injects,
-so if you have not customised anything, this just works.
+reports above; the default `<project-id>-<namespace>-bucket` is what
+`deploy_standalone.sh` has the WorkspaceKind inject, so if you have not customised
+anything, this just works.
 
 ```bash
-export GCS_BUCKET="${TENANT_NAMESPACE}-bucket"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
 gcloud storage buckets create "gs://${GCS_BUCKET}" \
   --location="${REGION}" --project="${PROJECT_ID}"
@@ -364,7 +383,7 @@ In the Kubeflow Workspaces UI:
 | Field | Choose |
 | :--- | :--- |
 | WorkspaceKind | **`jupyterlab`** (the one from step 4) |
-| Image | **`jupyterlab (CPU)`** — image id `jupyterlab-cpu` |
+| Image | **`jupyter-scipy:v1.11.0 (CPU)`** on the default base images (**`jupyterlab (CPU)`** if you re-applied the kind with custom images) — image id `jupyterlab-cpu` either way |
 | Pod config | **`Small CPU`** — pod config id `small_cpu` (1 CPU request / 2 GiB, limit 2 CPU / 4 GiB) |
 
 The Workspace itself needs **no GPU and no TPU**. It only submits work and waits.
@@ -497,10 +516,10 @@ If you prefer to work inside the browser:
 
 Finds the `jobs/` package, prints `DEMO_DIR` and `NAMESPACE`, and runs
 `kubectl auth can-i create` for trainjobs, sparkconnects, deployments, services,
-and configmaps — every line should print `yes`. **A few seconds** on the custom
-`jupyterlab-cpu` image: the `kubeflow[spark]` / `google-cloud-storage` install is
-guarded by an import check and those packages are already baked in, so nothing is
-downloaded. (Elsewhere, expect 1–2 minutes for that pip install.)
+and configmaps — every line should print `yes`. On the default upstream base
+image, the first run takes **1–2 minutes** while the import-guarded
+`kubeflow[spark]` install runs. On the optional custom `jupyterlab-cpu` image
+those packages are already baked in, so it takes **a few seconds**.
 
 Then run the bucket cell; it prints the bucket in use and the IAM command.
 
@@ -575,7 +594,7 @@ Service, and prints predicted vs. true labels with ✅/❌.
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
 | `ModuleNotFoundError: No module named 'jobs'` (or the setup cell's `FileNotFoundError: Could not find the jobs package`) | The `jobs/` folder is not in the same directory as the notebook, or only some of its files were uploaded/copied. | Upload the entire `jobs/` folder next to the notebook (via JupyterLab file browser or clone the repo). Verify with `ls jobs` in a Workspace terminal — you need `__init__.py`, `pipeline.py`, `data_processing.py`, `train.py`, `serve.py`. Then re-run the setup cell. |
-| `RuntimeError: The Spark image for Stage 1 cannot be resolved…` | `REGISTRY` is not set — you are probably on the upstream sample WorkspaceKind. | Recreate the Workspace from the `jupyterlab` WorkspaceKind (prerequisite 4), or set `os.environ["REGISTRY"]` before importing `jobs.pipeline`, or assign `pipeline.SPARK_IMAGE` directly. |
+| `RuntimeError: The Spark image for Stage 1 cannot be resolved…` | `REGISTRY` is not set — the Workspace was probably not created from the `jupyterlab` WorkspaceKind. | Recreate the Workspace from the `jupyterlab` WorkspaceKind (prerequisite 4), or set `os.environ["REGISTRY"]` before importing `jobs.pipeline`, or assign `pipeline.SPARK_IMAGE` directly. |
 | Spark pods `ErrImagePull` / `ImagePullBackOff` on `spark-py312` | Image never built/pushed, wrong `REGISTRY`/`TAG`, or the nodes' service account lacks `roles/artifactregistry.reader`. | `gcloud artifacts docker images list "${REGISTRY}"` to confirm the tag exists; `kubectl describe pod <pod> -n $NS` for the exact pull error; grant the reader role as shown in [`../../images/README.md`](../../images/README.md). |
 | Spark Connect fails to start, or errors mentioning a Python/protocol version mismatch | Driver and executors must run the same Python and Spark version as the client SDK. Anything other than `spark-py312` (Spark 4.0.1 + Python 3.12) will mismatch. | Use the `spark-py312` image. The pipeline already forces `PYSPARK_PYTHON=/usr/bin/python3.12` on both roles; do not override it with a different image. |
 | `[NO_ACTIVE_SESSION] No active Spark session found`, or the server log shows `[INVALID_HANDLE.SESSION_CHANGED] … The existing Spark server driver instance has restarted` | You reconnected too soon after deleting and recreating the `SparkConnect` resource. The Service briefly still resolved to the *old* driver pod, so the client handshook with one driver and then issued RPCs against a different one. | Wait until the new server is settled before reconnecting: `kubectl get sparkconnect fashion-mnist-etl -n $NS -w` until `STATUS=Ready`, confirm exactly one `fashion-mnist-etl-server` pod is `Running`, then re-run the cell. You do **not** normally need to delete the `SparkConnect` between runs — `run_data_processing()` reuses a healthy one. |

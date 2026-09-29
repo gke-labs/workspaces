@@ -116,8 +116,8 @@ export CLUSTER_NAME="kubeflow-notebooks"
 export LOCATION="us-central1-c"
 export REGION="us-central1"
 export PILOT_USERS="user1@example.com,user2@example.com" # Comma- or space-separated Google account emails of users
-export TENANT_NAMESPACE="team-a"                  # Example tenant namespace for notebooks & jobs
-export REPO_NAME="notebooks"                      # Artifact Registry repository name
+export TENANT_NAMESPACE="kubeflow-user"           # Example tenant namespace for notebooks & jobs
+export REPO_NAME="kubeflow-repo"                  # Artifact Registry repository name
 export ADDRESS_NAME="notebooks-gke-global"        # Global static external IP name
 export CERTIFICATE_NAME="notebooks-gke"
 export CERTIFICATE_MAP="notebooks-gke"
@@ -128,8 +128,9 @@ export BUILD_IMAGES="true"                        # Build & push the five core p
 export INSTALL_TRAINER="true"
 export INSTALL_SPARK_OPERATOR="true"
 export APPLY_SAMPLE_WORKSPACEKIND="true"
-export SAMPLE_WORKSPACEKIND="${REPO_ROOT}/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml"
-export SNAPSHOT_GCS_BUCKET="${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GCS bucket for GKE Pod Snapshots (stateful Pause/Resume)
+export SAMPLE_WORKSPACEKINDS="${REPO_ROOT}/images/workspacekinds/jupyterlab.yaml ${REPO_ROOT}/images/workspacekinds/codeserver-python.yaml"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket" # Injected into Workspace Pods as $GCS_BUCKET (not created by the script)
+export SNAPSHOT_GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket" # Dedicated GCS bucket for GKE Pod Snapshots (stateful Pause/Resume)
 ```
 
 #### Environment Variable Reference
@@ -143,8 +144,8 @@ Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its 
 | `CLUSTER_NAME` | `kubeflow-notebooks` | GKE cluster name. (Legacy alias: `CLUSTER`). |
 | `LOCATION` | `us-central1-c` | Cluster zone or region. |
 | `REGION` | `us-central1` | Region for Artifact Registry, the snapshot GCS bucket, and `REGISTRY`. |
-| `TENANT_NAMESPACE` | `team-a` | Tenant namespace for Workspaces and jobs. |
-| `REPO_NAME` | `notebooks` | Artifact Registry Docker repository name. (Legacy alias: `REPOSITORY`). |
+| `TENANT_NAMESPACE` | `kubeflow-user` | Tenant namespace for Workspaces and jobs. |
+| `REPO_NAME` | `kubeflow-repo` | Artifact Registry Docker repository name. (Legacy alias: `REPOSITORY`). |
 | `ADDRESS_NAME` | `notebooks-gke-global` | Name of the reserved global external IPv4 address. |
 | `CERTIFICATE_NAME` | `notebooks-gke` | Certificate Manager certificate for `WORKSPACES_HOST`. The desktop certificate is always `${CERTIFICATE_NAME}-desktop`. |
 | `CERTIFICATE_MAP` | `notebooks-gke` | Certificate Manager map attached to the Gateway. |
@@ -159,11 +160,14 @@ Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its 
 | `INSTALL_TRAINER` | `true` | Deploy Kubeflow Trainer (v2). |
 | `INSTALL_SPARK_OPERATOR` | `true` | Deploy Kubeflow Spark Operator. |
 | `BUILD_IMAGES` | `true` | Build & push the five core platform images (Section 3). |
-| `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the upstream sample `jupyterlab` WorkspaceKind after tenant RBAC is applied. |
-| `SAMPLE_WORKSPACEKIND` | `<repo-root>/workspaces/controller/manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml` | Path to the WorkspaceKind applied when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
+| `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the example `jupyterlab` and `codeserver` WorkspaceKinds (upstream base images) after tenant RBAC is applied. |
+| `SAMPLE_WORKSPACEKINDS` | `<repo-root>/images/workspacekinds/jupyterlab.yaml <repo-root>/images/workspacekinds/codeserver-python.yaml` | Space-separated WorkspaceKind templates rendered by [`scripts/render_workspacekinds.py`](scripts/render_workspacekinds.py) when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
+| `APPLY_COMPUTE_CLASSES` | `true` | With `APPLY_SAMPLE_WORKSPACEKIND=true`, also apply the GPU/TPU ComputeClasses used by the WorkspaceKinds' accelerator pod options. |
+| `COMPUTE_CLASSES_DIR` | `<repo-root>/examples/compute-classes` | Directory of ComputeClass manifests applied when `APPLY_COMPUTE_CLASSES=true`. |
+| `GCS_BUCKET` | `${PROJECT_ID}-${TENANT_NAMESPACE}-bucket` | Bucket name injected into every Workspace Pod as `$GCS_BUCKET`. Not created by the script. |
 | `KUBE_CLIENT_QPS` | `100` | Kubernetes client QPS for `gke-access-proxy`. |
 | `KUBE_CLIENT_BURST` | `200` | Kubernetes client burst for `gke-access-proxy`. |
-| `SNAPSHOT_GCS_BUCKET` | `${TENANT_NAMESPACE}-snapshots-bucket` | Dedicated GCS bucket for GKE Pod Snapshots. |
+| `SNAPSHOT_GCS_BUCKET` | `${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket` | Dedicated GCS bucket for GKE Pod Snapshots. |
 | `SNAPSHOT_RETENTION_DAYS` | `14` | Age (days) for the GCS Object Lifecycle `Delete` rule on the snapshot bucket. |
 | `CONTROL_PLANE_CIDR` | `<control-plane-ip>/32` (auto-discovered) | CIDR allowed to reach the admission webhooks. |
 | `SKIP_ORG_POLICY_CHECK` | `false` | When `true`, skips the preflight check for `constraints/compute.restrictLoadBalancerCreationForTypes`. |
@@ -706,16 +710,24 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
      -f providers/gke/rendered/ready/customer-pilot.json
    ```
 
-3. **Register Sample WorkspaceKind**:
-   When `APPLY_SAMPLE_WORKSPACEKIND=true` (the default), the script registers the upstream sample `jupyterlab` WorkspaceKind from `SAMPLE_WORKSPACEKIND` so users have something to launch immediately after deployment. It only references public `ghcr.io/kubeflow` images, so no custom image build is required. If the file at `SAMPLE_WORKSPACEKIND` does not exist, the script prints a warning and skips this step.
+3. **Register Example WorkspaceKinds**:
+   When `APPLY_SAMPLE_WORKSPACEKIND=true` (the default), the script registers the `jupyterlab` and `codeserver` WorkspaceKinds from [`../../images/workspacekinds/`](../../images/workspacekinds/) (`SAMPLE_WORKSPACEKINDS`) so users have something to launch immediately after deployment. [`scripts/render_workspacekinds.py`](scripts/render_workspacekinds.py) renders the templates without any custom image build:
+   - The `*-cpu`, `*-gpu` and `*-tpu` image options point at the public upstream `ghcr.io/kubeflow` base images the custom images are built from (`jupyter-scipy`, `jupyter-pytorch-cuda-full`, `codeserver-python`). There is no upstream TPU image, so the TPU option uses the **CPU** base image (no `libtpu`/`jax[tpu]` preinstalled). The imageConfig ids are unchanged, so re-applying the templates with custom images later upgrades existing Workspaces in place.
+   - GPU/TPU pod options select nodes with `cloud.google.com/compute-class`, which works on both Autopilot and Standard clusters. When `APPLY_COMPUTE_CLASSES=true` (the default), the script first applies the ComputeClasses from [`../../examples/compute-classes/`](../../examples/compute-classes/) so those options can schedule.
 
-   *To register the custom WorkspaceKinds, see [`../../images/README.md#ready-made-workspacekind-templates`](../../images/README.md#ready-made-workspacekind-templates). Note that the custom `jupyterlab` template uses the **same `metadata.name`** as the sample above, so applying it **replaces** the sample rather than adding a second kind; the custom `codeserver` kind is additive. To apply ComputeClasses for GPU and TPU pods, apply the YAMLs in [`../../examples/compute-classes/`](../../examples/compute-classes/).*
+   Templates that do not exist are skipped with a warning.
+
+   *To register the custom-image WorkspaceKinds instead, see [`../../images/README.md#ready-made-workspacekind-templates`](../../images/README.md#ready-made-workspacekind-templates); they use the same `metadata.name`s and pod options, and replace the rendered kinds.*
 
    ```bash
-   if [[ "${APPLY_SAMPLE_WORKSPACEKIND}" == "true" && -f "${SAMPLE_WORKSPACEKIND}" ]]; then
+   if [[ "${APPLY_COMPUTE_CLASSES}" == "true" ]]; then
      kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
-       --field-manager=notebooks-gke-pilot -f "${SAMPLE_WORKSPACEKIND}"
+       --field-manager=notebooks-gke-pilot -f "${COMPUTE_CLASSES_DIR}"
    fi
+   python3 providers/gke/scripts/render_workspacekinds.py ${SAMPLE_WORKSPACEKINDS} \
+     > providers/gke/rendered/ready/workspacekinds.json
+   kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
+     --field-manager=notebooks-gke-pilot -f providers/gke/rendered/ready/workspacekinds.json
    ```
 
    > [!IMPORTANT]
@@ -817,7 +829,7 @@ Two complete verification examples and the `jupyterlab-resumable` manifest are p
 - **Resumable WorkspaceKind**: [`examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) configures CPU and GPU pod profiles pre-annotated for stateful snapshots.
 
 > [!IMPORTANT]
-> **Keep the snapshot bucket separate from any workload data bucket**: container memory dumps may include in-memory tokens or environment state, and they have different lifecycle and retention requirements than shared datasets and training outputs. `deploy_standalone.sh` therefore provisions one dedicated bucket, `SNAPSHOT_GCS_BUCKET` (default `${TENANT_NAMESPACE}-snapshots-bucket`), and configures a 14-day lifecycle `Delete` rule on it. If you also give the tenant a bucket for datasets and model artifacts, create and manage it separately — the deployment script does not create one.
+> **Keep the snapshot bucket separate from any workload data bucket**: container memory dumps may include in-memory tokens or environment state, and they have different lifecycle and retention requirements than shared datasets and training outputs. `deploy_standalone.sh` therefore provisions one dedicated bucket, `SNAPSHOT_GCS_BUCKET` (default `${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket`), and configures a 14-day lifecycle `Delete` rule on it. If you also give the tenant a bucket for datasets and model artifacts, create and manage it separately — the deployment script does not create one.
 
 This feature is implemented by the standalone `gke-workspace-snapshot-addon` Deployment (separate from `gke-access-proxy`, so a snapshot control-plane failure never affects notebook traffic) via two Kubernetes Mutating Admission Webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`podsnapshot.gke.kubeflow.org/active`), and a background snapshot reconciler—requiring **zero changes** to upstream Kubeflow `Workspace` / `WorkspaceKind` CRDs, `workspaces-controller`, Backend API, or React Frontend.
 
@@ -832,11 +844,11 @@ GKE Pod Snapshots use **two distinct identities** for GCS operations:
 
 #### Using a Custom `SNAPSHOT_GCS_BUCKET`
 
-If using a custom snapshot bucket (e.g. `export SNAPSHOT_GCS_BUCKET="my-custom-snapshot-bucket"` instead of the default `${TENANT_NAMESPACE}-snapshots-bucket`), ensure you follow these steps:
+If using a custom snapshot bucket (e.g. `export SNAPSHOT_GCS_BUCKET="my-custom-snapshot-bucket"` instead of the default `${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket`), ensure you follow these steps:
 
 1. **Create the Custom Bucket & Configure Permissions**:
    ```bash
-   export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${TENANT_NAMESPACE}-snapshots-bucket}"
+   export SNAPSHOT_GCS_BUCKET="${SNAPSHOT_GCS_BUCKET:-${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket}"
    PROJECT_NUMBER=$(gcloud projects describe "${PROJECT}" --format='value(projectNumber)')
 
    # 1. Create the dedicated snapshot GCS bucket in the cluster location
