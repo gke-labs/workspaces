@@ -4,11 +4,11 @@ The Kubernetes-native interactive dev environment for Notebooks, IDEs, and AI Ag
 
 ## Interactive R&D: Easy, Safe Access to Cluster & Distributed Compute
 
-Kubeflow Workspaces bridges the gap between infrastructure complexity and developer velocity. It gives researchers, ML engineers, and data scientists **easy, self-service access to high-performance Kubernetes compute** (CPUs, GPUs, Cloud TPUs) and **distributed compute resources**, while giving platform administrators **enterprise-grade safety, security, and isolation**.
+Workspaces bridges the gap between infrastructure complexity and developer velocity. It gives researchers, ML engineers, and data scientists **easy, self-service access to high-performance Kubernetes compute** (CPUs, GPUs, Cloud TPUs) and **distributed compute resources**, while giving platform administrators **enterprise-grade safety, security, and isolation**.
 
 ### 1. Interactive Cloud IDEs That Scale Easily to Distributed Compute
 
-Kubeflow Workspaces is **cloud-first**: users get instant, zero-install interactive development environments directly in the browser—co-located with high-throughput cluster storage, accelerators, and network fabrics. Each workspace is also the launchpad for distributed training and inference: prototype interactively on a single "VM", then scale the exact same code across multi-host cluster resources.
+Workspaces is **cloud-first**: users get instant, zero-install interactive development environments directly in the browser—co-located with high-throughput cluster storage, accelerators, and network fabrics. Each workspace is also the launchpad for distributed training and inference: prototype interactively on a single "VM", then scale the exact same code across multi-host cluster resources.
 
 ![Interactive Dev & Scaling to Distributed Multi-Host Training](examples/tpu/demo_tpu_workspaces.gif)
 

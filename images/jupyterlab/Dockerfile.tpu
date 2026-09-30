@@ -36,7 +36,7 @@ RUN TOKEN="${TORCH_TPU_TOKEN:-${TORCH_TPU_ACCESS_TOKEN}}"; \
       fi; \
       if [ -n "${TOKEN}" ]; then \
         echo "Installing torch_tpu from virtual registry..."; \
-        if ! PIP_NO_CACHE_DIR=off python3 -m pip install --pre --index-url "https://oauth2accesstoken:${TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/" torch_tpu --quiet --no-cache-dir; then \
+        if ! PIP_NO_CACHE_DIR=off python3 -m pip install --pre --index-url "https://oauth2accesstoken:${TOKEN}@us-python.pkg.dev/ml-oss-artifacts-transient/torch-tpu-virtual-registry/simple/" torch_tpu==0.1.1.dev20260930100922 --quiet --no-cache-dir; then \
           echo "WARNING: Failed to install torch_tpu. Access to https://github.com/google-pytorch/torch_tpu is required to download torch_tpu wheels. Continuing build without torch_tpu." >&2; \
         fi; \
       else \

@@ -104,6 +104,74 @@ gcloud container node-pools create cpu-autoscaling-pool \
   --max-nodes=3
 ```
 
+<details>
+<summary><b>Updating an existing GKE cluster instead of creating a new one</b> (click to expand)</summary>
+
+If you already have a GKE cluster, you can update it to enable the required features rather than creating a new one from scratch.
+
+#### Step 0: Verify non-updatable prerequisites
+Dataplane V2 and VPC-native networking **cannot** be enabled after cluster creation. Verify your cluster already has them:
+
+```bash
+# Must return "ADVANCED_DATAPATH"
+gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
+  --format='value(networkConfig.datapathProvider)'
+
+# Must return "True"
+gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
+  --format='value(ipAllocationPolicy.useIpAliases)'
+```
+
+> [!WARNING]
+> If either check fails, the cluster cannot be converted in-place and you must create a new cluster.
+
+#### Step 1: Update cluster features
+Because `gcloud container clusters update` requires each feature flag to be executed individually:
+
+```bash
+# 1. Enable standard Gateway API (GKE Gateway controller)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --gateway-api=standard
+
+# 2. Enable Workload Identity Federation (required for GCS bucket access)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --workload-pool="${PROJECT_ID}.svc.id.goog"
+
+# 3. Enable GKE Pod Snapshots (required for stateful Pause & Resume)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --enable-pod-snapshots
+
+# 4. Enable Image Streaming (recommended: faster container startup times)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --enable-image-streaming
+```
+
+#### Step 2: Update or create node pools (Standard clusters)
+Cluster-level updates do not automatically reconfigure existing node pools:
+
+```bash
+# Enable Workload Identity & Image Streaming on an existing node pool:
+NODE_POOL_NAME="default-pool" # Replace with your node pool name
+gcloud container node-pools update "${NODE_POOL_NAME}" \
+  --cluster="${CLUSTER_NAME}" --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --workload-metadata=GKE_METADATA --enable-image-streaming
+
+# (Optional) If running the resumable-notebooks example on GKE Standard, create a gVisor pool:
+gcloud container node-pools create gvisor-pool \
+  --cluster="${CLUSTER_NAME}" --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --image-type=cos_containerd --sandbox type=gvisor --machine-type=e2-standard-4 \
+  --workload-metadata=GKE_METADATA --enable-autoscaling --min-nodes=0 --max-nodes=3
+```
+*(On GKE Autopilot clusters, node pools are managed automatically; you only need to run the `clusters update` commands in Step 1.)*
+
+</details>
+
 ### Set Environment Variables
 Run all commands from the root of the repository. Export your deployment variables:
 

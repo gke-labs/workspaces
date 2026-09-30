@@ -22,6 +22,7 @@ and cleanup instructions.
 | [**resumable-notebooks**](resumable-notebooks/) | Pause a JupyterLab notebook and resume it later with every variable, thread, and GPU VRAM bit-identical (JupyterLab only; `codeserver` is stateless) | CPU, or 1 × NVIDIA T4 | 20–40 min |
 | [**distributed**](distributed/) | A 0.1-CPU notebook drives a Spark ETL job, multi-host TPU training, and a serving Deployment — without you writing any YAML | CPU notebook + 5 Spark pods + 2 × TPU v5e host | 1–2 hours |
 | [**tpu**](tpu/) | Interactive JAX training on Cloud TPU v5e (4 chips) directly from Desktop VS Code or JupyterLab | 1 × TPU v5e (4 chips) | 10–20 min |
+| [**torch_tpu**](torch_tpu/) | Interactive PyTorch training on Cloud TPU v5e with TorchTPU, scaling to multi-core DDP with torchrun on a single-host TPU slice | 1 × TPU v5e (1 or 4 chips) | 10–20 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
 | [**ray**](ray/) | Elastic distributed computing with Ray (KubeRay): launch on-demand clusters from Python, run interactive tasks, submit batch jobs, and view the Ray Dashboard in-workspace | CPU (`e2-standard-4`) | 15–30 min |
 
@@ -150,6 +151,74 @@ gcloud container clusters create-auto "${CLUSTER_NAME}" \
 
 > [!NOTE]
 > Autopilot's security policies reject a few things the upstream manifests do (cert-manager leader election in `kube-system`, and Kubeflow Trainer RBAC bindings to `system:authenticated`). `deploy_standalone.sh` detects Autopilot and adapts those manifests automatically; no extra steps are needed.
+
+<details>
+<summary><b>Updating an existing GKE cluster instead of creating a new one</b> (click to expand)</summary>
+
+If you already have a GKE cluster, you can update it to enable the required features rather than creating a new one from scratch.
+
+#### Step 0: Verify non-updatable prerequisites
+Dataplane V2 and VPC-native networking **cannot** be enabled after cluster creation. Verify your cluster already has them:
+
+```bash
+# Must return "ADVANCED_DATAPATH"
+gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
+  --format='value(networkConfig.datapathProvider)'
+
+# Must return "True"
+gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
+  --format='value(ipAllocationPolicy.useIpAliases)'
+```
+
+> [!WARNING]
+> If either check fails, the cluster cannot be converted in-place and you must create a new cluster.
+
+#### Step 1: Update cluster features
+Because `gcloud container clusters update` requires each feature flag to be executed individually:
+
+```bash
+# 1. Enable standard Gateway API (GKE Gateway controller)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --gateway-api=standard
+
+# 2. Enable Workload Identity Federation (required for GCS bucket access)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --workload-pool="${PROJECT_ID}.svc.id.goog"
+
+# 3. Enable GKE Pod Snapshots (required for stateful Pause & Resume)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --enable-pod-snapshots
+
+# 4. Enable Image Streaming (recommended: faster container startup times)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --enable-image-streaming
+```
+
+#### Step 2: Update or create node pools (Standard clusters)
+Cluster-level updates do not automatically reconfigure existing node pools:
+
+```bash
+# Enable Workload Identity & Image Streaming on an existing node pool:
+NODE_POOL_NAME="default-pool" # Replace with your node pool name
+gcloud container node-pools update "${NODE_POOL_NAME}" \
+  --cluster="${CLUSTER_NAME}" --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --workload-metadata=GKE_METADATA --enable-image-streaming
+
+# (Optional) If running the resumable-notebooks example on GKE Standard, create a gVisor pool:
+gcloud container node-pools create gvisor-pool \
+  --cluster="${CLUSTER_NAME}" --project="${PROJECT_ID}" --location="${LOCATION}" \
+  --image-type=cos_containerd --sandbox type=gvisor --machine-type=e2-standard-4 \
+  --workload-metadata=GKE_METADATA --enable-autoscaling --min-nodes=0 --max-nodes=3
+```
+*(On GKE Autopilot clusters, node pools are managed automatically; you only need to run the `clusters update` commands in Step 1.)*
+
+</details>
 
 <a id="2-create-the-cloud-storage-gcs-data-bucket"></a>
 ### 2. Create the Cloud Storage (GCS) data bucket (~1–2 min)
