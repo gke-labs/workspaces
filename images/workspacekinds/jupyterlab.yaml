@@ -443,9 +443,9 @@ spec:
                 cloud.google.com/compute-class: "tpu-v5-4-single-host"
               resources:
                 requests:
-                  cpu: 100
-                  memory: 180Gi
+                  cpu: 90
+                  memory: 150Gi
                 limits:
-                  cpu: 100
-                  memory: 180Gi
+                  cpu: 90
+                  memory: 150Gi
                   google.com/tpu: 4
