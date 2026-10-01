@@ -356,6 +356,15 @@ func (c *Controller) mutatePod(ctx context.Context, request *admissionv1.Admissi
 		}
 	}
 
+	if c.migrationEnabled(ctx, workspace) && pod.Labels[AnnotationPodMigrationEnabled] != "true" {
+		labels := pod.Labels
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[AnnotationPodMigrationEnabled] = "true"
+		patches = append(patches, jsonPatchOp{Op: "add", Path: "/metadata/labels", Value: labels})
+	}
+
 	if lastCheckpoint := workspace.GetAnnotations()[AnnotationLastCheckpointName]; lastCheckpoint != "" {
 		annotations := pod.Annotations
 		if annotations == nil {

@@ -297,6 +297,20 @@ func (c *Controller) createManualTrigger(ctx context.Context, workspace *unstruc
 func (c *Controller) reconcileDeletedWorkspace(ctx context.Context, namespace, name string) (time.Duration, error) {
 	_, err := c.getResource(ctx, podSnapshotPolicyGVR, c.policyLister, namespace, policyNameFor(name))
 	if apierrors.IsNotFound(err) {
+		hasPM, pmErr := c.hasPodMigration(ctx, namespace)
+		if pmErr != nil || !hasPM {
+			return 0, pmErr
+		}
+		draining, snapErr := c.drainingWorkspaceSnapshots(ctx, namespace, name)
+		if snapErr != nil {
+			return 0, snapErr
+		}
+		if len(draining) > 0 && !allTerminating(draining) {
+			if err := c.deleteWorkspaceSnapshots(ctx, namespace, name); err != nil {
+				return 0, err
+			}
+			return 0, c.retirePolicy(ctx, namespace, name)
+		}
 		return 0, nil
 	}
 	if err != nil {
@@ -510,8 +524,15 @@ func (c *Controller) lookupIPCConfigMap(ctx context.Context, namespace string) (
 }
 
 // ensureStorageConfigAndPolicy creates the cluster-scoped PodSnapshotStorageConfig
-// and the per-Workspace PodSnapshotPolicy if they are missing.
+// and the per-Workspace PodSnapshotPolicy if they are missing. When live Pod Migration
+// opt-in (pod-migration.gke.io/enabled: "true") is enabled for the Workspace, it
+// delegates policy and storage provisioning to the namespace-scoped singleton
+// PodMigration CR instead of creating a duplicate per-Workspace PodSnapshotPolicy.
 func (c *Controller) ensureStorageConfigAndPolicy(ctx context.Context, workspace *unstructured.Unstructured, storageConfigName string) error {
+	if c.migrationEnabled(ctx, workspace) {
+		return c.ensurePodMigration(ctx, workspace, storageConfigName)
+	}
+
 	if _, err := c.getResource(ctx, podSnapshotStorageConfigGVR, c.storageConfigLister, "", storageConfigName); apierrors.IsNotFound(err) {
 		storageConfig := &unstructured.Unstructured{
 			Object: map[string]any{
@@ -571,6 +592,128 @@ func (c *Controller) ensureStorageConfigAndPolicy(ctx context.Context, workspace
 		},
 	}
 	if _, err := c.dynamic.Resource(podSnapshotPolicyGVR).Namespace(namespace).Create(ctx, policy, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	return nil
+}
+
+// hasPodMigration reports whether at least one PodMigration CR exists in namespace.
+func (c *Controller) hasPodMigration(ctx context.Context, namespace string) (bool, error) {
+	list, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return len(list.Items) > 0, nil
+}
+
+// resolveStorageLocation determines the gs://<bucket>/<path> URI for a PodMigration
+// CR, honoring a custom cluster-scoped PodSnapshotStorageConfig when referenced by
+// podsnapshot.gke.kubeflow.org/storage-config and falling back to the addon's
+// default bucket otherwise.
+func (c *Controller) resolveStorageLocation(ctx context.Context, storageConfigName string) (string, error) {
+	defaultLocation := fmt.Sprintf("gs://%s/kubeflow-notebooks", c.bucket)
+	if storageConfigName == "" {
+		return defaultLocation, nil
+	}
+	storageConfig, err := c.getResource(ctx, podSnapshotStorageConfigGVR, c.storageConfigLister, "", storageConfigName)
+	if apierrors.IsNotFound(err) {
+		return defaultLocation, nil
+	}
+	if err != nil {
+		return "", err
+	}
+	bucket, _, _ := unstructured.NestedString(storageConfig.Object, "spec", "snapshotStorageConfig", "gcs", "bucket")
+	if bucket == "" {
+		return defaultLocation, nil
+	}
+	path, _, _ := unstructured.NestedString(storageConfig.Object, "spec", "snapshotStorageConfig", "gcs", "path")
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return fmt.Sprintf("gs://%s", bucket), nil
+	}
+	return fmt.Sprintf("gs://%s/%s", bucket, path), nil
+}
+
+// ensurePodMigration ensures a singleton PodMigration CR exists in the tenant
+// namespace and retires any legacy per-Workspace PodSnapshotPolicy once no
+// unconsumed checkpoints depend on it.
+func (c *Controller) ensurePodMigration(ctx context.Context, workspace *unstructured.Unstructured, storageConfigName string) error {
+	namespace, name := workspace.GetNamespace(), workspace.GetName()
+	storageLocation, err := c.resolveStorageLocation(ctx, storageConfigName)
+	if err != nil {
+		return err
+	}
+	list, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	if list == nil || len(list.Items) == 0 {
+		pm := &unstructured.Unstructured{
+			Object: map[string]any{
+				"apiVersion": podmigrationGroupVersion,
+				"kind":       "PodMigration",
+				"metadata": map[string]any{
+					"name":      DefaultPodMigrationName,
+					"namespace": namespace,
+				},
+				"spec": map[string]any{
+					"selector": map[string]any{
+						"matchLabels": map[string]any{
+							AnnotationPodMigrationEnabled: "true",
+						},
+					},
+					"strategy": "CheckpointAndRestore",
+					"storage": map[string]any{
+						"type":     "GCS",
+						"location": storageLocation,
+					},
+				},
+			},
+		}
+		if _, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).Create(ctx, pm, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			return err
+		}
+	} else if existing := &list.Items[0]; existing.GetName() == DefaultPodMigrationName {
+		if currentLocation, _, _ := unstructured.NestedString(existing.Object, "spec", "storage", "location"); currentLocation != storageLocation {
+			patch, err := json.Marshal(map[string]any{
+				"spec": map[string]any{
+					"storage": map[string]any{
+						"type":     "GCS",
+						"location": storageLocation,
+					},
+				},
+			})
+			if err != nil {
+				return err
+			}
+			if _, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).
+				Patch(ctx, DefaultPodMigrationName, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+				return err
+			}
+		}
+	}
+
+	policyName := policyNameFor(name)
+	_, err = c.getResource(ctx, podSnapshotPolicyGVR, c.policyLister, namespace, policyName)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// Only retire a legacy per-Workspace PodSnapshotPolicy when no unconsumed or
+	// draining PodSnapshots depend on it to resolve their GCS storage location.
+	if workspace.GetAnnotations()[AnnotationLastCheckpointName] != "" {
+		return nil
+	}
+	draining, err := c.drainingWorkspaceSnapshots(ctx, namespace, name)
+	if err != nil || len(draining) > 0 {
+		return err
+	}
+	if err := c.dynamic.Resource(podSnapshotPolicyGVR).Namespace(namespace).Delete(ctx, policyName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		return err
 	}
 	return nil

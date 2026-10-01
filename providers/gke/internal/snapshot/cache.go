@@ -151,7 +151,8 @@ func (c *Controller) snapshotEnabled(ctx context.Context, workspace *unstructure
 	if value, ok := annotations[AnnotationStorageConfig]; ok && value != "" {
 		storageConfig = value
 	}
-	optedIn := strings.EqualFold(annotations[AnnotationEnabled], "true")
+	optedIn := strings.EqualFold(annotations[AnnotationEnabled], "true") ||
+		strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "true")
 
 	// An explicit opt-out needs no further lookups.
 	if value, ok := annotations[AnnotationEnabled]; ok && strings.EqualFold(value, "false") {
@@ -175,13 +176,42 @@ func (c *Controller) snapshotEnabled(ctx context.Context, workspace *unstructure
 		return false, storageConfig
 	}
 
-	if optedIn {
-		return true, storageConfig
-	}
-
 	kindAnnotations := kind.GetAnnotations()
 	if value, ok := kindAnnotations[AnnotationStorageConfig]; ok && value != "" && annotations[AnnotationStorageConfig] == "" {
 		storageConfig = value
 	}
-	return strings.EqualFold(kindAnnotations[AnnotationEnabled], "true"), storageConfig
+	if optedIn {
+		return true, storageConfig
+	}
+
+	return strings.EqualFold(kindAnnotations[AnnotationEnabled], "true") ||
+		strings.EqualFold(kindAnnotations[AnnotationPodMigrationEnabled], "true"), storageConfig
+}
+
+// migrationEnabled reports whether live Pod Migration opt-in (pod-migration.gke.io/enabled)
+// is enabled for a Workspace, checking explicit Workspace opt-out, TPU hardware exclusion,
+// Workspace annotation, and fallback to the parent WorkspaceKind annotation.
+func (c *Controller) migrationEnabled(ctx context.Context, workspace *unstructured.Unstructured) bool {
+	annotations := workspace.GetAnnotations()
+	if value, ok := annotations[AnnotationPodMigrationEnabled]; ok && strings.EqualFold(value, "false") {
+		return false
+	}
+	optedIn := strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "true")
+
+	kindName, _, _ := unstructured.NestedString(workspace.Object, "spec", "kind")
+	if kindName == "" {
+		return false
+	}
+	kind, err := c.getWorkspaceKind(ctx, kindName)
+	if err != nil {
+		return optedIn
+	}
+	podConfig, _, _ := unstructured.NestedString(workspace.Object, "spec", "podTemplate", "options", "podConfig")
+	if podConfigRequestsTPU(kind, podConfig) {
+		return false
+	}
+	if optedIn {
+		return true
+	}
+	return strings.EqualFold(kind.GetAnnotations()[AnnotationPodMigrationEnabled], "true")
 }

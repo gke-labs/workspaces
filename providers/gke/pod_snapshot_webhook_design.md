@@ -92,11 +92,24 @@ This is not a rare fluke: pausing a `Workspace` removes its pod, which is freque
 | `podsnapshot.gke.kubeflow.org/storage-config` | User / Admin | Name of the `PodSnapshotStorageConfig` (defaults to `"kubeflow-pod-snapshot-storage-config"`). |
 | `podsnapshot.gke.kubeflow.org/checkpoint-state` | Webhook & Addon Reconciler | `"Checkpointing"` while snapshot is in progress; `"Ready"` when snapshot is saved and ready for Pod scale-down; removed after restore. |
 | `podsnapshot.gke.kubeflow.org/last-checkpoint-name` | Addon Reconciler | Name of the GKE `PodSnapshot` CR generated during pause. Consumed by the `Pod` webhook on resume and cleared after restore. |
+| `pod-migration.gke.io/enabled` | User / Admin (or `WorkspaceKind` annotation) | `"true"` to enable live Pod Migration on node drain/eviction in addition to stateful UI pause/resume. |
 
 #### Pod ReadinessGate (`Pod.spec.readinessGates` & `Pod.status.conditions`)
 | Condition Type | Managed By | Behavior |
 | :--- | :--- | :--- |
 | `podsnapshot.gke.kubeflow.org/active` | Pod Webhook & Addon Reconciler | Set to `True` when the Workspace Pod is running normally or finishes restoring. Flipped to `False` the instant a user triggers Pause (`checkpoint-state: "Checkpointing"`), forcing `PodReady = False`. |
+
+### 2.4. Coexistence with Live Pod Migration (`pod-migration.gke.io`)
+
+When `pod-migration.gke.io/enabled: "true"` is set on a `Workspace` or on its `WorkspaceKind` template, the addon coordinates with the [`gke-labs/pod-migration`](https://github.com/gke-labs/pod-migration) controller so both **UI Stop/Start** and **Live Node-Drain Migration** work on the same Workspace without policy conflicts:
+
+1. **Pod Label Propagation & Webhook Coexistence**:
+   - On `Pod` `CREATE`, `mutatePod` injects the label `pod-migration.gke.io/enabled: "true"` onto the Workspace Pod alongside `runtimeClassName: "gvisor"`, the `jupyter-ipc-config` mount, and the `podsnapshot.gke.kubeflow.org/active` `readinessGate`.
+   - `mutate-pod.podsnapshot.gke.kubeflow.org` is configured with `reinvocationPolicy: IfNeeded` so admission remains deterministic regardless of webhook invocation order.
+2. **Singleton `PodMigration` Provisioning & `PodSnapshotPolicy` Superseding**:
+   - GKE's `PodSnapshot` agent rejects Pods matched by more than one `PodSnapshotPolicy`. When `pod-migration.gke.io/enabled: "true"` is active, `ensurePodMigration` provisions a namespace-scoped singleton `PodMigration` CR (`kubeflow-pod-migration`) selecting `pod-migration.gke.io/enabled: "true"` instead of creating a per-Workspace `PodSnapshotPolicy` (`ws-<name>-policy`), and retires any legacy `ws-<name>-policy` once no unconsumed checkpoints depend on it.
+3. **Bridging `podsnapshot.gke.kubeflow.org/storage-config`**:
+   - If the `Workspace` or `WorkspaceKind` sets `podsnapshot.gke.kubeflow.org/storage-config: <name>`, `ensurePodMigration` reads that cluster-scoped `PodSnapshotStorageConfig`, extracts `spec.snapshotStorageConfig.gcs.{bucket,path}`, and sets `PodMigration.spec.storage.location` (`gs://<bucket>/<path>`), falling back to `gs://<default-bucket>/kubeflow-notebooks` when unset.
 
 ---
 

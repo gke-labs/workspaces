@@ -307,7 +307,8 @@ func (c *Controller) enqueueWorkspacesForKind(old, current any) {
 		return
 	}
 	if previous.GetAnnotations()[AnnotationEnabled] == updated.GetAnnotations()[AnnotationEnabled] &&
-		previous.GetAnnotations()[AnnotationStorageConfig] == updated.GetAnnotations()[AnnotationStorageConfig] {
+		previous.GetAnnotations()[AnnotationStorageConfig] == updated.GetAnnotations()[AnnotationStorageConfig] &&
+		previous.GetAnnotations()[AnnotationPodMigrationEnabled] == updated.GetAnnotations()[AnnotationPodMigrationEnabled] {
 		return
 	}
 	objects, err := c.workspaceLister.List(labels.Everything())
