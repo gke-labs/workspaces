@@ -138,6 +138,7 @@ spec:
   activityRules:
     - config:
         secondsSinceActive: 14400 # auto pauses the notebook after 4h of inactivity
+        minRunningSeconds: 3600  # ensures the workspace runs for at least 1h after startup/resume before auto-pausing
       match: {}
       effect:
         pauseWorkspace: true
