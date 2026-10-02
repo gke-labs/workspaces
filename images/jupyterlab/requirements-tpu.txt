@@ -9,16 +9,15 @@
 # base-supplied packages by pinning the base image in Dockerfile.fast.tpu; this file
 # cannot do it safely.
 #
-# Note that jax is held a minor version behind the CPU variant (0.10.2 vs 0.11.1).
-# That is what the deployed, working TPU image runs, and it is paired with
-# libtpu 0.0.42.1. Do not raise it to match the CPU file without rebuilding and
-# running a real TPU workload against the result -- the TPU plugin and libtpu are
-# version-locked to jax in a way the CPU build is not.
+# Note that jax is pinned to 0.11.2, which pairs with libtpu 0.0.48.
+# libtpu >= 0.0.48 is required for multi-host torch_tpu distributed training support
+# (enabling SliceBuilder insecure gRPC without ALTS metadata hangs).
 #
 # Pins cover direct dependencies only; transitive dependencies still float.
 
 # Added by this layer (absent from the base image).
-jax[tpu]==0.10.2
+jax[tpu]==0.11.2
+libtpu==0.0.48
 jupyter-server-proxy==4.6.0
 
 # Already present in the base at these exact versions; declared so the dependency is
