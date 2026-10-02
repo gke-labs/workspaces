@@ -30,6 +30,7 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 ### Automated Deployment Scripts
 To streamline the entire installation, use the scripts in this directory:
 - **[`deploy_standalone.sh`](deploy_standalone.sh)**: Automates API enablement, Gateway controller setup, `cert-manager` installation, core image builds, Certificate Manager setup (with automatic `sslip.io` fallback if you don't have a domain), IAP audience discovery, Kubeflow Trainer + Spark Operator installation, tenant RBAC, and GCS Workload Identity IAM bindings.
+- **[`add_user.sh`](add_user.sh)**: Automates enrolling additional users or Google Groups by granting IAP admission and updating tenant and discovery Kubernetes RBAC.
 - **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Cleanly tears down deployed resources.
 
 ---
@@ -1246,6 +1247,24 @@ root certificate. Do not enable `allowUnauthorizedRemoteConnection` to bypass TL
 ---
 
 ## 9. Enrolling Additional Users
+
+### Option 1: Automated Script (Recommended)
+
+You can enroll additional Google accounts or Google Groups automatically using [`add_user.sh`](add_user.sh):
+
+```bash
+# Add one or more individual users
+./providers/gke/add_user.sh colleague@example.com user2@example.com
+
+# Add a Google Group and user to a specific tenant namespace
+./providers/gke/add_user.sh -n "${TENANT_NAMESPACE}" group:ml-team@example.com alice@example.com
+```
+
+The script automatically discovers the GKE IAP backend service from the `gke-access-proxy` service, grants `roles/iap.httpsResourceAccessor`, and idempotently patches the tenant `RoleBinding` (`notebooks-gke-pilot`) and discovery `ClusterRoleBinding` (`notebooks-gke-pilot-discovery`).
+
+---
+
+### Option 2: Manual Procedure
 
 > [!NOTE]
 > `${BACKEND_SERVICE}` below is the name of the GKE-created global backend service.

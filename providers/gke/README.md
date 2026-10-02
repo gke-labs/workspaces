@@ -18,6 +18,7 @@ This directory contains the standalone deployment and access integration for **K
 
 ### Streamlined Automation Scripts
 - **[`deploy_standalone.sh`](deploy_standalone.sh)**: End-to-end deployment script that enables GKE APIs and standard Gateway API, installs `cert-manager`, builds/pushes core images, configures Google Certificate Manager (with automatic `sslip.io` fallback when no domain is provided), discovers the IAP backend audience, deploys Kubeflow Trainer (v2) and Kubeflow Spark Operator, configures tenant RBAC and baseline Pod Security, and sets up GCS Workload Identity IAM bindings.
+- **[`add_user.sh`](add_user.sh)**: Automates enrolling additional users or Google Groups into IAP and updating tenant and discovery Kubernetes RBAC.
 - **[`cleanup_standalone.sh`](cleanup_standalone.sh)**: Tears down deployed tenant workloads, controllers, and optional edge resources.
 
 Browser JupyterLab works out-of-the-box with Google IAP authentication. Optionally, a second `connect.*` endpoint lets the **VS Code app on your laptop** run notebooks against a kernel inside a running workspace, authorised by short-lived Kubernetes-minted tokens; see [Remote Jupyter kernels from desktop VS Code](USER_GUIDE.md#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint). (This is distinct from the `codeserver` WorkspaceKind, which runs VS Code *in the browser*.)
