@@ -120,7 +120,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --workload-metadata=GKE_METADATA \
   --num-nodes=1 \
   --machine-type=e2-standard-4 \
-  --addons=RayOperator `# Optional: Required for Ray cluster` \
+  --addons=HttpLoadBalancing,RayOperator `# Required: HttpLoadBalancing for Gateway API | Optional: RayOperator for Ray cluster` \
   --enable-image-streaming
 ```
 
