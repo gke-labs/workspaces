@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Uploads local .py and .yaml files to a remote Jupyter workspace preserving directory tree structure.
+"""Uploads local files to a remote Jupyter workspace preserving directory tree structure.
 
 Designed for workflows where you develop locally in VS Code and execute against
 a remote Jupyter kernel without needing `kubectl` access. Communicates directly
@@ -25,11 +25,15 @@ Features:
   - Defaults remote destination to the user's home directory (Jupyter root).
   - Preserves directory tree structure (e.g. jobs/train.py -> jobs/train.py).
   - Automatically creates intermediate remote directories.
+  - Uploads all files in directory by default, or filters by extension with `--ext`.
   - Optional `--watch` mode to auto-sync files on save.
 
 Usage:
-    # One-time upload (using full URL with token):
+    # One-time upload (uploads all files in directory):
     python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed
+
+    # Filter by specific extensions (e.g. only python and yaml):
+    python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --ext .py .yaml
 
     # Continuous auto-sync on file save:
     python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --watch
@@ -39,6 +43,8 @@ Usage:
 """
 
 import argparse
+import base64
+import json
 import os
 import sys
 import time
@@ -54,7 +60,8 @@ except ImportError:
     )
     sys.exit(1)
 
-DEFAULT_EXTENSIONS = {".py", ".yaml", ".yml"}
+IGNORE_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", ".pytest_cache", ".mypy_cache"}
+IGNORE_FILES = {".DS_Store"}
 
 
 def parse_jupyter_url(raw_url: str, explicit_token: str | None = None) -> tuple[str, str]:
@@ -135,27 +142,59 @@ def upload_single_file(
     session: requests.Session, base_url: str, local_path: Path, remote_rel_path: str
 ):
     """Upload a single file to Jupyter Server via PUT /api/contents/<path>."""
-    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-
     endpoint = f"{base_url}/api/contents/{remote_rel_path.strip('/')}"
-    payload = {
-        "content": content,
-        "type": "file",
-        "format": "text",
-    }
-    resp = session.put(endpoint, json=payload, timeout=20)
+
+    # For Jupyter notebooks (.ipynb), upload as a notebook model
+    if local_path.suffix.lower() == ".ipynb":
+        try:
+            with open(local_path, "r", encoding="utf-8") as f:
+                content = json.load(f)
+            payload = {
+                "content": content,
+                "type": "notebook",
+                "format": "json",
+            }
+            resp = session.put(endpoint, json=payload, timeout=30)
+            resp.raise_for_status()
+            print(f"  ✓ {remote_rel_path}")
+            return
+        except Exception:
+            # Fall back to standard file upload if notebook parsing or upload fails
+            pass
+
+    # For general files: read bytes and attempt utf-8 text decoding first,
+    # falling back to base64 encoding for binary content (images, binaries, etc.)
+    raw_bytes = local_path.read_bytes()
+    try:
+        content = raw_bytes.decode("utf-8")
+        payload = {
+            "content": content,
+            "type": "file",
+            "format": "text",
+        }
+    except UnicodeDecodeError:
+        payload = {
+            "content": base64.b64encode(raw_bytes).decode("ascii"),
+            "type": "file",
+            "format": "base64",
+        }
+
+    resp = session.put(endpoint, json=payload, timeout=60)
     resp.raise_for_status()
     print(f"  ✓ {remote_rel_path}")
 
 
-def get_target_files(local_dir: Path, extensions: set[str]) -> list[Path]:
-    """Find all files in local_dir matching the target extensions."""
+def get_target_files(local_dir: Path, extensions: set[str] | None = None) -> list[Path]:
+    """Find all files in local_dir matching the target extensions, or all files if extensions is None."""
     target_files = []
-    for root, _, files in os.walk(local_dir):
+    for root, dirs, files in os.walk(local_dir):
+        # Exclude VCS and cache directories
+        dirs[:] = [d for d in sorted(dirs) if d not in IGNORE_DIRS]
         for file in sorted(files):
+            if file in IGNORE_FILES:
+                continue
             p = Path(root) / file
-            if p.suffix.lower() in extensions:
+            if extensions is None or p.suffix.lower() in extensions:
                 target_files.append(p)
     return target_files
 
@@ -165,14 +204,15 @@ def sync_all(
     base_url: str,
     local_dir: Path,
     remote_base: str,
-    extensions: set[str],
+    extensions: set[str] | None = None,
 ) -> int:
-    """Sync all matching files from local_dir to remote_base maintaining directory tree."""
+    """Sync matching files from local_dir to remote_base maintaining directory tree."""
     created_dirs: set[str] = set()
     files = get_target_files(local_dir, extensions)
 
     destination_desc = f"~/{remote_base.strip('/')}" if remote_base.strip("/") else "~ (home directory)"
-    print(f"\nUploading {len(files)} file(s) from '{local_dir}' to {destination_desc}:")
+    ext_desc = f" matching ({', '.join(sorted(extensions))})" if extensions else ""
+    print(f"\nUploading {len(files)} file(s){ext_desc} from '{local_dir}' to {destination_desc}:")
 
     count = 0
     for local_path in files:
@@ -201,7 +241,7 @@ def watch_and_sync(
     base_url: str,
     local_dir: Path,
     remote_base: str,
-    extensions: set[str],
+    extensions: set[str] | None = None,
     interval: float = 1.0,
 ):
     """Continuously monitor local_dir and upload files on change."""
@@ -211,8 +251,8 @@ def watch_and_sync(
     # Perform initial sync
     sync_all(session, base_url, local_dir, remote_base, extensions)
 
-    ext_list = ", ".join(sorted(extensions))
-    print(f"Watching '{local_dir}' for changes ({ext_list})... (Press Ctrl+C to stop)")
+    filter_desc = f"({', '.join(sorted(extensions))})" if extensions else "(all files)"
+    print(f"Watching '{local_dir}' for changes {filter_desc}... (Press Ctrl+C to stop)")
 
     for p in get_target_files(local_dir, extensions):
         try:
@@ -266,7 +306,7 @@ def resolve_default_dir() -> Path:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Upload .py and .yaml files to remote Jupyter server preserving tree structure."
+        description="Upload local files to remote Jupyter server preserving directory structure."
     )
     parser.add_argument(
         "url",
@@ -298,8 +338,8 @@ def main():
     parser.add_argument(
         "--ext",
         nargs="+",
-        default=[".py", ".yaml", ".yml"],
-        help="File extensions to upload (default: .py .yaml .yml).",
+        default=None,
+        help="Optional file extension(s) to upload (e.g. --ext .py .yaml). By default, uploads all files in the directory.",
     )
     parser.add_argument(
         "--watch",
@@ -333,7 +373,9 @@ def main():
     if not local_dir.is_dir():
         parser.error(f"Local directory does not exist: {local_dir}")
 
-    extensions = {ext if ext.startswith(".") else f".{ext}".lower() for ext in args.ext}
+    extensions = None
+    if args.ext:
+        extensions = {ext.lower() if ext.startswith(".") else f".{ext.lower()}" for ext in args.ext}
 
     print(f"Connecting to Jupyter: {base_url}")
     session = create_session(base_url, token)

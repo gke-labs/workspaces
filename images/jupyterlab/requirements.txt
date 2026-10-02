@@ -28,3 +28,6 @@ marimo-jupyter-extension
 matplotlib
 numpy
 pandas
+
+# Other helpful packages
+jupyter-ai

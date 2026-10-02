@@ -31,7 +31,7 @@ Plus shared utilities and building blocks:
 | Path | Purpose |
 | :--- | :--- |
 | [**compute-classes**](compute-classes/) | GKE ComputeClasses that let the cluster auto-create GPU and TPU machines on demand. Needed by the GPU and TPU examples. |
-| [**upload_to_jupyter.py**](upload_to_jupyter.py) | CLI utility to upload local `.py` and `.yaml` files into a remote Jupyter workspace over HTTP, preserving directory structure (no `kubectl` needed). |
+| [**upload_to_jupyter.py**](upload_to_jupyter.py) | CLI utility to upload local files into a remote Jupyter workspace over HTTP, preserving directory structure (no `kubectl` needed). |
 
 ---
 
@@ -120,6 +120,7 @@ gcloud container clusters create "${CLUSTER_NAME}" \
   --workload-metadata=GKE_METADATA \
   --num-nodes=1 \
   --machine-type=e2-standard-4 \
+  --addons=RayOperator `# Optional: Required for Ray cluster` \
   --enable-image-streaming
 ```
 
@@ -387,7 +388,7 @@ for that one, clone or upload the whole repository.
 
 #### Tip: Uploading & syncing files from local VS Code ([upload_to_jupyter.py](upload_to_jupyter.py))
 
-If you develop locally in VS Code and connect the Jupyter extension to a remote workspace kernel, you do not need `kubectl` access or manual file uploads to keep library files in sync. Use [upload_to_jupyter.py](upload_to_jupyter.py) to push all `.py` and `.yaml` files into your remote workspace over HTTP while preserving the folder hierarchy:
+If you develop locally in VS Code and connect the Jupyter extension to a remote workspace kernel, you do not need `kubectl` access or manual file uploads to keep library files in sync. Use [upload_to_jupyter.py](upload_to_jupyter.py) to push all files (or specific extensions with `--ext`) into your remote workspace over HTTP while preserving the folder hierarchy:
 
 ```bash
 # One-time sync (token and base URL are automatically parsed from your connection link):

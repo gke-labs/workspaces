@@ -43,3 +43,6 @@ pandas
 portpicker
 scikit-learn
 tensorboard
+
+# Other helpful packages
+jupyter-ai
