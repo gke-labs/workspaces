@@ -171,3 +171,6 @@ spec:
   ingress:
     - from:
         - podSelector: {}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system

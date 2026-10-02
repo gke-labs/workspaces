@@ -42,10 +42,6 @@ from kubeflow.trainer.options import (
     TrainingRuntimeSpecPatch,
 )
 
-DEFAULT_TPU_IMAGE = (
-    "us-west1-docker.pkg.dev/sizhang-gke-dev/kubeflow-repo/jupyterlab:latest-tpu"
-)
-
 
 def get_current_namespace() -> str:
     """Discovers the active Kubernetes namespace from environment or serviceaccount."""
@@ -68,13 +64,13 @@ def _init_k8s_clients():
 
 
 def submit_multihost_training(
+    image: str,
     src_dir: Union[str, pathlib.Path] = "src",
     main_script: str = "train.py",
     num_nodes: int = 2,
     tpus_per_node: int = 4,
     compute_class: str = "tpu-v5-8-multi-host",
     torch_tpu_topology: str = "2,4,1",
-    image: Optional[str] = None,
     namespace: Optional[str] = None,
     job_name: Optional[str] = None,
     extra_env: Optional[Dict[str, str]] = None,
@@ -82,13 +78,13 @@ def submit_multihost_training(
     """Packages local training code and submits a multi-host TrainJob on GKE.
 
     Args:
+        image: Container image containing PyTorch and TorchTPU.
         src_dir: Directory containing user training scripts and modules.
         main_script: Entrypoint script relative to src_dir (e.g. "train.py").
         num_nodes: Number of TPU host nodes in the slice (e.g. 2).
         tpus_per_node: Physical TPU chips per host node (e.g. 4).
         compute_class: GKE TPU ComputeClass (e.g. "tpu-v5-8-multi-host").
         torch_tpu_topology: TorchTPU slice topology string (e.g. "2,4,1").
-        image: Container image containing PyTorch and TorchTPU.
         namespace: Target Kubernetes namespace.
         job_name: Optional custom job name (defaults to timestamped name).
         extra_env: Optional dictionary of additional environment variables.
@@ -96,9 +92,10 @@ def submit_multihost_training(
     Returns:
         The submitted TrainJob name.
     """
+    if not image:
+        raise ValueError("An 'image' must be provided for the TPU training container.")
     namespace = namespace or get_current_namespace()
     job_name = job_name or f"torch-tpu-multihost-{int(time.time())}"
-    image = image or os.environ.get("TORCH_TPU_IMAGE", DEFAULT_TPU_IMAGE)
     core_v1, _ = _init_k8s_clients()
 
     # 1. Package source code directory into a Kubernetes ConfigMap
@@ -248,7 +245,7 @@ def submit_multihost_training(
 def wait_for_job_pods(
     job_name: str,
     num_nodes: int = 2,
-    timeout: int = 360,
+    timeout: int = 600,
     namespace: Optional[str] = None,
 ) -> bool:
     """Monitors worker Pods until all reach Running or Succeeded status."""

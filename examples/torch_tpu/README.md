@@ -331,7 +331,10 @@ Inside [`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb), multi-host dist
    ```python
    from tpu_trainer import submit_multihost_training, stream_job_logs, delete_training_job
 
+   image = f"{os.environ['REGISTRY']}/jupyterlab:latest-tpu"
+
    job_name = submit_multihost_training(
+       image=image,
        src_dir="src",
        main_script="train.py",
        num_nodes=2,
