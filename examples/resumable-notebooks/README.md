@@ -27,6 +27,16 @@ fresh machine in seconds.
 | **Weekly GPU billed hours** | **168 hours** (70%+ idle waste) | **~40 hours** (active working hours only) |
 | **Morning ramp-up time** | 15–45 min re-executing notebooks | **~4–12 seconds** instant resume |
 
+---
+
+## Demo
+
+![Stateful Resumable GPU Notebooks Demo](demo_gpu_resumable_2560.gif)
+
+*Full-resolution video: [`demo_gpu_resumable_notebooks.mp4`](demo_gpu_resumable_notebooks.mp4)*
+
+---
+
 Two self-contained verification notebooks are provided:
 
 | Notebook | What it proves | Hardware |
