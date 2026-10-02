@@ -15,9 +15,9 @@ This example demonstrates interactive single-device and multi-core neural networ
 | Property | Details |
 | :--- | :--- |
 | **Model** | 3-layer MLP (`784 -> 256 -> 128 -> 10`) implemented in PyTorch (`nn.Module`) with `bfloat16` precision |
-| **Hardware** | **1 TPU**: TPU v5 1x1 (`tpu_1`, 1 chip) or **4 TPU**: TPU v5 2x2 (`tpu_4`, 4 chips) on a single-host TPU slice |
-| **Parallelism** | Interactive execution via `torch.device("tpu")`; multi-core scaling via `DistributedDataParallel` (DDP) with the `tpu_dist` collective backend |
-| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)) and dedicated distributed orchestrator notebook ([`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)) |
+| **Hardware** | **1 TPU**: TPU v5 1x1 (`tpu_1`, 1 chip), **4 TPU**: TPU v5 2x2 (`tpu_4`, 4 chips) on a single host, or **8 TPU**: TPU v5 2x4 multi-host (2 hosts × 4 chips) |
+| **Parallelism** | Interactive execution via `torch.device("tpu")`; multi-core and multi-host scaling via `DistributedDataParallel` (DDP) with the `tpu_dist` collective backend |
+| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)), single-host distributed orchestrator ([`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)), and multi-host distributed orchestrator ([`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb)) |
 
 > [!TIP]
 > **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClasses, and `jupyterlab` WorkspaceKind are already configured. Jump directly to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
@@ -317,8 +317,32 @@ try:
     process.wait()
 except KeyboardInterrupt:
     process.terminate()
-    tpu_lock.clear_tpu_locks(verbose=False)
 ```
+
+### 8. Multi-Host Execution with Kubeflow Trainer (`torch_tpu_multihost.ipynb`)
+Inside [`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb), multi-host distributed training is launched across a multi-host TPU slice (e.g. 2 hosts × 4 chips = 8 TPU chips) using Kubeflow `TrainJob`:
+1. **GKE Environment Injection**: On GKE, GKE Common Webhooks (GCW) injects `TPU_WORKER_HOSTNAMES` across all worker pods of the Indexed Job / JobSet.
+2. **SliceBuilder gRPC & Libtpu Version**:
+   - In `libtpu >= 0.0.48` (e.g. `libtpu==0.0.48`), TorchTPU automatically activates `--slicebuilder_use_insecure_grpc=true` and rewrites worker endpoints, allowing SliceBuilder mesh discovery to communicate directly between pods without ALTS metadata server dependencies.
+3. **Multi-File Library Packaging via ConfigMap**: Rather than bundling code into a monolithic script or rebuilding container images, training libraries are organized into modular files (`src/models.py`, `src/dataset.py`, `src/train.py`). The launcher maps all Python modules into a single Kubernetes `ConfigMap`:
+   - Kubernetes projects each key into `/workspace` (`/workspace/models.py`, `/workspace/dataset.py`, `/workspace/train.py`).
+   - `train.py` seamlessly imports `from models import MLPClassifier` and `from dataset import get_distributed_dataloader` via `PYTHONPATH="/workspace"`.
+4. **High-Level Python Launcher ([`tpu_trainer.py`](tpu_trainer.py))**: All Kubernetes plumbing (ConfigMap creation, `CustomTrainerContainer`, `RuntimePatch` options for GKE nodeSelector and tolerations, and environment bootstrap) is abstracted into a clean function call:
+   ```python
+   from tpu_trainer import submit_multihost_training, stream_job_logs, delete_training_job
+
+   job_name = submit_multihost_training(
+       src_dir="src",
+       main_script="train.py",
+       num_nodes=2,
+       tpus_per_node=4,
+       compute_class="tpu-v5-8-multi-host",
+       torch_tpu_topology="2,4,1",
+   )
+   stream_job_logs(job_name, num_nodes=2)
+   delete_training_job(job_name)
+   ```
+5. **Multi-Host DDP Execution**: `torchrun` launches 4 local worker processes per host (`--nproc_per_node=4`), initializing `dist.init_process_group(backend="tpu_dist")` and training synchronously across all 8 TPU cores over the Inter-Chip Interconnect (ICI).
 
 ---
 

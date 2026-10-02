@@ -1,6 +1,7 @@
 # Kubeflow packages (TPU)
 google-cloud-storage
-jax[tpu]
+jax[tpu]==0.11.2
+libtpu==0.0.48
 keyrings.google-artifactregistry-auth
 kfp==2.16.1
 kubeflow[spark]==0.4.0
