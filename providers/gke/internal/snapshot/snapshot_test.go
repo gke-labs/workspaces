@@ -48,6 +48,7 @@ func newTestController(t *testing.T, objects ...runtime.Object) (*Controller, *k
 		podSnapshotPolicyGVR:        "PodSnapshotPolicyList",
 		podSnapshotManualTriggerGVR: "PodSnapshotManualTriggerList",
 		podSnapshotGVR:              "PodSnapshotList",
+		podMigrationGVR:             "PodMigrationList",
 	}
 	var coreObjects []runtime.Object
 	var dynamicObjects []runtime.Object
@@ -667,4 +668,208 @@ func findPatch(actions []clienttesting.Action, gvr schema.GroupVersionResource) 
 		return decoded
 	}
 	return nil
+}
+
+func TestMutatePodInjectsPodMigrationLabelWhenEnabled(t *testing.T) {
+	t.Run("migration enabled on Workspace injects pod-migration.gke.io/enabled label", func(t *testing.T) {
+		controller, _, _ := newTestController(t, workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false))
+
+		pod := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ws-mig-0",
+				Namespace: testNamespace,
+				Labels:    map[string]string{WorkspaceLabel: "ws-mig"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "jupyter:latest"}}},
+		}
+		raw, _ := json.Marshal(pod)
+		response := controller.mutatePod(context.Background(), &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: testNamespace,
+			Object:    runtime.RawExtension{Raw: raw},
+		})
+		if !response.Allowed || len(response.Patch) == 0 {
+			t.Fatalf("expected pod mutation patch, got allowed=%v patch=%s", response.Allowed, response.Patch)
+		}
+
+		var operations []jsonPatchOp
+		if err := json.Unmarshal(response.Patch, &operations); err != nil {
+			t.Fatalf("failed to decode patch: %v", err)
+		}
+		foundLabel := false
+		for _, op := range operations {
+			if op.Path == "/metadata/labels" {
+				labels, _ := op.Value.(map[string]any)
+				if labels[AnnotationPodMigrationEnabled] == "true" && labels[WorkspaceLabel] == "ws-mig" {
+					foundLabel = true
+				}
+			}
+		}
+		if !foundLabel {
+			t.Fatalf("expected /metadata/labels patch with %s=true, got %+v", AnnotationPodMigrationEnabled, operations)
+		}
+	})
+
+	t.Run("default snapshot-only Workspace does not inject migration label", func(t *testing.T) {
+		controller, _, _ := newTestController(t, workspace("ws-snap", map[string]any{
+			AnnotationEnabled: "true",
+		}, false))
+
+		pod := corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ws-snap-0",
+				Namespace: testNamespace,
+				Labels:    map[string]string{WorkspaceLabel: "ws-snap"},
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "jupyter:latest"}}},
+		}
+		raw, _ := json.Marshal(pod)
+		response := controller.mutatePod(context.Background(), &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: testNamespace,
+			Object:    runtime.RawExtension{Raw: raw},
+		})
+		var operations []jsonPatchOp
+		_ = json.Unmarshal(response.Patch, &operations)
+		for _, op := range operations {
+			if op.Path == "/metadata/labels" {
+				t.Fatalf("unexpected /metadata/labels patch on default snapshot-only Workspace: %+v", op)
+			}
+		}
+	})
+}
+
+func TestReconcileMigrationEnabledWorkspaceUsesSingletonPodMigration(t *testing.T) {
+	key := types.NamespacedName{Namespace: testNamespace, Name: "ws-mig"}
+
+	t.Run("creates kubeflow-pod-migration when none exists and skips per-Workspace policy", func(t *testing.T) {
+		ws := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		controller, _, dynamicClient := newTestController(t, ws, pod)
+
+		if _, err := controller.reconcileWorkspace(context.Background(), key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		pm, err := dynamicClient.Resource(podMigrationGVR).Namespace(testNamespace).
+			Get(context.Background(), DefaultPodMigrationName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("expected singleton PodMigration %q to be created: %v", DefaultPodMigrationName, err)
+		}
+		location, _, _ := unstructured.NestedString(pm.Object, "spec", "storage", "location")
+		if location != "gs://test-bucket/kubeflow-notebooks" {
+			t.Fatalf("unexpected PodMigration storage location %q", location)
+		}
+		matchLabels, _, _ := unstructured.NestedStringMap(pm.Object, "spec", "selector", "matchLabels")
+		if matchLabels[AnnotationPodMigrationEnabled] != "true" {
+			t.Fatalf("unexpected PodMigration selector %v", matchLabels)
+		}
+
+		if _, err := dynamicClient.Resource(podSnapshotPolicyGVR).Namespace(testNamespace).
+			Get(context.Background(), policyNameFor("ws-mig"), metav1.GetOptions{}); err == nil {
+			t.Fatal("per-Workspace PodSnapshotPolicy must not be created when PodMigration is enabled")
+		}
+	})
+
+	t.Run("reuses existing singleton PodMigration in namespace and retires legacy policy", func(t *testing.T) {
+		ws := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		existingPM := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podmigrationGroupVersion,
+			"kind":       "PodMigration",
+			"metadata":   map[string]any{"name": "pm-team-shared", "namespace": testNamespace},
+		}}
+		legacyPolicy := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podsnapshotGroupVersion,
+			"kind":       "PodSnapshotPolicy",
+			"metadata":   map[string]any{"name": policyNameFor("ws-mig"), "namespace": testNamespace},
+		}}
+		controller, _, dynamicClient := newTestController(t, ws, pod, existingPM, legacyPolicy)
+
+		if _, err := controller.reconcileWorkspace(context.Background(), key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		if _, err := dynamicClient.Resource(podMigrationGVR).Namespace(testNamespace).
+			Get(context.Background(), DefaultPodMigrationName, metav1.GetOptions{}); err == nil {
+			t.Fatal("must not create a second PodMigration when one already exists in the namespace")
+		}
+		assertDeleted(t, dynamicClient.Actions(), podSnapshotPolicyGVR, true)
+	})
+
+	t.Run("deletes snapshots when paused migration-enabled Workspace is deleted", func(t *testing.T) {
+		existingPM := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podmigrationGroupVersion,
+			"kind":       "PodMigration",
+			"metadata":   map[string]any{"name": DefaultPodMigrationName, "namespace": testNamespace},
+		}}
+		snap := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podsnapshotGroupVersion,
+			"kind":       "PodSnapshot",
+			"metadata": map[string]any{
+				"name":      "snap-mig-1",
+				"namespace": testNamespace,
+				"labels":    map[string]any{LabelSnapshotTriggeredBy: triggerNameFor("ws-mig")},
+			},
+		}}
+		controller, _, dynamicClient := newTestController(t, existingPM, snap)
+
+		requeue, err := controller.reconcileWorkspace(context.Background(), key)
+		if err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+		if requeue != 0 {
+			t.Fatalf("expected requeue=0, got %v", requeue)
+		}
+		assertDeleted(t, dynamicClient.Actions(), podSnapshotGVR, true)
+		assertDeleted(t, dynamicClient.Actions(), podMigrationGVR, false)
+	})
+
+	t.Run("honors custom PodSnapshotStorageConfig from WorkspaceKind storage-config annotation", func(t *testing.T) {
+		kind := workspaceKindWithPodConfigs("jupyterlab", map[string]any{
+			AnnotationPodMigrationEnabled: "true",
+			AnnotationStorageConfig:       "custom-gcs-config",
+		}, map[string]map[string]any{
+			"small_cpu": {"cpu": "2", "memory": "4Gi"},
+		})
+		customStorage := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podsnapshotGroupVersion,
+			"kind":       "PodSnapshotStorageConfig",
+			"metadata":   map[string]any{"name": "custom-gcs-config"},
+			"spec": map[string]any{
+				"snapshotStorageConfig": map[string]any{
+					"gcs": map[string]any{
+						"bucket": "custom-team-bucket",
+						"path":   "team-a/checkpoints",
+					},
+				},
+			},
+		}}
+		ws := workspaceWithPodConfig("ws-mig", nil, "small_cpu")
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		controller, _, dynamicClient := newTestController(t, kind, customStorage, ws, pod)
+
+		if _, err := controller.reconcileWorkspace(context.Background(), key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+
+		pm, err := dynamicClient.Resource(podMigrationGVR).Namespace(testNamespace).
+			Get(context.Background(), DefaultPodMigrationName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("expected singleton PodMigration %q to be created: %v", DefaultPodMigrationName, err)
+		}
+		location, _, _ := unstructured.NestedString(pm.Object, "spec", "storage", "location")
+		if location != "gs://custom-team-bucket/team-a/checkpoints" {
+			t.Fatalf("storage location = %q, want %q", location, "gs://custom-team-bucket/team-a/checkpoints")
+		}
+	})
 }
