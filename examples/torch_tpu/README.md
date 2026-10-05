@@ -321,13 +321,15 @@ except KeyboardInterrupt:
 
 ### 8. Multi-Host Execution with Kubeflow Trainer (`torch_tpu_multihost.ipynb`)
 Inside [`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb), multi-host distributed training is launched across a multi-host TPU slice (e.g. 2 hosts × 4 chips = 8 TPU chips) using Kubeflow `TrainJob`:
-1. **GKE Environment Injection**: On GKE, GKE Common Webhooks (GCW) injects `TPU_WORKER_HOSTNAMES` across all worker pods of the Indexed Job / JobSet.
+1. **GKE Environment Injection & `_maybe_init_distributed_on_gke()`**:
+   - On GKE, GKE Common Webhooks (GCW) injects `TPU_WORKER_HOSTNAMES`, `TPU_HOST_BOUNDS` (e.g. `1,2,1`), and `TPU_CHIPS_PER_HOST_BOUNDS` (e.g. `2,2,1`) across all worker pods of the Indexed Job / JobSet.
+   - Inside each `torchrun` worker process, `_maybe_init_distributed_on_gke()` combines the GKE host/chip bounds with `WORLD_SIZE`, `LOCAL_RANK`, and `RANK` to configure `TORCH_TPU_TOPOLOGY` (e.g. `2,4,1`), `TORCH_TPU_SLICEBUILDER_ADDRESSES`, `TPU_HOST_BOUNDS`, `TPU_CHIPS_PER_HOST_BOUNDS=1,1,1`, `TPU_VISIBLE_CHIPS`, `CLOUD_TPU_TASK_ID`, `TPU_PROCESS_PORT`, and `TPU_PROCESS_ADDRESSES` (including dual-core `tpu7x` support).
 2. **SliceBuilder gRPC & Libtpu Version**:
    - In `libtpu >= 0.0.48` (e.g. `libtpu==0.0.48`), TorchTPU automatically activates `--slicebuilder_use_insecure_grpc=true` and rewrites worker endpoints, allowing SliceBuilder mesh discovery to communicate directly between pods without ALTS metadata server dependencies.
 3. **Multi-File Library Packaging via ConfigMap**: Rather than bundling code into a monolithic script or rebuilding container images, training libraries are organized into modular files (`src/models.py`, `src/dataset.py`, `src/train.py`). The launcher maps all Python modules into a single Kubernetes `ConfigMap`:
    - Kubernetes projects each key into `/workspace` (`/workspace/models.py`, `/workspace/dataset.py`, `/workspace/train.py`).
    - `train.py` seamlessly imports `from models import MLPClassifier` and `from dataset import get_distributed_dataloader` via `PYTHONPATH="/workspace"`.
-4. **High-Level Python Launcher ([`tpu_trainer.py`](tpu_trainer.py))**: All Kubernetes plumbing (ConfigMap creation, `CustomTrainerContainer`, `RuntimePatch` options for GKE nodeSelector and tolerations, and environment bootstrap) is abstracted into a clean function call:
+4. **High-Level Python Launcher ([`tpu_trainer.py`](tpu_trainer.py))**: All Kubernetes plumbing (ConfigMap creation, `CustomTrainerContainer`, `RuntimePatch` options for GKE nodeSelector and tolerations, and environment/topology bootstrap) is abstracted into a clean function call:
    ```python
    from tpu_trainer import submit_multihost_training, stream_job_logs, delete_training_job
 
@@ -340,7 +342,6 @@ Inside [`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb), multi-host dist
        num_nodes=2,
        tpus_per_node=4,
        compute_class="tpu-v5-8-multi-host",
-       torch_tpu_topology="2,4,1",
    )
    stream_job_logs(job_name, num_nodes=2)
    delete_training_job(job_name)

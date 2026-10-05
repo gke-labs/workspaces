@@ -398,7 +398,7 @@ python3 examples/upload_to_jupyter.py "https://<connect-host>/workspace/connect/
 python3 examples/upload_to_jupyter.py "https://<connect-host>/workspace/connect/.../?token=..." --dir examples/distributed --watch
 ```
 
-By default, files are placed in the remote user's home directory (`~`, matching the Jupyter root), so `jobs/` and manifests land right where the notebooks search for them.
+By default, files are placed in the remote user's home directory (`~`, matching the Jupyter root), so `jobs/` and manifests land right where the notebooks search for them. Notebook (`.ipynb`) files are seeded once (skipped if they already exist on the remote server and ignored during `--watch`) so running notebooks never have their outputs overwritten; pass `--overwrite-notebooks` to force-replace them.
 
 ---
 
