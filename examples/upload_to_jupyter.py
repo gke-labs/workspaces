@@ -26,16 +26,27 @@ Features:
   - Preserves directory tree structure (e.g. jobs/train.py -> jobs/train.py).
   - Automatically creates intermediate remote directories.
   - Uploads all files in directory by default, or filters by extension with `--ext`.
+  - Protects running remote notebooks: `.ipynb` files are seeded once (skipped if they
+    already exist on the remote server) and ignored during `--watch` unless
+    `--overwrite-notebooks` is specified. This protection applies even when `.ipynb`
+    is explicitly included in `--ext` (e.g. `--ext .py .ipynb`); combine with
+    `--overwrite-notebooks` to force-overwrite or watch `.ipynb` files.
   - Optional `--watch` mode to auto-sync files on save.
 
 Usage:
-    # One-time upload (uploads all files in directory):
+    # One-time upload (uploads all files; skips .ipynb that already exist on remote):
     python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed
+
+    # Force overwrite existing remote .ipynb files:
+    python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --overwrite-notebooks
 
     # Filter by specific extensions (e.g. only python and yaml):
     python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --ext .py .yaml
 
-    # Continuous auto-sync on file save:
+    # Filter including .ipynb (still seeds .ipynb once and skips in --watch unless --overwrite-notebooks is set):
+    python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --ext .py .ipynb --overwrite-notebooks
+
+    # Continuous auto-sync on file save (skips .ipynb changes by default):
     python examples/upload_to_jupyter.py "https://<host>/workspace/connect/.../?token=<token>" --dir examples/distributed --watch
 
     # Custom local directory or target remote subdirectory:
@@ -138,14 +149,41 @@ def ensure_remote_dir(
         created_dirs.add(clean_dir)
 
 
+def remote_file_exists(
+    session: requests.Session, base_url: str, remote_rel_path: str
+) -> bool:
+    """Check if a file already exists on the remote Jupyter Server (metadata-only GET)."""
+    endpoint = f"{base_url}/api/contents/{remote_rel_path.strip('/')}"
+    try:
+        resp = session.get(endpoint, params={"content": "0"}, timeout=15)
+        return resp.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
+
 def upload_single_file(
-    session: requests.Session, base_url: str, local_path: Path, remote_rel_path: str
-):
-    """Upload a single file to Jupyter Server via PUT /api/contents/<path>."""
+    session: requests.Session,
+    base_url: str,
+    local_path: Path,
+    remote_rel_path: str,
+    overwrite_notebooks: bool = False,
+) -> bool:
+    """Upload a single file to Jupyter Server via PUT /api/contents/<path>.
+
+    Returns True if uploaded, or False if skipped.
+    """
     endpoint = f"{base_url}/api/contents/{remote_rel_path.strip('/')}"
 
-    # For Jupyter notebooks (.ipynb), upload as a notebook model
+    # For Jupyter notebooks (.ipynb), seed once by default so running/executed
+    # remote notebooks do not have their outputs overwritten.
     if local_path.suffix.lower() == ".ipynb":
+        if not overwrite_notebooks and remote_file_exists(session, base_url, remote_rel_path):
+            print(
+                f"  ↷ {remote_rel_path} (skipped: already exists on remote; "
+                "use --overwrite-notebooks to replace)"
+            )
+            return False
+
         try:
             with open(local_path, "r", encoding="utf-8") as f:
                 content = json.load(f)
@@ -157,7 +195,7 @@ def upload_single_file(
             resp = session.put(endpoint, json=payload, timeout=30)
             resp.raise_for_status()
             print(f"  ✓ {remote_rel_path}")
-            return
+            return True
         except Exception:
             # Fall back to standard file upload if notebook parsing or upload fails
             pass
@@ -182,6 +220,7 @@ def upload_single_file(
     resp = session.put(endpoint, json=payload, timeout=60)
     resp.raise_for_status()
     print(f"  ✓ {remote_rel_path}")
+    return True
 
 
 def get_target_files(local_dir: Path, extensions: set[str] | None = None) -> list[Path]:
@@ -205,6 +244,7 @@ def sync_all(
     local_dir: Path,
     remote_base: str,
     extensions: set[str] | None = None,
+    overwrite_notebooks: bool = False,
 ) -> int:
     """Sync matching files from local_dir to remote_base maintaining directory tree."""
     created_dirs: set[str] = set()
@@ -215,6 +255,7 @@ def sync_all(
     print(f"\nUploading {len(files)} file(s){ext_desc} from '{local_dir}' to {destination_desc}:")
 
     count = 0
+    skipped = 0
     for local_path in files:
         rel_path = local_path.relative_to(local_dir).as_posix()
         if remote_base.strip("/"):
@@ -227,12 +268,27 @@ def sync_all(
             ensure_remote_dir(session, base_url, remote_parent_dir, created_dirs)
 
         try:
-            upload_single_file(session, base_url, local_path, remote_rel_path)
-            count += 1
+            uploaded = upload_single_file(
+                session,
+                base_url,
+                local_path,
+                remote_rel_path,
+                overwrite_notebooks=overwrite_notebooks,
+            )
+            if uploaded:
+                count += 1
+            else:
+                skipped += 1
         except Exception as e:
             print(f"  ✗ {remote_rel_path}: {e}", file=sys.stderr)
 
-    print(f"Successfully uploaded {count}/{len(files)} files.\n")
+    if skipped:
+        print(
+            f"Successfully uploaded {count}/{len(files)} files "
+            f"({skipped} existing notebook(s) skipped).\n"
+        )
+    else:
+        print(f"Successfully uploaded {count}/{len(files)} files.\n")
     return count
 
 
@@ -243,18 +299,46 @@ def watch_and_sync(
     remote_base: str,
     extensions: set[str] | None = None,
     interval: float = 1.0,
+    overwrite_notebooks: bool = False,
 ):
-    """Continuously monitor local_dir and upload files on change."""
+    """Continuously monitor local_dir and upload files on change.
+
+    Even if `.ipynb` is included in `extensions`, `.ipynb` files are only seeded
+    once during the initial sync and ignored in the watch loop unless
+    `overwrite_notebooks=True`.
+    """
     created_dirs: set[str] = set()
     mtimes: dict[Path, float] = {}
 
-    # Perform initial sync
-    sync_all(session, base_url, local_dir, remote_base, extensions)
+    # Perform initial sync (seeds missing .ipynb files once; skips existing ones unless overwrite_notebooks)
+    sync_all(
+        session,
+        base_url,
+        local_dir,
+        remote_base,
+        extensions,
+        overwrite_notebooks=overwrite_notebooks,
+    )
 
-    filter_desc = f"({', '.join(sorted(extensions))})" if extensions else "(all files)"
+    if extensions:
+        if ".ipynb" in extensions and not overwrite_notebooks:
+            print(
+                "Note: '.ipynb' in --ext was seeded once above and is excluded from "
+                "--watch unless --overwrite-notebooks is set."
+            )
+        effective_exts = extensions if overwrite_notebooks else (extensions - {".ipynb"})
+        filter_desc = (
+            f"({', '.join(sorted(effective_exts))})"
+            if effective_exts
+            else "(none: .ipynb excluded unless --overwrite-notebooks is set)"
+        )
+    else:
+        filter_desc = "(all files)" if overwrite_notebooks else "(all files, excluding .ipynb)"
     print(f"Watching '{local_dir}' for changes {filter_desc}... (Press Ctrl+C to stop)")
 
     for p in get_target_files(local_dir, extensions):
+        if not overwrite_notebooks and p.suffix.lower() == ".ipynb":
+            continue
         try:
             mtimes[p] = p.stat().st_mtime
         except OSError:
@@ -265,6 +349,8 @@ def watch_and_sync(
             time.sleep(interval)
             current_files = get_target_files(local_dir, extensions)
             for local_path in current_files:
+                if not overwrite_notebooks and local_path.suffix.lower() == ".ipynb":
+                    continue
                 try:
                     mtime = local_path.stat().st_mtime
                 except OSError:
@@ -284,7 +370,13 @@ def watch_and_sync(
 
                     print(f"Change detected: {rel_path}")
                     try:
-                        upload_single_file(session, base_url, local_path, remote_rel_path)
+                        upload_single_file(
+                            session,
+                            base_url,
+                            local_path,
+                            remote_rel_path,
+                            overwrite_notebooks=overwrite_notebooks,
+                        )
                     except Exception as e:
                         print(f"  ✗ Failed to upload {remote_rel_path}: {e}", file=sys.stderr)
         except KeyboardInterrupt:
@@ -339,12 +431,26 @@ def main():
         "--ext",
         nargs="+",
         default=None,
-        help="Optional file extension(s) to upload (e.g. --ext .py .yaml). By default, uploads all files in the directory.",
+        help=(
+            "Optional file extension(s) to upload (e.g. --ext .py .yaml). By default, uploads "
+            "all files in the directory. If .ipynb is included in --ext, .ipynb files are still "
+            "seeded once (skipped if already on remote) and excluded from --watch unless "
+            "--overwrite-notebooks is also passed."
+        ),
+    )
+    parser.add_argument(
+        "--overwrite-notebooks",
+        action="store_true",
+        help=(
+            "Overwrite existing .ipynb files on the remote server and include .ipynb "
+            "in --watch mode (by default, .ipynb files are uploaded only if missing "
+            "on remote and skipped during --watch to avoid overwriting running notebook results)."
+        ),
     )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="Watch directory and auto-sync modified files on save.",
+        help="Watch directory and auto-sync modified files on save (skips .ipynb unless --overwrite-notebooks is set).",
     )
     parser.add_argument(
         "--poll-interval",
@@ -388,6 +494,7 @@ def main():
             remote_base=args.remote_dir,
             extensions=extensions,
             interval=args.poll_interval,
+            overwrite_notebooks=args.overwrite_notebooks,
         )
     else:
         sync_all(
@@ -396,6 +503,7 @@ def main():
             local_dir=local_dir,
             remote_base=args.remote_dir,
             extensions=extensions,
+            overwrite_notebooks=args.overwrite_notebooks,
         )
 
 

@@ -491,7 +491,7 @@ Run the notebook directly from your local machine while executing against the re
      ```bash
      python3 examples/upload_to_jupyter.py "<copied-connection-url>" --dir examples/distributed --watch
      ```
-   - Files are placed in the remote user's home directory (`~`, matching Jupyter's root), where the notebook discovers them automatically.
+   - Files are placed in the remote user's home directory (`~`, matching Jupyter's root), where the notebook discovers them automatically. Existing remote `.ipynb` files are skipped by default (and ignored during `--watch`) so running notebooks never lose their outputs; pass `--overwrite-notebooks` to replace them.
 
 4. **Connect to the remote kernel in VS Code**:
    - In the upper right corner of the notebook editor in VS Code, click **Select Kernel** (or the current kernel indicator).
