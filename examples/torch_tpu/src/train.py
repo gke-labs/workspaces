@@ -15,6 +15,8 @@
 
 """Multi-host distributed PyTorch DDP training entrypoint for TorchTPU."""
 
+import functools
+import logging
 import os
 import time
 import torch
@@ -33,9 +35,109 @@ try:
 except ImportError:
     pass
 
+logger = logging.getLogger(__name__)
+
+
+def _maybe_init_distributed_on_gke(
+    slicebuilder_first_worker_port: int = 10000,
+    environ: dict[str, str] | None = None,
+) -> bool:
+    """Initializes environment variables for distributed TPU training on GKE.
+
+    This function configures environment variables required by SliceBuilder
+    when running torch_tpu on GKE, based on the provided environment
+    variables set by the Kubernetes setup. It adjusts bounds and addresses
+    to match the expected configuration for distributed TPU workers.
+
+    Args:
+        slicebuilder_first_worker_port: The starting port number for SliceBuilder
+            worker communication.
+        environ: A dictionary of environment variables. Defaults to `os.environ`.
+
+    Returns:
+        True if the environment variables were successfully initialized for
+        distributed TPU training on GKE, False otherwise.
+    """
+    if environ is None:
+        environ = os.environ
+
+    if (
+        "TPU_WORKER_HOSTNAMES" not in environ
+        or "TPU_CHIPS_PER_HOST_BOUNDS" not in environ
+        or "TPU_HOST_BOUNDS" not in environ
+        or "WORLD_SIZE" not in environ
+        or "LOCAL_RANK" not in environ
+        or "RANK" not in environ
+    ):
+        return False
+
+    logger.info("Trying to initialize distributed TPU training on GKE.")
+    world_size = int(environ["WORLD_SIZE"])
+    local_rank = int(environ["LOCAL_RANK"])
+    rank = int(environ["RANK"])
+    is_v7 = (
+        "TPU_ACCELERATOR_TYPE" in environ
+        and environ["TPU_ACCELERATOR_TYPE"].startswith("tpu7x")
+    )
+
+    tpu_chips_per_host_bounds = list(
+        map(int, environ["TPU_CHIPS_PER_HOST_BOUNDS"].split(","))
+    )
+    tpu_chips_per_host_bounds_product = functools.reduce(
+        lambda x, y: x * y, tpu_chips_per_host_bounds
+    )
+
+    if tpu_chips_per_host_bounds_product == 1:
+        return False  # either single host or environment is set manually.
+
+    tpu_host_bounds = list(map(int, environ["TPU_HOST_BOUNDS"].split(",")))
+    tpu_host_bounds_product = functools.reduce(
+        lambda x, y: x * y, tpu_host_bounds
+    )
+
+    tpu_worker_hostnames = environ["TPU_WORKER_HOSTNAMES"].split(",")
+
+    if tpu_host_bounds_product != len(tpu_worker_hostnames):
+        return False  # environment is likely to set incorrectly.
+
+    if is_v7:
+        tpu_chips_per_host_bounds_product *= 2
+
+    if tpu_chips_per_host_bounds_product * tpu_host_bounds_product != world_size:
+        return False  # environment is likely to set incorrectly.
+
+    environ["TPU_CHIPS_PER_HOST_BOUNDS"] = ",".join(
+        ["1"] * (4 if is_v7 else 3)
+    )
+    for i in range(len(tpu_host_bounds)):
+        tpu_host_bounds[i] = tpu_host_bounds[i] * tpu_chips_per_host_bounds[i]
+    environ["TPU_HOST_BOUNDS"] = ",".join(map(str, tpu_host_bounds))
+    if is_v7:
+        environ["TPU_HOST_BOUNDS"] += ",2"
+
+    environ["TPU_VISIBLE_CHIPS"] = str(local_rank)
+    environ["CLOUD_TPU_TASK_ID"] = str(rank)
+    ports = list(
+        range(
+            slicebuilder_first_worker_port,
+            slicebuilder_first_worker_port + tpu_chips_per_host_bounds_product,
+        )
+    )
+    environ["TPU_PROCESS_PORT"] = str(ports[local_rank])
+    tpu_worker_addresses = []
+    for tpu_worker_hostname in tpu_worker_hostnames:
+        for port in ports:
+            tpu_worker_addresses.append(tpu_worker_hostname + ":" + str(port))
+    tpu_worker_addresses_str = ",".join(tpu_worker_addresses)
+    environ["TPU_PROCESS_ADDRESSES"] = tpu_worker_addresses_str
+    environ["TORCH_TPU_SLICEBUILDER_ADDRESSES"] = tpu_worker_addresses_str
+    environ["TORCH_TPU_TOPOLOGY"] = environ["TPU_HOST_BOUNDS"]
+    return True
+
 
 def main():
-    # 1. Initialize process group with tpu_dist backend
+    # 1. Initialize GKE multi-host TPU environment and process group
+    _maybe_init_distributed_on_gke()
     if not dist.is_initialized():
         dist.init_process_group(backend="tpu_dist")
     device = torch.device("tpu")
@@ -47,7 +149,8 @@ def main():
 
     print(
         f"[Host {host_id} | LocalRank {local_rank} | GlobalRank {rank}/{world_size}] "
-        f"Initialized TorchTPU DDP worker on device: {device}",
+        f"Initialized TorchTPU DDP worker on device: {device} "
+        f"(TORCH_TPU_TOPOLOGY={os.environ.get('TORCH_TPU_TOPOLOGY')})",
         flush=True,
     )
 

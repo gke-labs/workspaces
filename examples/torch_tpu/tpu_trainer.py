@@ -70,7 +70,6 @@ def submit_multihost_training(
     num_nodes: int = 2,
     tpus_per_node: int = 4,
     compute_class: str = "tpu-v5-8-multi-host",
-    torch_tpu_topology: str = "2,4,1",
     namespace: Optional[str] = None,
     job_name: Optional[str] = None,
     extra_env: Optional[Dict[str, str]] = None,
@@ -84,7 +83,6 @@ def submit_multihost_training(
         num_nodes: Number of TPU host nodes in the slice (e.g. 2).
         tpus_per_node: Physical TPU chips per host node (e.g. 4).
         compute_class: GKE TPU ComputeClass (e.g. "tpu-v5-8-multi-host").
-        torch_tpu_topology: TorchTPU slice topology string (e.g. "2,4,1").
         namespace: Target Kubernetes namespace.
         job_name: Optional custom job name (defaults to timestamped name).
         extra_env: Optional dictionary of additional environment variables.
@@ -122,53 +120,15 @@ def submit_multihost_training(
     core_v1.create_namespaced_config_map(namespace=namespace, body=cm_body)
     print(f"[K8s] Created ConfigMap '{cm_name}' with {len(cm_data)} files: {list(cm_data.keys())}")
 
-    # 2. Build startup bash command to bootstrap TorchTPU and launch torchrun
-    extra_env_str = ""
-    if extra_env:
-        extra_env_str = "\n".join(f'export {k}="{v}"' for k, v in extra_env.items()) + "\n"
-
-    cmd_script = (
-        "set -e\n"
-        "echo '=== Host Startup ==='\n"
-        "echo \"HOSTNAME: $(hostname)\"\n"
-        "echo \"TPU_WORKER_HOSTNAMES: $TPU_WORKER_HOSTNAMES\"\n"
-        "echo \"JOB_COMPLETION_INDEX: $JOB_COMPLETION_INDEX\"\n"
-        "\n"
-        "# 1. Bootstrap TorchTPU multi-host environment\n"
-        "echo '=== Bootstrapping TorchTPU Environment ==='\n"
-        "python3 -m torch.tpu.distributed.environment | grep -E '^[A-Z0-9_]+=' | sed 's/^/export /' > /tmp/torch_tpu_env.sh\n"
-        "source /tmp/torch_tpu_env.sh\n"
-        f'export TORCH_TPU_TOPOLOGY="{torch_tpu_topology}"\n'
-        'export PYTHONPATH="/workspace:$PYTHONPATH"\n'
-        f"{extra_env_str}"
-        "echo '=== TorchTPU Environment Configured ==='\n"
-        "cat /tmp/torch_tpu_env.sh\n"
-        "echo \"TORCH_TPU_TOPOLOGY: $TORCH_TPU_TOPOLOGY\"\n"
-        "echo \"TORCH_TPU_SLICEBUILDER_ADDRESSES: $TORCH_TPU_SLICEBUILDER_ADDRESSES\"\n"
-        "echo \"NNODES: $NNODES | NODE_RANK: $NODE_RANK | MASTER: $MASTER_ADDR:$MASTER_PORT\"\n"
-        "\n"
-        "# 2. Launch multi-core DDP worker processes with modular library files\n"
-        "echo '=== Workspace Mounted Files ==='\n"
-        "ls -la /workspace\n"
-        "echo '=== Launching torchrun ==='\n"
-        "torchrun \\\n"
-        '  --nnodes="$NNODES" \\\n'
-        '  --node_rank="$NODE_RANK" \\\n'
-        '  --master_addr="$MASTER_ADDR" \\\n'
-        '  --master_port="$MASTER_PORT" \\\n'
-        f"  --nproc_per_node={tpus_per_node} \\\n"
-        f"  /workspace/{main_script}\n"
-        "echo '=== Training Complete ==='\n"
-    )
-
-    # 3. Define Trainer container specification
+    # 2. Define Trainer container specification
     trainer = CustomTrainerContainer(
         image=image,
         num_nodes=num_nodes,
         resources_per_node={"google.com/tpu": str(tpus_per_node)},
+        env=extra_env,
     )
 
-    # 4. Attach GKE accelerator patch and ConfigMap volume mount
+    # 3. Attach GKE accelerator patch and ConfigMap volume mount
     tpu_patch = RuntimePatch(
         training_runtime_spec=TrainingRuntimeSpecPatch(
             template=JobSetTemplatePatch(
@@ -225,7 +185,10 @@ def submit_multihost_training(
         )
     )
 
-    # 5. Submit via Kubeflow TrainerClient
+    # 4. Submit via Kubeflow TrainerClient
+    # Note: Kubeflow Trainer's 'torch-distributed' runtime automatically injects
+    # PET_NNODES, PET_NODE_RANK, PET_MASTER_ADDR, and PET_MASTER_PORT, which
+    # torchrun reads natively.
     trainer_client = TrainerClient(
         backend_config=KubernetesBackendConfig(namespace=namespace)
     )
@@ -234,7 +197,13 @@ def submit_multihost_training(
         trainer=trainer,
         options=[
             Name(job_name),
-            TrainerCommand(["/bin/bash", "-c", cmd_script]),
+            TrainerCommand(
+                [
+                    "torchrun",
+                    f"--nproc_per_node={tpus_per_node}",
+                    f"/workspace/{main_script}",
+                ]
+            ),
             tpu_patch,
         ],
     )
