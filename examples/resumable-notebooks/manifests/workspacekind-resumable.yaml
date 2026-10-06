@@ -189,6 +189,12 @@ spec:
       # Shared GCS bucket exposed to notebooks as $GCS_BUCKET.
       - name: "GCS_BUCKET"
         value: "<YOUR_GCS_BUCKET>"
+      - name: "GEMINI_API_KEY"
+        valueFrom:
+          secretKeyRef:
+            name: "gemini-api-key"
+            key: "GEMINI_API_KEY"
+            optional: true
     extraVolumeMounts:
       - name: "dshm"
         mountPath: "/dev/shm"

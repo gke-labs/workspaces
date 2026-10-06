@@ -804,6 +804,26 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
    >
    > The names shipped in this repo line up with that allow-list: the upstream sample is `jupyterlab`, [`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml) is `jupyterlab`, [`../../images/workspacekinds/codeserver-python.yaml`](../../images/workspacekinds/codeserver-python.yaml) is `codeserver`, and [`../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) is `jupyterlab-resumable`.
 
+   <details>
+   <summary><b>(Optional) Configure <code>GEMINI_API_KEY</code> Secret for <code>jupyter-ai</code></b> (click to expand)</summary>
+
+   The `jupyterlab` WorkspaceKind ([`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml)) preconfigures `GEMINI_API_KEY` in `spec.podTemplate.extraEnv` as an optional environment variable referencing the Kubernetes Secret `gemini-api-key` (`key: GEMINI_API_KEY`, `optional: true`). Because `optional: true` is set, Workspace pods start normally even when the Secret does not exist.
+
+   > [!WARNING]
+   > Because `GEMINI_API_KEY` is defined on the `WorkspaceKind` and references the `gemini-api-key` Secret in the tenant namespace, **every `jupyterlab` Workspace in `${TENANT_NAMESPACE}` will receive this API key**. Only create this Secret if you intend to share the API key across all `jupyterlab` Workspaces in that namespace (otherwise, individual users can configure their own key directly in the JupyterLab AI settings UI).
+
+   To preconfigure a shared `GEMINI_API_KEY` for `jupyter-ai` (v3, `gemini/*` models) in `${TENANT_NAMESPACE}`:
+
+   ```bash
+   kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" create secret generic gemini-api-key \
+     --from-literal=GEMINI_API_KEY="your-gemini-api-key" \
+     --dry-run=client -o yaml | kubectl --context="${CONTEXT}" apply -f -
+   ```
+
+   *(If a JupyterLab Workspace is already running when you create or update this Secret, restart/stop-and-start the Workspace so the Pod picks up the `GEMINI_API_KEY` environment variable.)*
+
+   </details>
+
 ---
 
 ### Step 5.5: Verify Gateway & Certificate Readiness

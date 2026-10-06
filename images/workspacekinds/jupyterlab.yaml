@@ -233,6 +233,15 @@ spec:
         value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
       - name: "GCS_BUCKET"
         value: "${GCS_BUCKET}"
+      # Optional shared API key for jupyter-ai (gemini/* models).
+      # If the 'gemini-api-key' Secret exists in a namespace, all 'jupyterlab'
+      # Workspaces in that namespace will receive this environment variable.
+      - name: "GEMINI_API_KEY"
+        valueFrom:
+          secretKeyRef:
+            name: "gemini-api-key"
+            key: "GEMINI_API_KEY"
+            optional: true
     extraVolumeMounts:
       - name: "dshm"
         mountPath: "/dev/shm"

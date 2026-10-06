@@ -49,4 +49,5 @@ numpy
 pandas
 
 # Other helpful packages
-jupyter-ai
+jupyter-ai[jupyternaut,magics]==3.2.0
+jupyter-ai-jupyternaut[persistence]==0.1.0

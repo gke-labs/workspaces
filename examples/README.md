@@ -348,6 +348,27 @@ kubectl get workspacekinds
 >
 > If any variable is missing, `envsubst` turns it into an empty string instead of failing, which causes image pull failures later when a Workspace pod starts.
 
+<details>
+<summary><b>(Optional) Configure <code>GEMINI_API_KEY</code> for <code>jupyter-ai</code></b> (click to expand)</summary>
+
+The custom `jupyterlab` image includes [`jupyter-ai`](https://jupyter-ai.readthedocs.io/) (v3), and [`workspacekinds/jupyterlab.yaml`](../images/workspacekinds/jupyterlab.yaml) preconfigures `GEMINI_API_KEY` as an optional environment variable sourced from a Kubernetes Secret named `gemini-api-key` (`optional: true`). Because the secret reference is optional, JupyterLab workspaces start normally without it.
+
+> [!WARNING]
+> Because `GEMINI_API_KEY` is configured on the `WorkspaceKind` and references the `gemini-api-key` Secret in the workspace's namespace, **every `jupyterlab` Workspace in that namespace will receive this API key**. Only create this Secret if you intend to share the API key across all `jupyterlab` Workspaces in `${TENANT_NAMESPACE}` (otherwise, users can enter their own API key directly in the JupyterLab AI settings UI).
+
+To preconfigure a shared `GEMINI_API_KEY` for `jupyter-ai` (`gemini/*` models) in `${TENANT_NAMESPACE}`:
+
+```bash
+kubectl create secret generic gemini-api-key \
+  --from-literal=GEMINI_API_KEY="your-gemini-api-key" \
+  -n "${TENANT_NAMESPACE}" \
+  --dry-run=client -o yaml | kubectl apply -f -
+```
+
+*(If a JupyterLab Workspace is already running when you create or update the Secret, pause and resume/restart the Workspace so the Pod picks up `GEMINI_API_KEY`.)*
+
+</details>
+
 See [Ready-made WorkspaceKind templates](../images/README.md#ready-made-workspacekind-templates).
 
 <a id="6-apply-the-computeclasses-gpu--tpu-examples-only"></a>
