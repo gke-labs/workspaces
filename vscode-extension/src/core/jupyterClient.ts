@@ -572,6 +572,21 @@ export class JupyterClient {
   }
 
   /**
+   * Restarts a kernel via POST /api/kernels/<id>/restart.
+   */
+  async restartKernel(kernelId: string): Promise<void> {
+    const resp = await this.request(
+      `/api/kernels/${kernelId}/restart`,
+      { method: 'POST' },
+      30000
+    );
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(`POST /api/kernels/${kernelId}/restart failed (HTTP ${resp.status}): ${text}`);
+    }
+  }
+
+  /**
    * Fetches file or directory metadata/content via GET /api/contents/<path>.
    * Returns null if 404 Not Found.
    */

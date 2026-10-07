@@ -339,6 +339,29 @@ print("__TC5_JSON__:" + json.dumps({
       barrierFlushed = true;
     });
 
+    // Track notebook -> kernel binding dynamically (mirrors ConnectionManager.bindKernelToNotebook)
+    const kernelToNotebookMap = new Map<string, string>();
+    const bindKernelToNotebook = (kId: string, nbFsPath: string) => {
+      const norm = path.resolve(nbFsPath);
+      for (const [existingKId, existingNb] of kernelToNotebookMap.entries()) {
+        if (existingKId !== kId && path.resolve(existingNb) === norm) {
+          kernelToNotebookMap.delete(existingKId);
+        }
+      }
+      kernelToNotebookMap.set(kId, norm);
+    };
+    const getKernelForNotebook = (nbFsPath: string): string | undefined => {
+      const norm = path.resolve(nbFsPath);
+      for (const [kId, existingNb] of kernelToNotebookMap.entries()) {
+        if (path.resolve(existingNb) === norm) {
+          return kId;
+        }
+      }
+      return undefined;
+    };
+
+    bindKernelToNotebook(testKernelId!, targetNb);
+
     const bridge = new AgentBridgeServer({
       workspaceRoot: WORKSPACE_ROOT,
       getClient: () => client,
@@ -348,7 +371,7 @@ print("__TC5_JSON__:" + json.dumps({
       getSetKernelWorkingDirectory: () => true,
       getEnableAutoreload: () => true,
       getAutoSaveOutputs: () => false,
-      getKernelForNotebook: () => testKernelId!,
+      getKernelForNotebook,
       triggerSyncNow: async () =>
         await syncEngine.syncWorkspace({
           localRoot: WORKSPACE_ROOT,
@@ -356,6 +379,7 @@ print("__TC5_JSON__:" + json.dumps({
         }),
     });
 
+    let switchedKernelId: string | null = null;
     const sockPath = await bridge.start();
     try {
       const statusRes = await callAgentBridge(sockPath, 'status');
@@ -380,14 +404,140 @@ print("__TC5_JSON__:" + json.dumps({
           .split('\n')
           .join('\n    ')}\n`
       );
+
+      // ------------------------------------------------------------------
+      // TC-9: Switch to a Different Remote Kernel While Same Notebook Is Open
+      // ------------------------------------------------------------------
+      console.log('▶ TC-9: Switch to a Different Remote Kernel While Same Notebook Is Open...');
+      const secondKernel = await client.startKernel('python3');
+      switchedKernelId = secondKernel.id;
+      assert.notStrictEqual(
+        switchedKernelId,
+        testKernelId,
+        'Second kernel must have a distinct kernel ID'
+      );
+
+      // Simulate user switching the open notebook's kernel from testKernelId -> switchedKernelId
+      bindKernelToNotebook(switchedKernelId, targetNb);
+      assert.strictEqual(
+        getKernelForNotebook(targetNb),
+        switchedKernelId,
+        'getKernelForNotebook must return the newly selected kernel ID, not the previous one'
+      );
+      assert.strictEqual(
+        kernelInitializer.isInitialized(switchedKernelId, `${TEST_REMOTE_DIR}/examples/torch_tpu`),
+        false,
+        'Newly switched kernel must not be marked initialized before first cell execution'
+      );
+
+      // Execute via the bridge (or cell execution path) — should auto-initialize switchedKernelId
+      const switchExec = await callAgentBridge(sockPath, 'exec', {
+        notebookPath: 'examples/torch_tpu/torch_tpu_training.ipynb',
+        code: [
+          'import os, sys, json, tpu_lock',
+          'from examples.distributed.jobs import pipeline',
+          'print("__TC9_SWITCH__:" + json.dumps({',
+          '  "pid": os.getpid(),',
+          '  "cwd": os.getcwd(),',
+          '  "sys_path_0": sys.path[0],',
+          '  "sys_path_1": sys.path[1],',
+          '}))',
+        ].join('\n'),
+      });
+      assert.strictEqual(
+        switchExec.status,
+        'ok',
+        `TC-9 execution failed: ${switchExec.ename}: ${switchExec.evalue}`
+      );
+      const tc9Match = switchExec.stdout.match(/__TC9_SWITCH__:(\{.*\})/);
+      assert.ok(tc9Match, `Expected __TC9_SWITCH__ in stdout, got: ${switchExec.stdout}`);
+      const tc9Data = JSON.parse(tc9Match![1]);
+      assert.notStrictEqual(
+        tc9Data.pid,
+        tc5Data.pid,
+        'Switched kernel must run in a distinct OS process (PID)'
+      );
+      assert.ok(
+        tc9Data.cwd.endsWith(`/${TEST_REMOTE_DIR}/examples/torch_tpu`),
+        `Unexpected switched kernel cwd: ${tc9Data.cwd}`
+      );
+      assert.strictEqual(tc9Data.sys_path_0, tc9Data.cwd);
+      assert.ok(tc9Data.sys_path_1.endsWith(`/${TEST_REMOTE_DIR}`));
+      assert.strictEqual(
+        kernelInitializer.isInitialized(switchedKernelId, `${TEST_REMOTE_DIR}/examples/torch_tpu`),
+        true,
+        'Switched kernel must now be marked initialized for the notebook directory'
+      );
+      console.log(
+        `  ✓ TC-9 Passed: Switched open notebook from kernel ${testKernelId!.slice(
+          0,
+          8
+        )} (PID ${tc5Data.pid}) -> kernel ${switchedKernelId.slice(0, 8)} (PID ${
+          tc9Data.pid
+        }); cwd=${tc9Data.cwd} & imports verified\n`
+      );
+
+      // ------------------------------------------------------------------
+      // TC-10: Restart Active Remote Kernel While Same Notebook Is Open
+      // ------------------------------------------------------------------
+      console.log('▶ TC-10: Restart Active Remote Kernel While Same Notebook Is Open...');
+      await client.restartKernel(switchedKernelId);
+      // Mirrors createSyncFetch intercepting POST /api/kernels/<id>/restart
+      kernelInitializer.invalidate(switchedKernelId);
+      assert.strictEqual(
+        kernelInitializer.isInitialized(switchedKernelId, `${TEST_REMOTE_DIR}/examples/torch_tpu`),
+        false,
+        'Restarted kernel must have its initialization state invalidated'
+      );
+
+      const restartExec = await callAgentBridge(sockPath, 'exec', {
+        notebookPath: 'examples/torch_tpu/torch_tpu_training.ipynb',
+        code: [
+          'import os, sys, json, tpu_lock',
+          'from examples.distributed.jobs import pipeline',
+          'print("__TC10_RESTART__:" + json.dumps({',
+          '  "pid": os.getpid(),',
+          '  "cwd": os.getcwd(),',
+          '  "sys_path_0": sys.path[0],',
+          '  "sys_path_1": sys.path[1],',
+          '}))',
+        ].join('\n'),
+      });
+      assert.strictEqual(
+        restartExec.status,
+        'ok',
+        `TC-10 execution failed: ${restartExec.ename}: ${restartExec.evalue}`
+      );
+      const tc10Match = restartExec.stdout.match(/__TC10_RESTART__:(\{.*\})/);
+      assert.ok(tc10Match, `Expected __TC10_RESTART__ in stdout, got: ${restartExec.stdout}`);
+      const tc10Data = JSON.parse(tc10Match![1]);
+      assert.notStrictEqual(
+        tc10Data.pid,
+        tc9Data.pid,
+        'Restarted kernel must have a new OS process PID'
+      );
+      assert.ok(
+        tc10Data.cwd.endsWith(`/${TEST_REMOTE_DIR}/examples/torch_tpu`),
+        `Unexpected restarted kernel cwd: ${tc10Data.cwd}`
+      );
+      assert.strictEqual(tc10Data.sys_path_0, tc10Data.cwd);
+      assert.ok(tc10Data.sys_path_1.endsWith(`/${TEST_REMOTE_DIR}`));
+      console.log(
+        `  ✓ TC-10 Passed: Kernel ${switchedKernelId.slice(0, 8)} restarted (PID ${
+          tc9Data.pid
+        } -> ${tc10Data.pid}) and automatically re-initialized cwd=${tc10Data.cwd} & imports\n`
+      );
     } finally {
       await bridge.stop();
+      if (switchedKernelId) {
+        await client.shutdownKernel(switchedKernelId).catch(() => {});
+      }
     }
   } finally {
     // ------------------------------------------------------------------
-    // TC-9: Teardown & Cleanup
+    // TC-11: Teardown & Cleanup
     // ------------------------------------------------------------------
-    console.log('▶ TC-9: Teardown & Cleanup...');
+    console.log('▶ TC-11: Teardown & Cleanup...');
     if (createdTempKernelId) {
       await client.shutdownKernel(createdTempKernelId).catch(() => {});
     } else if (testKernelId) {
@@ -402,11 +552,11 @@ print("__TC5_JSON__:" + json.dumps({
     await client.executeShellCommand(`rm -rf ${JSON.stringify(TEST_REMOTE_DIR)}`).catch(() => {});
     const stillExists = await client.fileExists(TEST_REMOTE_DIR);
     assert.strictEqual(stillExists, false, 'Temporary test directory must be cleaned up');
-    console.log(`  ✓ TC-9 Passed: Cleaned up <jupyter-root>/${TEST_REMOTE_DIR}\n`);
+    console.log(`  ✓ TC-11 Passed: Cleaned up <jupyter-root>/${TEST_REMOTE_DIR}\n`);
   }
 
   console.log('================================================================');
-  console.log('  ALL 9 LIVE TPU INTEGRATION TEST CASES PASSED!');
+  console.log('  ALL 11 LIVE TPU INTEGRATION TEST CASES PASSED!');
   console.log('================================================================');
 }
 
