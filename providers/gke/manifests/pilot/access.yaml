@@ -131,7 +131,7 @@ spec:
     count/workspaces.kubeflow.org: "5"
     pods: "30"
     persistentvolumeclaims: "10"
-    requests.storage: 200Gi
+    requests.storage: 2Ti
     # requests.cpu: "64"
     # requests.memory: 256Gi
     # limits.cpu: "128"
