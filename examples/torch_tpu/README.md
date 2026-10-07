@@ -17,7 +17,7 @@ This example demonstrates interactive single-device and multi-core neural networ
 | **Model** | 3-layer MLP (`784 -> 256 -> 128 -> 10`) implemented in PyTorch (`nn.Module`) with `bfloat16` precision |
 | **Hardware** | **1 TPU**: TPU v5 1x1 (`tpu_1`, 1 chip), **4 TPU**: TPU v5 2x2 (`tpu_4`, 4 chips) on a single host, or **8 TPU**: TPU v5 2x4 multi-host (2 hosts × 4 chips) |
 | **Parallelism** | Interactive execution via `torch.device("tpu")`; multi-core and multi-host scaling via `DistributedDataParallel` (DDP) with the `tpu_dist` collective backend |
-| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)), single-host distributed orchestrator ([`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)), and multi-host distributed orchestrator ([`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb)) |
+| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)), single-host distributed orchestrator ([`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)), multi-host distributed orchestrator via `ConfigMap` ([`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb)), and multi-host distributed orchestrator via shared `ReadWriteMany` Filestore volume ([`torch_tpu_multihost_rwx.ipynb`](torch_tpu_multihost_rwx.ipynb)) |
 
 > [!TIP]
 > **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClasses, and `jupyterlab` WorkspaceKind are already configured. Jump directly to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
@@ -347,6 +347,32 @@ Inside [`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb), multi-host dist
    delete_training_job(job_name)
    ```
 5. **Multi-Host DDP Execution**: `torchrun` launches 4 local worker processes per host (`--nproc_per_node=4`), initializing `dist.init_process_group(backend="tpu_dist")` and training synchronously across all 8 TPU cores over the Inter-Chip Interconnect (ICI).
+
+### 9. Scaling to Large Codebases with a Shared Filestore (`ReadWriteMany`) Volume (`torch_tpu_multihost_rwx.ipynb`)
+
+When your repository exceeds the **1 MiB Kubernetes `ConfigMap` limit** (or includes nested Python packages, YAML configs, tokenizers, and checkpoints), you can mount a shared **`ReadWriteMany` (RWX) Cloud Filestore volume** across both your Workspace pod and all TPU `TrainJob` worker pods using [`torch_tpu_multihost_rwx.ipynb`](torch_tpu_multihost_rwx.ipynb).
+
+1. **Prerequisite**: Complete the optional [**Shared Filestore (`ReadWriteMany`) Volume & Per-Workspace Subdirectory Mount**](../README.md#optional-shared-filestore-rwx-volume) setup in the Examples README (which provisions the 1 TiB `shared-workspace-rwx` PVC, patches the `jupyterlab` `WorkspaceKind` to mount `workspaces/$(WORKSPACE_NAME)` at `/home/jovyan/shared`, and configures `"jupyterSync.remoteBaseDir": "shared/${workspaceFolderBasename}"` in VS Code).
+2. **Run [`torch_tpu_multihost_rwx.ipynb`](torch_tpu_multihost_rwx.ipynb)**: Call `submit_multihost_training()` with `pvc_name="shared-workspace-rwx"`:
+   ```python
+   from tpu_trainer import submit_multihost_training, stream_job_logs, delete_training_job
+
+   image = f"{os.environ['REGISTRY']}/jupyterlab:latest-tpu"
+
+   job_name = submit_multihost_training(
+       image=image,
+       src_dir="src",
+       main_script="train.py",
+       num_nodes=2,
+       tpus_per_node=4,
+       compute_class="tpu-v5-8-multi-host",
+       pvc_name="shared-workspace-rwx",
+       shared_mount_path="/home/jovyan/shared",
+   )
+   stream_job_logs(job_name, num_nodes=2)
+   delete_training_job(job_name, delete_configmap=False)
+   ```
+   [`resolve_shared_pvc_subpath()`](tpu_trainer.py) automatically inspects the Workspace pod's mount, resolves the exact subdirectory on the PVC (`workspaces/<workspace-name>/<repo-name>/examples/torch_tpu/src`), and mounts it at `/workspace` across all TPU host pods—with zero `ConfigMap` creation and no Docker image rebuilds.
 
 ---
 

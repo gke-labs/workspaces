@@ -21,8 +21,10 @@ scientists can launch distributed training jobs with a single Python function.
 
 import os
 import pathlib
+import re
+import shutil
 import time
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Tuple, Union
 
 from kubernetes import client as k8s_client, config as k8s_config
 from kubeflow.common.types import KubernetesBackendConfig
@@ -63,6 +65,110 @@ def _init_k8s_clients():
     return k8s_client.CoreV1Api(), k8s_client.CustomObjectsApi()
 
 
+def _expand_k8s_vars(expr: str, extra_vars: Optional[Dict[str, str]] = None) -> str:
+    """Expands Kubernetes $(VAR) and shell ${VAR} expressions."""
+    if not expr:
+        return ""
+    lookup = dict(os.environ)
+    if extra_vars:
+        lookup.update(extra_vars)
+    expanded = re.sub(
+        r"\$\(([^)]+)\)",
+        lambda m: lookup.get(m.group(1), m.group(0)),
+        expr,
+    )
+    return os.path.expandvars(expanded)
+
+
+def resolve_shared_pvc_subpath(
+    src_dir: Union[str, pathlib.Path],
+    namespace: str,
+    pvc_name: str = "shared-workspace-rwx",
+    shared_mount_path: str = "/home/jovyan/shared",
+) -> Tuple[str, str, pathlib.Path]:
+    """Resolves the PVC claimName and subPath for a source directory on a shared RWX volume.
+
+    If `src_dir` is already inside `shared_mount_path` (for example, when synced via
+    `jupyter-workspace-sync` with `"jupyterSync.remoteBaseDir": "shared/${workspaceFolderBasename}"`),
+    this function computes its exact `subPath` on the PVC without copying any files.
+    If `src_dir` is outside `shared_mount_path` (e.g., on the local RWO home disk), it
+    syncs `src_dir` into `shared_mount_path` so the TPU worker pods can mount it.
+
+    Returns:
+        Tuple of (pvc_claim_name, pvc_sub_path, effective_src_path).
+    """
+    src_path = pathlib.Path(src_dir).resolve()
+    if not src_path.exists():
+        raise FileNotFoundError(f"Source directory '{src_dir}' not found.")
+
+    mount_root = pathlib.Path(shared_mount_path).resolve()
+    base_sub_path = ""
+    detected_pvc = pvc_name
+
+    # Inspect current Workspace Pod mounts if running in-cluster
+    pod_name = os.environ.get("HOSTNAME")
+    if pod_name:
+        try:
+            core_v1, _ = _init_k8s_clients()
+            pod = core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
+            ws_name = (pod.metadata.labels or {}).get(
+                "notebooks.kubeflow.org/workspace-name",
+                os.environ.get("WORKSPACE_NAME", ""),
+            )
+            extra_vars = {"WORKSPACE_NAME": ws_name} if ws_name else {}
+
+            vol_to_pvc = {
+                v.name: v.persistent_volume_claim.claim_name
+                for v in (pod.spec.volumes or [])
+                if v.persistent_volume_claim and v.persistent_volume_claim.claim_name
+            }
+
+            best_score = (-1, -1)
+            for container in pod.spec.containers or []:
+                for vm in container.volume_mounts or []:
+                    if vm.name not in vol_to_pvc:
+                        continue
+                    vm_path = pathlib.Path(vm.mount_path).resolve()
+                    contains_src = src_path == vm_path or vm_path in src_path.parents
+                    is_configured_root = vm_path == mount_root
+                    # Match either a mount covering src_path or the configured shared_mount_path
+                    if contains_src or is_configured_root:
+                        score = (1 if contains_src else 0, len(str(vm_path)))
+                        if score > best_score:
+                            best_score = score
+                            mount_root = vm_path
+                            detected_pvc = vol_to_pvc[vm.name]
+                            raw_sub = vm.sub_path or vm.sub_path_expr or ""
+                            base_sub_path = _expand_k8s_vars(raw_sub, extra_vars)
+        except Exception:
+            pass
+
+    if not base_sub_path and os.environ.get("WORKSPACE_NAME"):
+        base_sub_path = f"workspaces/{os.environ['WORKSPACE_NAME']}"
+
+    # If src_path is outside the shared mount root, stage it into the shared mount root
+    if src_path != mount_root and mount_root not in src_path.parents:
+        if not mount_root.exists():
+            raise FileNotFoundError(
+                f"Shared RWX mount path '{mount_root}' does not exist in this pod, "
+                f"and '{src_path}' is not on a shared PVC."
+            )
+        staged_dir = mount_root / src_path.name
+        shutil.copytree(src_path, staged_dir, dirs_exist_ok=True)
+        print(
+            f"[RWX] Staged '{src_path}' -> shared volume at '{staged_dir}'"
+        )
+        src_path = staged_dir
+
+    rel_from_mount = src_path.relative_to(mount_root).as_posix()
+    if rel_from_mount == ".":
+        rel_from_mount = ""
+
+    parts = [p.strip("/") for p in (base_sub_path, rel_from_mount) if p and p.strip("/")]
+    full_sub_path = "/".join(parts)
+    return detected_pvc, full_sub_path, src_path
+
+
 def submit_multihost_training(
     image: str,
     src_dir: Union[str, pathlib.Path] = "src",
@@ -73,8 +179,10 @@ def submit_multihost_training(
     namespace: Optional[str] = None,
     job_name: Optional[str] = None,
     extra_env: Optional[Dict[str, str]] = None,
+    pvc_name: Optional[str] = None,
+    shared_mount_path: str = "/home/jovyan/shared",
 ) -> str:
-    """Packages local training code and submits a multi-host TrainJob on GKE.
+    """Packages or mounts local training code and submits a multi-host TrainJob on GKE.
 
     Args:
         image: Container image containing PyTorch and TorchTPU.
@@ -86,6 +194,11 @@ def submit_multihost_training(
         namespace: Target Kubernetes namespace.
         job_name: Optional custom job name (defaults to timestamped name).
         extra_env: Optional dictionary of additional environment variables.
+        pvc_name: Optional ReadWriteMany PVC name (e.g. "shared-workspace-rwx").
+            When provided, mounts the shared PVC (and resolved subdirectory) directly
+            at `/workspace` on all TPU worker pods instead of creating a ConfigMap.
+        shared_mount_path: Mount path of the shared RWX PVC inside the Workspace pod
+            (default: "/home/jovyan/shared").
 
     Returns:
         The submitted TrainJob name.
@@ -96,39 +209,84 @@ def submit_multihost_training(
     job_name = job_name or f"torch-tpu-multihost-{int(time.time())}"
     core_v1, _ = _init_k8s_clients()
 
-    # 1. Package source code directory into a Kubernetes ConfigMap
     src_path = pathlib.Path(src_dir)
     if not src_path.exists():
         raise FileNotFoundError(f"Source directory '{src_dir}' not found.")
 
-    cm_name = f"{job_name}-code"
-    cm_data = {
-        file_path.name: file_path.read_text(encoding="utf-8")
-        for file_path in sorted(src_path.glob("*.py"))
-    }
-    if not cm_data:
-        raise ValueError(f"No Python files found in '{src_dir}'.")
-    if main_script not in cm_data:
-        raise ValueError(
-            f"Main script '{main_script}' not found in '{src_dir}' ({list(cm_data.keys())})."
+    # 1. Configure code volume (Shared ReadWriteMany PVC vs. Kubernetes ConfigMap)
+    if pvc_name:
+        claim_name, sub_path, effective_src = resolve_shared_pvc_subpath(
+            src_dir=src_path,
+            namespace=namespace,
+            pvc_name=pvc_name,
+            shared_mount_path=shared_mount_path,
         )
+        entrypoint_path = effective_src / main_script
+        if not entrypoint_path.exists():
+            raise ValueError(
+                f"Main script '{main_script}' not found in '{effective_src}'."
+            )
+        code_volume = {
+            "name": "code-volume",
+            "persistentVolumeClaim": {
+                "claimName": claim_name,
+            },
+        }
+        code_volume_mount = {
+            "name": "code-volume",
+            "mountPath": "/workspace",
+        }
+        if sub_path:
+            code_volume_mount["subPath"] = sub_path
+        print(
+            f"[K8s] Mounting shared RWX PVC '{claim_name}' "
+            f"(subPath='{sub_path or '/'}') at /workspace on all TPU worker pods"
+        )
+    else:
+        cm_name = f"{job_name}-code"
+        cm_data = {
+            file_path.name: file_path.read_text(encoding="utf-8")
+            for file_path in sorted(src_path.glob("*.py"))
+        }
+        if not cm_data:
+            raise ValueError(f"No Python files found in '{src_dir}'.")
+        if main_script not in cm_data:
+            raise ValueError(
+                f"Main script '{main_script}' not found in '{src_dir}' ({list(cm_data.keys())})."
+            )
 
-    cm_body = k8s_client.V1ConfigMap(
-        metadata=k8s_client.V1ObjectMeta(name=cm_name, namespace=namespace),
-        data=cm_data,
-    )
-    core_v1.create_namespaced_config_map(namespace=namespace, body=cm_body)
-    print(f"[K8s] Created ConfigMap '{cm_name}' with {len(cm_data)} files: {list(cm_data.keys())}")
+        cm_body = k8s_client.V1ConfigMap(
+            metadata=k8s_client.V1ObjectMeta(name=cm_name, namespace=namespace),
+            data=cm_data,
+        )
+        core_v1.create_namespaced_config_map(namespace=namespace, body=cm_body)
+        print(
+            f"[K8s] Created ConfigMap '{cm_name}' with {len(cm_data)} files: {list(cm_data.keys())}"
+        )
+        code_volume = {
+            "name": "code-volume",
+            "configMap": {
+                "name": cm_name,
+            },
+        }
+        code_volume_mount = {
+            "name": "code-volume",
+            "mountPath": "/workspace",
+        }
 
     # 2. Define Trainer container specification
+    merged_env = {"PYTHONPATH": "/workspace"}
+    if extra_env:
+        merged_env.update(extra_env)
+
     trainer = CustomTrainerContainer(
         image=image,
         num_nodes=num_nodes,
         resources_per_node={"google.com/tpu": str(tpus_per_node)},
-        env=extra_env,
+        env=merged_env,
     )
 
-    # 3. Attach GKE accelerator patch and ConfigMap volume mount
+    # 3. Attach GKE accelerator patch and code volume mount
     tpu_patch = RuntimePatch(
         training_runtime_spec=TrainingRuntimeSpecPatch(
             template=JobSetTemplatePatch(
@@ -155,23 +313,11 @@ def submit_multihost_training(
                                                     "effect": "NoSchedule",
                                                 },
                                             ],
-                                            volumes=[
-                                                {
-                                                    "name": "code-volume",
-                                                    "configMap": {
-                                                        "name": cm_name,
-                                                    },
-                                                }
-                                            ],
+                                            volumes=[code_volume],
                                             containers=[
                                                 ContainerPatch(
                                                     name="node",
-                                                    volume_mounts=[
-                                                        {
-                                                            "name": "code-volume",
-                                                            "mountPath": "/workspace",
-                                                        }
-                                                    ],
+                                                    volume_mounts=[code_volume_mount],
                                                 )
                                             ],
                                         )

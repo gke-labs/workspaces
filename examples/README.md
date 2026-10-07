@@ -369,6 +369,121 @@ kubectl create secret generic gemini-api-key \
 
 </details>
 
+<a id="optional-shared-filestore-rwx-volume"></a>
+<details>
+<summary><b>(Optional) Provision a Shared Filestore (<code>ReadWriteMany</code>) Volume &amp; Per-Workspace Subdirectory Mount</b> (click to expand)</summary>
+
+For distributed training or multi-pod workloads where your codebase is too large for a 1 MiB Kubernetes `ConfigMap` (such as [`torch_tpu/torch_tpu_multihost_rwx.ipynb`](torch_tpu/torch_tpu_multihost_rwx.ipynb)), you can provision a shared **`ReadWriteMany` (RWX) Cloud Filestore volume** and mount an isolated per-workspace subdirectory (`workspaces/$(WORKSPACE_NAME)`) at `/home/jovyan/shared`.
+
+#### 1. Enable the GKE Filestore CSI Driver & Create a 1 TiB Shared Filestore PVC
+
+> [!NOTE]
+> **1 TiB (`1Ti`) minimum capacity with dynamic provisioning:**
+> The GKE Filestore CSI driver (`filestore.csi.storage.gke.io`) enforces a **1 TiB (`1Ti`) minimum** when dynamically provisioning single-share Filestore instances. Even if a `PersistentVolumeClaim` requests a smaller size (such as `100Gi`), the CSI driver automatically rounds the provisioned volume and underlying Filestore instance up to **`1Ti` (`1024 GiB`)**.
+> - `tier: standard` (Basic HDD, used below) is the lowest-cost 1 TiB tier (~$200/mo).
+> - `tier: zonal` provides higher SSD-backed IOPS (~$300/mo for 1 TiB).
+
+```bash
+# 1. Enable the Cloud Filestore API
+gcloud services enable file.googleapis.com --project="${PROJECT_ID}"
+
+# 2. On GKE Standard clusters, enable the Filestore CSI driver addon
+#    (On GKE Autopilot, it is already enabled by default)
+gcloud container clusters update "${CLUSTER_NAME}" \
+  --location="${LOCATION}" \
+  --project="${PROJECT_ID}" \
+  --update-addons=GcpFilestoreCsiDriver=ENABLED
+
+# 3. Ensure the namespace ResourceQuota allows a 1Ti PVC, then create the
+#    filestore-standard-rwx StorageClass and 1Ti ReadWriteMany PVC
+kubectl patch resourcequota notebooks-gke-pilot -n "${TENANT_NAMESPACE}" \
+  --type=merge -p '{"spec":{"hard":{"requests.storage":"2Ti"}}}' 2>/dev/null || true
+
+CLUSTER_NETWORK=$(gcloud container clusters describe "${CLUSTER_NAME}" \
+  --location="${LOCATION}" --project="${PROJECT_ID}" \
+  --format='value(network)' 2>/dev/null || echo "default")
+
+kubectl apply -f - <<EOF
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: filestore-standard-rwx
+provisioner: filestore.csi.storage.gke.io
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  tier: standard
+  network: ${CLUSTER_NETWORK}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-workspace-rwx
+  namespace: ${TENANT_NAMESPACE}
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: filestore-standard-rwx
+  resources:
+    requests:
+      storage: 1Ti
+EOF
+
+# 4. Wait for the PVC to reach Bound (~3-5 minutes)
+kubectl get pvc shared-workspace-rwx -n "${TENANT_NAMESPACE}" -w
+```
+
+#### 2. Patch `jupyterlab` WorkspaceKind to Mount `/home/jovyan/shared` and `/home/jovyan/shared-workspaces`
+The `WorkspaceKind` manifests ([`workspacekinds/jupyterlab.yaml`](../images/workspacekinds/jupyterlab.yaml) and [`workspacekinds/codeserver-python.yaml`](../images/workspacekinds/codeserver-python.yaml)) already inject `WORKSPACE_NAME` via the Kubernetes Downward API. Patch `jupyterlab` to mount `shared-workspace-rwx` at two paths:
+- **`/home/jovyan/shared`** (`subPathExpr: "workspaces/$(WORKSPACE_NAME)"`): This workspace's isolated directory (used automatically by VS Code `jupyter-workspace-sync` and `tpu_trainer.py`).
+- **`/home/jovyan/shared-workspaces`** (`subPath: "workspaces"`): The parent `workspaces/` directory across all workspaces, allowing you to view/share files across workspaces and clean up directories left behind by deleted workspaces (`rm -rf /home/jovyan/shared-workspaces/<deleted-workspace-name>`).
+
+```bash
+kubectl get workspacekind jupyterlab -o json | jq '
+  .spec.podTemplate.extraVolumes = (
+    (.spec.podTemplate.extraVolumes // [])
+    | map(select(.name != "shared-rwx"))
+    + [{
+        "name": "shared-rwx",
+        "persistentVolumeClaim": {
+          "claimName": "shared-workspace-rwx"
+        }
+      }]
+  ) |
+  .spec.podTemplate.extraVolumeMounts = (
+    (.spec.podTemplate.extraVolumeMounts // [])
+    | map(select(.name != "shared-rwx"))
+    + [
+        {
+          "name": "shared-rwx",
+          "mountPath": "/home/jovyan/shared",
+          "subPathExpr": "workspaces/$(WORKSPACE_NAME)"
+        },
+        {
+          "name": "shared-rwx",
+          "mountPath": "/home/jovyan/shared-workspaces",
+          "subPath": "workspaces"
+        }
+      ]
+  )
+' | kubectl replace -f -
+```
+
+*(If your Workspace pod is already running when you patch the `WorkspaceKind`, pause and resume/restart the Workspace so the Pod picks up `/home/jovyan/shared` and `/home/jovyan/shared-workspaces`.)*
+
+#### 3. Configure `jupyter-workspace-sync` (`vscode-extension`) to Sync into `/home/jovyan/shared`
+When connecting from local VS Code using [`vscode-extension`](../vscode-extension/README.md) (`jupyter-workspace-sync`), set `jupyterSync.remoteBaseDir` in `.vscode/settings.json` (or User Settings) so your local repository syncs directly into `/home/jovyan/shared/<repo-name>/`:
+
+```json
+{
+  "jupyterSync.remoteBaseDir": "shared/${workspaceFolderBasename}"
+}
+```
+
+With this setting, every local file save (`Ctrl+S`) syncs in ~300 ms to `/home/jovyan/shared/<repo-name>/` (`workspaces/<workspace-name>/<repo-name>/` on `shared-workspace-rwx`), and distributed Trainer pods can mount that exact PVC `subPath` directly without Docker rebuilds or `ConfigMap` size limits.
+
+</details>
+
 See [Ready-made WorkspaceKind templates](../images/README.md#ready-made-workspacekind-templates).
 
 <a id="6-apply-the-computeclasses-gpu--tpu-examples-only"></a>

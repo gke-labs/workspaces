@@ -273,9 +273,12 @@ When running Python scripts, debugging `.ipynb` notebooks, or installing package
 | `jupyterSync.enableAgentBridge` | `true` | Enable the local Unix socket IPC bridge (`~/.jupyter-sync/`) for `jupyter-sync` and `jetski-cli` |
 | `jupyterSync.autoSaveOutputs` | `true` | Automatically persist updated cell outputs to the local `.ipynb` file after remote cell execution |
 | `jupyterSync.overwriteNotebooks` | `false` | When `false`, existing remote `.ipynb` files are skipped during background sync so remote outputs are preserved |
-| `jupyterSync.remoteBaseDir` | `"${workspaceFolderBasename}"` | Target subdirectory under the Jupyter Server root (set to `""` to sync directly into the server root) |
+| `jupyterSync.remoteBaseDir` | `"${workspaceFolderBasename}"` | Target subdirectory under the Jupyter Server root (set to `""` to sync directly into the server root, or `"shared/${workspaceFolderBasename}"` when syncing into a shared `ReadWriteMany` mount at `/home/jovyan/shared`) |
 | `jupyterSync.maxFileSizeMB` | `10` | Skip syncing individual files larger than this size in MB |
 | `jupyterSync.exclude` | `[".git/**", "**/__pycache__/**", "**/.ipynb_checkpoints/**", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/out/**", "**/*.vsix", "**/*.mp4", "**/*.mov"]` | Glob patterns excluded from file synchronization |
+
+> [!TIP]
+> **Multi-Host Distributed Training with a Shared `ReadWriteMany` (Filestore) Volume**: When your Workspace pod mounts a shared Filestore PVC at `/home/jovyan/shared` (see [`examples/torch_tpu/README.md`](../examples/torch_tpu/README.md#9-scaling-to-large-codebases-with-a-shared-filestore-readwritemany-volume-torch_tpu_multihost_rwxipynb)), set `"jupyterSync.remoteBaseDir": "shared/${workspaceFolderBasename}"` in `.vscode/settings.json`. Local file saves sync directly into `/home/jovyan/shared/<repo-name>/` so multi-host TPU `TrainJob` worker pods can mount your repository without rebuilding Docker images or hitting `ConfigMap` size limits.
 
 ---
 
