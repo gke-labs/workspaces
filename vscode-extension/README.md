@@ -68,6 +68,20 @@ code --list-extensions --show-versions | grep jupyter-workspace-sync
 # kubeflow.jupyter-workspace-sync@0.1.0
 ```
 
+### Updating an Already-Installed Extension to a New Build
+
+After pulling new commits or making local edits in `vscode-extension/`:
+
+1. **Rebuild and overwrite the installed extension using `--force`** (the `--force` flag is required when the version in `package.json` has not changed):
+   ```bash
+   cd vscode-extension
+   npm run package
+   code --install-extension jupyter-workspace-sync.vsix --force
+   ```
+   *(Or in the VS Code UI: **Extensions (`Ctrl+Shift+X`) → `...` → Install from VSIX...** and select the updated `vscode-extension/jupyter-workspace-sync.vsix`.)*
+2. **Reload VS Code** so the running Extension Host loads the new bundle:
+   - Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and run **`Developer: Reload Window`** (or **`Developer: Restart Extension Host`**).
+
 ---
 
 ## Quick Start Guide
@@ -131,37 +145,106 @@ GKE Workspace connection tokens (`desktopToken`) expire periodically. If a token
 
 ---
 
-## Using the `jupyter-sync` CLI (Terminal & AI Coding Agents)
+## Using `~/.local/bin/jupyter-sync` with `jetski-cli`
 
-When the extension activates, it starts a local authenticated Unix domain socket bridge and installs the `jupyter-sync` CLI to `~/.local/bin/jupyter-sync`.
+The extension includes a companion CLI at `~/.local/bin/jupyter-sync` designed specifically for terminal-based AI coding agents like **`jetski-cli`**.
 
-Ensure `~/.local/bin` is on your `PATH`, then run `jupyter-sync` from any terminal inside your workspace (or any subdirectory):
+### Step 1: Ensure `~/.local/bin/jupyter-sync` Is Installed
 
+- **If you installed the VS Code extension**: The extension automatically installs `~/.local/bin/jupyter-sync` on startup (or you can run **`Jupyter Sync: Install 'jupyter-sync' CLI to PATH`** from the Command Palette).
+- **If you are using `jetski-cli` without VS Code**: Build and link the CLI directly from this repo:
+  ```bash
+  cd vscode-extension && npm install && npm run compile
+  mkdir -p ~/.local/bin
+  ln -sf "$(pwd)/dist/cli.js" ~/.local/bin/jupyter-sync
+  chmod +x dist/cli.js ~/.local/bin/jupyter-sync
+  ```
+
+Verify it works:
 ```bash
-# 1. Check connection status, remote root, and active kernels
-jupyter-sync status
-
-# 2. Force an immediate sync and wait for completion
-jupyter-sync sync
-
-# 3. Execute Python code on the remote TPU/GPU kernel (auto-syncs dirty files first!)
-jupyter-sync exec -c "import jax; print(jax.devices()); print('device count:', jax.device_count())"
-
-# 4. Execute a local Python script on the remote kernel
-jupyter-sync exec --file scripts/verify_tpu.py
-
-# 5. Execute specific cells of a notebook on the remote kernel
-jupyter-sync run-cell notebooks/train.ipynb --cell 0
-jupyter-sync run-cell notebooks/train.ipynb --all
-
-# 6. Read cell outputs (stdout, stderr, tracebacks) from a notebook
-jupyter-sync outputs notebooks/train.ipynb
-
-# 7. Run an arbitrary shell command on the remote pod (works even while kernel is busy!)
-jupyter-sync sh "pip install einops && nvidia-smi || ls -la /dev/vfio"
+~/.local/bin/jupyter-sync --help
 ```
 
-Pass `--json` to any command for structured JSON output ideal for AI agents (`jetski-cli`, Claude Code, etc.).
+---
+
+### Step 2: Choose How `jetski-cli` Connects to the Remote Workspace
+
+`~/.local/bin/jupyter-sync` supports **two connection modes** depending on whether VS Code is open alongside `jetski-cli`:
+
+#### Mode A — Paired with VS Code (Zero-Config IPC Bridge)
+1. Open your repository in **VS Code** and connect to your remote Jupyter / GKE TPU workspace (`Jupyter Sync: Connect & Sync Workspace...`).
+2. Open a terminal in the **same repository directory** (or any subdirectory) and start `jetski-cli`.
+3. `jupyter-sync` automatically discovers the live VS Code IPC socket for your workspace (`~/.jupyter-sync/bridge-<hash>.sock`) — **you do not need to pass `--url` or set `JUPYTER_URL`**.
+4. When `jetski-cli` runs `jupyter-sync exec` or `jupyter-sync run-cell`:
+   - Dirty local files are flushed to the remote pod first (**Pre-Execution Sync Barrier**).
+   - Code executes on the **same live kernel** attached to your open notebook in VS Code (preserving loaded model weights and TPU state).
+   - Updated cell outputs and tracebacks are automatically saved back to the local `.ipynb` file on disk so `jetski-cli` can read them.
+
+#### Mode B — Standalone / Headless `jetski-cli` (No VS Code Required)
+If VS Code is **not** running, export `JUPYTER_URL` in your shell before starting `jetski-cli` (or pass `--url "<url>"` to individual commands):
+
+```bash
+export JUPYTER_URL="https://connect.<INGRESS_IP>.sslip.io/workspace/connect/<NAMESPACE>/<WORKSPACE_NAME>/jupyterlab/?token=<BEARER_JWT>"
+jetski-cli
+```
+
+In headless mode, `~/.local/bin/jupyter-sync` talks directly to the remote Jupyter Server:
+- Automatically syncs your local Git repository to `/<jupyter-root>/<repo-name>/` before every `exec` or `run-cell` call.
+- Reuses an existing idle kernel (or starts a temporary one) and initializes `os.chdir()`, `sys.path`, and `%autoreload 2`.
+- Writes updated cell outputs back to the local `.ipynb` file after `run-cell`.
+
+---
+
+### Step 3: CLI Command Reference
+
+```bash
+# 1. Check connection mode ('ipc-bridge' vs 'headless'), server URL, and active kernels
+~/.local/bin/jupyter-sync status
+
+# 2. Flush pending local file edits to the remote workspace immediately
+~/.local/bin/jupyter-sync sync
+
+# 3. Execute Python code on the remote TPU/GPU kernel (auto-syncs local files first!)
+~/.local/bin/jupyter-sync exec "import jax; print(jax.devices())"
+
+# 4. Execute Python code in the working directory & kernel context of a specific notebook
+~/.local/bin/jupyter-sync exec "import local_helper; print(local_helper.run())" \
+  --notebook experiments/exp1/train.ipynb
+
+# 5. Execute a specific 0-based cell of a local .ipynb on the remote kernel and save outputs back to disk
+~/.local/bin/jupyter-sync run-cell experiments/exp1/train.ipynb 0
+
+# 6. Read live in-memory (or saved on-disk) cell outputs & tracebacks from a notebook
+~/.local/bin/jupyter-sync outputs experiments/exp1/train.ipynb
+~/.local/bin/jupyter-sync outputs experiments/exp1/train.ipynb --cell 0
+
+# 7. Run a shell command on the remote pod (via Jupyter Terminal API — works even while kernel is busy!)
+~/.local/bin/jupyter-sync sh "pip install einops && ls -la"
+~/.local/bin/jupyter-sync sh "pytest tests/" --cwd src/subpackage
+```
+
+---
+
+### Step 4: How to Prompt or Configure `jetski-cli`
+
+#### Option 1 — Ask `jetski-cli` Directly in Your Prompt
+> *"Use `~/.local/bin/jupyter-sync` to run and debug `experiments/train.ipynb` on my remote TPU workspace. Whenever you edit `.py` files or notebook cells, verify them on the remote TPU using `~/.local/bin/jupyter-sync run-cell` or `~/.local/bin/jupyter-sync exec`."*
+
+#### Option 2 — Add a Workspace Rule (`.jetski/rules/jupyter-sync.md`)
+Create `.jetski/rules/jupyter-sync.md` in your repository so `jetski-cli` automatically knows how to execute code on the remote TPU/GPU pod in every session:
+
+```markdown
+# Remote Jupyter / TPU Execution (`jupyter-sync`)
+
+When running Python scripts, debugging `.ipynb` notebooks, or installing packages on the remote GPU/TPU workspace, use `~/.local/bin/jupyter-sync`:
+
+- Check connection status: `~/.local/bin/jupyter-sync status`
+- Sync local file edits to remote pod: `~/.local/bin/jupyter-sync sync`
+- Run a Python snippet on the remote kernel: `~/.local/bin/jupyter-sync exec "<python_code>" [--notebook <path/to/notebook.ipynb>]`
+- Run a specific 0-based notebook cell on the remote kernel (and persist outputs to disk): `~/.local/bin/jupyter-sync run-cell <path/to/notebook.ipynb> <cell_index>`
+- Inspect cell outputs/tracebacks: `~/.local/bin/jupyter-sync outputs <path/to/notebook.ipynb> [--cell <cell_index>]`
+- Run a remote shell command (e.g. `pip install`, `nvidia-smi`): `~/.local/bin/jupyter-sync sh "<command>" [--cwd <rel_dir>]`
+```
 
 ---
 
@@ -171,23 +254,28 @@ Pass `--json` to any command for structured JSON output ideal for AI agents (`je
 
 | Command | Description |
 | :--- | :--- |
-| `Jupyter Sync: Connect to Remote Workspace` | Connect to a remote JupyterLab / GKE Workspace URL and run initial sync |
-| `Jupyter Sync: Sync Workspace Now` | Force a full 3-way diff sync of the local workspace to the remote server |
-| `Jupyter Sync: Update Connection Token` | Hot-swap the Bearer token / URL without disconnecting active kernels |
-| `Jupyter Sync: Disconnect` | Disconnect from the remote server and stop file watchers |
-| `Jupyter Sync: Show Output Log` | Open the `Jupyter Workspace Sync` output channel for detailed diagnostics |
+| `Jupyter Sync: Connect & Sync Workspace...` | Connect to a remote JupyterLab / GKE Workspace URL and run initial sync |
+| `Jupyter Sync: Sync Repository Now` | Force an incremental 3-way diff sync of the local workspace to the remote server |
+| `Jupyter Sync: Clean & Full Re-sync Remote Repository` | Wipe the remote synced folder and re-upload all tracked workspace files |
+| `Jupyter Sync: Cancel Active Sync` | Abort an in-progress bulk or incremental sync |
+| `Jupyter Sync: Update Connection Token...` | Hot-swap the Bearer token / URL in-place without disconnecting active kernels |
+| `Jupyter Sync: Disconnect Remote Server` | Disconnect from the remote server and stop file watchers |
+| `Jupyter Sync: Show Sync Output Logs` | Open the `Jupyter Workspace Sync` output channel for detailed diagnostics |
+| `Jupyter Sync: Install 'jupyter-sync' CLI to PATH` | Re-install the `~/.local/bin/jupyter-sync` CLI wrapper |
 
 ### Extension Settings (`settings.json`)
 
 | Setting | Default | Description |
 | :--- | :--- | :--- |
-| `jupyterSync.autoSyncOnSave` | `true` | Automatically sync modified local files to the remote workspace on save |
-| `jupyterSync.enableAutoReload` | `true` | Automatically configure `%load_ext autoreload` and `%autoreload 2` on remote Python kernels |
-| `jupyterSync.respectGitignore` | `true` | Use `git ls-files` (when inside a Git repository) so gitignored files are never uploaded |
+| `jupyterSync.autoSyncOnSave` | `true` | Automatically sync modified, created, renamed, and deleted files to the remote server |
+| `jupyterSync.enableAutoreload` | `true` | Automatically configure `%load_ext autoreload` and `%autoreload 2` on remote Python kernels |
+| `jupyterSync.setKernelWorkingDirectory` | `true` | Automatically set the remote kernel's `os.chdir()` and `sys.path` to match the open notebook's directory and repository root |
+| `jupyterSync.enableAgentBridge` | `true` | Enable the local Unix socket IPC bridge (`~/.jupyter-sync/`) for `jupyter-sync` and `jetski-cli` |
+| `jupyterSync.autoSaveOutputs` | `true` | Automatically persist updated cell outputs to the local `.ipynb` file after remote cell execution |
 | `jupyterSync.overwriteNotebooks` | `false` | When `false`, existing remote `.ipynb` files are skipped during background sync so remote outputs are preserved |
+| `jupyterSync.remoteBaseDir` | `"${workspaceFolderBasename}"` | Target subdirectory under the Jupyter Server root (set to `""` to sync directly into the server root) |
 | `jupyterSync.maxFileSizeMB` | `10` | Skip syncing individual files larger than this size in MB |
-| `jupyterSync.exclude` | `[".git/**", "**/.venv/**", "**/node_modules/**", "**/__pycache__/**", "**/*.pyc", ".ipynb_checkpoints/**", "**/*.vsix", "**/dist/**", "**/out/**", "**/*.mp4", "**/*.mov"]` | Glob patterns excluded from file synchronization |
-| `jupyterSync.enableAgentBridge` | `true` | Enable the local Unix socket bridge (`~/.jupyter-sync/`) for the `jupyter-sync` CLI |
+| `jupyterSync.exclude` | `[".git/**", "**/__pycache__/**", "**/.ipynb_checkpoints/**", "**/node_modules/**", "**/.venv/**", "**/dist/**", "**/out/**", "**/*.vsix", "**/*.mp4", "**/*.mov"]` | Glob patterns excluded from file synchronization |
 
 ---
 
@@ -203,3 +291,4 @@ Pass `--json` to any command for structured JSON output ideal for AI agents (`je
   cd vscode-extension
   JUPYTER_TEST_URL="https://connect.../jupyterlab/?token=..." npm run test:live
   ```
+
