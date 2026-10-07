@@ -112,6 +112,16 @@ export class ConnectionManager implements vscode.Disposable {
     return this.kernelInitializer;
   }
 
+  bindKernelToNotebook(kernelId: string, notebookFsPath: string): void {
+    const norm = path.resolve(notebookFsPath);
+    for (const [existingKernelId, existingNbPath] of this.kernelToNotebookPath.entries()) {
+      if (existingKernelId !== kernelId && path.resolve(existingNbPath) === norm) {
+        this.kernelToNotebookPath.delete(existingKernelId);
+      }
+    }
+    this.kernelToNotebookPath.set(kernelId, norm);
+  }
+
   getKernelForNotebook(notebookFsPath: string): string | undefined {
     const norm = path.resolve(notebookFsPath);
     for (const [kId, nbPath] of this.kernelToNotebookPath.entries()) {
@@ -346,10 +356,14 @@ export class ConnectionManager implements vscode.Disposable {
     await this.saveServerMetadata(meta);
     await this.context.workspaceState.update(ACTIVE_SERVER_ID_KEY, meta.id);
 
+    const isSwitchingServer = !this.activeClient || this.activeClient.serverId !== meta.id;
     this.activeClient = client;
     this.activeServerMeta = meta;
     this.activeSyncEngine = new SyncEngine(client);
     this.kernelInitializer.invalidate();
+    if (isSwitchingServer) {
+      this.kernelToNotebookPath.clear();
+    }
 
     this.onDidChangeServersEmitter.fire();
     await this.callbacks.onServerConnected(client, isReconnect);
@@ -512,10 +526,15 @@ export class ConnectionManager implements vscode.Disposable {
         }
       }
 
-      // Intercept POST /api/kernels/<id>/restart to invalidate kernel init state
+      // Intercept POST /api/kernels/<id>/restart or DELETE /api/kernels/<id> to invalidate kernel init state
       const restartMatch = parsedUrl.pathname.match(/\/api\/kernels\/([^/]+)\/restart$/);
       if (method === 'POST' && restartMatch) {
         this.kernelInitializer.invalidate(restartMatch[1]);
+      }
+      const deleteKernelMatch = parsedUrl.pathname.match(/\/api\/kernels\/([^/]+)$/);
+      if (method === 'DELETE' && deleteKernelMatch) {
+        this.kernelInitializer.invalidate(deleteKernelMatch[1]);
+        this.kernelToNotebookPath.delete(deleteKernelMatch[1]);
       }
 
       const resp = await fetch(parsedUrl.toString(), {
@@ -540,7 +559,7 @@ export class ConnectionManager implements vscode.Disposable {
           const cloned = resp.clone();
           const data = (await cloned.json()) as { kernel?: { id?: string } };
           if (data?.kernel?.id && matchedNotebookFsPath) {
-            this.kernelToNotebookPath.set(data.kernel.id, matchedNotebookFsPath);
+            this.bindKernelToNotebook(data.kernel.id, matchedNotebookFsPath);
           }
         } catch {
           // ignore
@@ -753,18 +772,13 @@ export class ConnectionManager implements vscode.Disposable {
     kernelId: string,
     execMsg?: JupyterWireMessage
   ): string | undefined {
-    const mapped = this.kernelToNotebookPath.get(kernelId);
-    if (mapped) {
-      return mapped;
-    }
-
-    // Check cellId metadata if present in VS Code's execute_request metadata
+    // 1. Check cellId metadata if present in VS Code's execute_request metadata (authoritative for the active cell)
     const cellUriStr = execMsg?.metadata?.vscode?.cellId;
     if (typeof cellUriStr === 'string') {
       try {
         const parsedUri = vscode.Uri.parse(cellUriStr);
         if (parsedUri.fsPath) {
-          this.kernelToNotebookPath.set(kernelId, parsedUri.fsPath);
+          this.bindKernelToNotebook(kernelId, parsedUri.fsPath);
           return parsedUri.fsPath;
         }
       } catch {
@@ -772,15 +786,22 @@ export class ConnectionManager implements vscode.Disposable {
       }
     }
 
+    // 2. Check existing session -> notebook mapping
+    const mapped = this.kernelToNotebookPath.get(kernelId);
+    if (mapped) {
+      return mapped;
+    }
+
+    // 3. Fall back to the currently focused or first open notebook in VS Code
     if (vscode.window.activeNotebookEditor?.notebook.uri.scheme === 'file') {
       const activePath = vscode.window.activeNotebookEditor.notebook.uri.fsPath;
-      this.kernelToNotebookPath.set(kernelId, activePath);
+      this.bindKernelToNotebook(kernelId, activePath);
       return activePath;
     }
 
     const firstNb = vscode.workspace.notebookDocuments.find((d) => d.uri.scheme === 'file');
     if (firstNb) {
-      this.kernelToNotebookPath.set(kernelId, firstNb.uri.fsPath);
+      this.bindKernelToNotebook(kernelId, firstNb.uri.fsPath);
       return firstNb.uri.fsPath;
     }
 
