@@ -1,0 +1,171 @@
+{
+  "name": "jupyter-workspace-sync",
+  "displayName": "Jupyter Workspace Sync",
+  "description": "Automatically sync local repository files, configure notebook working directories & sys.path, enable %autoreload 2, and bridge CLI coding agents with remote Jupyter / Kubeflow / GKE GPU & TPU servers.",
+  "version": "0.1.0",
+  "publisher": "kubeflow",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kubeflow/notebooks.git",
+    "directory": "vscode-extension"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Data Science",
+    "Machine Learning",
+    "Notebooks",
+    "Other"
+  ],
+  "keywords": [
+    "jupyter",
+    "notebook",
+    "kubeflow",
+    "gke",
+    "tpu",
+    "gpu",
+    "sync",
+    "remote",
+    "workspace"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onNotebook:jupyter-notebook",
+    "onCommand:jupyterSync.connect",
+    "onCommand:jupyterSync.syncNow"
+  ],
+  "extensionDependencies": [
+    "ms-toolsai.jupyter"
+  ],
+  "main": "./dist/extension.js",
+  "bin": {
+    "jupyter-sync": "./dist/cli.js"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "jupyterSync.connect",
+        "title": "Jupyter Sync: Connect & Sync Workspace...",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "jupyterSync.syncNow",
+        "title": "Jupyter Sync: Sync Repository Now",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "jupyterSync.cancelSync",
+        "title": "Jupyter Sync: Cancel Active Sync",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "jupyterSync.fullResync",
+        "title": "Jupyter Sync: Clean & Full Re-sync Remote Repository",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "jupyterSync.updateToken",
+        "title": "Jupyter Sync: Update Connection Token...",
+        "icon": "$(key)"
+      },
+      {
+        "command": "jupyterSync.disconnect",
+        "title": "Jupyter Sync: Disconnect Remote Server",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "jupyterSync.showLogs",
+        "title": "Jupyter Sync: Show Sync Output Logs",
+        "icon": "$(output)"
+      },
+      {
+        "command": "jupyterSync.installCli",
+        "title": "Jupyter Sync: Install 'jupyter-sync' CLI to PATH",
+        "icon": "$(terminal)"
+      }
+    ],
+    "configuration": {
+      "title": "Jupyter Workspace Sync",
+      "properties": {
+        "jupyterSync.autoSyncOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically sync modified, created, renamed, and deleted files to the remote Jupyter server."
+        },
+        "jupyterSync.enableAutoreload": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically configure IPython %autoreload 2 on remote Jupyter kernels so local .py edits take effect without restarting the kernel."
+        },
+        "jupyterSync.setKernelWorkingDirectory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically set the remote kernel's working directory (os.chdir) and sys.path to match the open notebook's directory and repository root."
+        },
+        "jupyterSync.enableAgentBridge": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the local Unix socket IPC bridge (~/.jupyter-sync/) so CLI coding agents (jetski-cli) can flush syncs, inspect live cell outputs, and execute code on the remote kernel."
+        },
+        "jupyterSync.autoSaveOutputs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically persist updated cell outputs to the local .ipynb file after remote cell execution so local CLI tools and agents see fresh outputs and tracebacks."
+        },
+        "jupyterSync.overwriteNotebooks": {
+          "type": "boolean",
+          "default": false,
+          "description": "When false, .ipynb files are seeded only if missing on the remote server and ignored during continuous watch so running remote notebook outputs are protected."
+        },
+        "jupyterSync.remoteBaseDir": {
+          "type": "string",
+          "default": "${workspaceFolderBasename}",
+          "description": "Target subdirectory under the Jupyter Server root (set to empty string \"\" to sync directly into the server root)."
+        },
+        "jupyterSync.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".git/**",
+            "**/__pycache__/**",
+            "**/.ipynb_checkpoints/**",
+            "**/node_modules/**",
+            "**/.venv/**",
+            "**/dist/**",
+            "**/out/**",
+            "**/*.vsix",
+            "**/*.mp4",
+            "**/*.mov"
+          ],
+          "description": "Glob patterns to exclude from synchronization."
+        },
+        "jupyterSync.maxFileSizeMB": {
+          "type": "number",
+          "default": 10,
+          "description": "Maximum individual file size (in MB) to include in automatic sync."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node ./dist/test/unit/runUnitTests.js",
+    "test:live": "npm run compile && node ./dist/test/liveTpuIntegration.js",
+    "package": "npm run compile && npx --yes @vscode/vsce package --no-git-tag-version -o jupyter-workspace-sync.vsix"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.10",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.4.0"
+  }
+}
