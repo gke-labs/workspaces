@@ -336,7 +336,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const localBinDir = path.join(os.homedir(), '.local', 'bin');
       fs.mkdirSync(localBinDir, { recursive: true });
       const wrapperPath = path.join(localBinDir, 'jupyter-sync');
-      const wrapperScript = `#!/usr/bin/env sh\nexec "${process.execPath}" "${cliJsPath}" "$@"\n`;
+      const wrapperScript = [
+        '#!/usr/bin/env sh',
+        'if command -v node >/dev/null 2>&1; then',
+        `  exec node "${cliJsPath}" "$@"`,
+        'fi',
+        `ELECTRON_RUN_AS_NODE=1 exec "${process.execPath}" "${cliJsPath}" "$@"`,
+        '',
+      ].join('\n');
       fs.writeFileSync(wrapperPath, wrapperScript, { mode: 0o755 });
       context.environmentVariableCollection.prepend('PATH', `${localBinDir}${path.delimiter}`);
       if (showNotification) {
