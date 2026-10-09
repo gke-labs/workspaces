@@ -74,7 +74,7 @@ export interface BridgeConfig {
     force?: boolean;
     overwriteNotebooks?: boolean;
   }) => Promise<SyncSummary>;
-  connectFromUrl?: (url: string) => Promise<void>;
+  connectFromUrl?: (url: string, remoteDir?: string) => Promise<SyncSummary | null | void>;
   hostAdapter?: NotebookHostAdapter;
 }
 
@@ -151,8 +151,13 @@ export function loadCliSession(workspaceRoot: string): SavedCliSessionEntry | un
       return undefined;
     }
     const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as SavedCliSessionsFile;
-    let curr = path.resolve(workspaceRoot);
+    const homeDir = path.resolve(os.homedir());
+    const resolvedStart = path.resolve(workspaceRoot);
+    let curr = resolvedStart;
     while (true) {
+      if (curr === homeDir && resolvedStart !== homeDir) {
+        break;
+      }
       if (parsed.workspaces && parsed.workspaces[curr]) {
         return parsed.workspaces[curr];
       }
@@ -162,7 +167,7 @@ export function loadCliSession(workspaceRoot: string): SavedCliSessionEntry | un
       }
       curr = parent;
     }
-    return parsed.lastUsed;
+    return undefined;
   } catch {
     return undefined;
   }
@@ -185,10 +190,28 @@ export function saveCliSession(workspaceRoot: string, entry: SavedCliSessionEntr
     }
     const normRoot = path.resolve(workspaceRoot);
     data.workspaces[normRoot] = entry;
-    data.lastUsed = entry;
+    delete data.lastUsed;
     fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
   } catch {
     // ignore write errors
+  }
+}
+
+export function removeCliSession(workspaceRoot: string): void {
+  try {
+    const file = getCliSessionsFilePath();
+    if (!fs.existsSync(file)) {
+      return;
+    }
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8')) as SavedCliSessionsFile;
+    const normRoot = path.resolve(workspaceRoot);
+    if (data.workspaces && data.workspaces[normRoot]) {
+      delete data.workspaces[normRoot];
+      delete data.lastUsed;
+      fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+    }
+  } catch {
+    // ignore
   }
 }
 
@@ -199,6 +222,18 @@ interface SessionRegistryEntry {
   updatedAt: string;
 }
 
+function isProcessAlive(pid: number): boolean {
+  if (!pid || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    return err?.code === 'EPERM';
+  }
+}
+
 /**
  * Discovers the active Unix domain socket for `startDir` (supporting nested subdirectories).
  */
@@ -206,8 +241,13 @@ export function discoverBridgeSocket(startDir: string): {
   socketPath: string;
   workspaceRoot: string;
 } | null {
-  let curr = path.resolve(startDir);
+  const homeDir = path.resolve(os.homedir());
+  const resolvedStart = path.resolve(startDir);
+  let curr = resolvedStart;
   while (true) {
+    if (curr === homeDir && resolvedStart !== homeDir) {
+      break;
+    }
     const candidate = getSocketPathForWorkspace(curr);
     if (fs.existsSync(candidate)) {
       return { socketPath: candidate, workspaceRoot: curr };
@@ -227,17 +267,36 @@ export function discoverBridgeSocket(startDir: string): {
         string,
         SessionRegistryEntry
       >;
-      const resolvedStart = path.resolve(startDir);
       let bestMatch: SessionRegistryEntry | null = null;
-      for (const entry of Object.values(entries)) {
+      let dirty = false;
+      for (const [key, entry] of Object.entries(entries)) {
         const root = path.resolve(entry.workspaceRoot);
-        if (
-          (resolvedStart === root || resolvedStart.startsWith(root + path.sep)) &&
-          fs.existsSync(entry.socketPath)
-        ) {
+        if (!fs.existsSync(entry.socketPath) || !isProcessAlive(entry.pid)) {
+          if (fs.existsSync(entry.socketPath)) {
+            try {
+              fs.unlinkSync(entry.socketPath);
+            } catch {
+              // ignore
+            }
+          }
+          delete entries[key];
+          dirty = true;
+          continue;
+        }
+        if (root === homeDir && resolvedStart !== homeDir) {
+          continue;
+        }
+        if (resolvedStart === root || resolvedStart.startsWith(root + path.sep)) {
           if (!bestMatch || root.length > bestMatch.workspaceRoot.length) {
             bestMatch = entry;
           }
+        }
+      }
+      if (dirty) {
+        try {
+          fs.writeFileSync(sessionsFile, JSON.stringify(entries, null, 2), { mode: 0o600 });
+        } catch {
+          // ignore
         }
       }
       if (bestMatch) {
@@ -538,13 +597,14 @@ export class AgentBridgeServer {
 
     if (req.action === 'connect') {
       const url = String(params.url || '');
+      const remoteDir = params.remoteDir ? String(params.remoteDir) : undefined;
       if (!url) {
         throw new Error('Missing url parameter for connect');
       }
       if (!this.config.connectFromUrl) {
         throw new Error('connectFromUrl is not supported by this bridge host');
       }
-      await this.config.connectFromUrl(url);
+      const syncSummary = await this.config.connectFromUrl(url, remoteDir);
       const updatedClient = this.config.getClient();
       this.sendResponse(socket, {
         id: req.id,
@@ -556,13 +616,44 @@ export class AgentBridgeServer {
           baseUrl: updatedClient?.baseUrl || null,
           workspaceRoot: this.config.workspaceRoot,
           remoteBaseDir: this.config.getRemoteBaseDir(),
+          syncSummary: syncSummary || null,
         },
       });
       return;
     }
 
-    const client = this.config.getClient();
-    const syncEngine = this.config.getSyncEngine();
+    if (req.action === 'outputs') {
+      const rawNbPath = String(params.notebookPath || '');
+      const cellIndex =
+        params.cellIndex !== undefined && params.cellIndex !== null
+          ? Number(params.cellIndex)
+          : undefined;
+      const absNbPath = path.isAbsolute(rawNbPath)
+        ? rawNbPath
+        : path.resolve(this.config.workspaceRoot, rawNbPath);
+
+      let outputs: CellOutputSummary[] | null = null;
+      if (this.config.hostAdapter?.getLiveNotebookOutputs) {
+        outputs = await this.config.hostAdapter.getLiveNotebookOutputs(absNbPath, cellIndex);
+      }
+      if (!outputs) {
+        if (!fs.existsSync(absNbPath)) {
+          throw new Error(`Notebook file not found: ${absNbPath}`);
+        }
+        outputs = parseNotebookOutputsFromDisk(absNbPath, cellIndex);
+      }
+
+      this.sendResponse(socket, {
+        id: req.id,
+        type: 'response',
+        ok: true,
+        result: outputs,
+      });
+      return;
+    }
+
+    let client = this.config.getClient();
+    let syncEngine = this.config.getSyncEngine();
 
     if (req.action === 'status') {
       this.sendResponse(socket, {
@@ -578,6 +669,19 @@ export class AgentBridgeServer {
         },
       });
       return;
+    }
+
+    // When an agent explicitly initiates a sync or remote execution action via the bridge,
+    // activate the connection from the workspace's saved CLI session if not yet active.
+    if ((!client || !syncEngine) && this.config.connectFromUrl) {
+      const fallbackUrl =
+        (params.url ? String(params.url) : undefined) ||
+        loadCliSession(this.config.workspaceRoot)?.url;
+      if (fallbackUrl) {
+        await this.config.connectFromUrl(fallbackUrl);
+        client = this.config.getClient();
+        syncEngine = this.config.getSyncEngine();
+      }
     }
 
     if (!client || !syncEngine) {
@@ -759,36 +863,6 @@ export class AgentBridgeServer {
       return;
     }
 
-    if (req.action === 'outputs') {
-      const rawNbPath = String(params.notebookPath || '');
-      const cellIndex =
-        params.cellIndex !== undefined && params.cellIndex !== null
-          ? Number(params.cellIndex)
-          : undefined;
-      const absNbPath = path.isAbsolute(rawNbPath)
-        ? rawNbPath
-        : path.resolve(this.config.workspaceRoot, rawNbPath);
-
-      let outputs: CellOutputSummary[] | null = null;
-      if (this.config.hostAdapter?.getLiveNotebookOutputs) {
-        outputs = await this.config.hostAdapter.getLiveNotebookOutputs(absNbPath, cellIndex);
-      }
-      if (!outputs) {
-        if (!fs.existsSync(absNbPath)) {
-          throw new Error(`Notebook file not found: ${absNbPath}`);
-        }
-        outputs = parseNotebookOutputsFromDisk(absNbPath, cellIndex);
-      }
-
-      this.sendResponse(socket, {
-        id: req.id,
-        type: 'response',
-        ok: true,
-        result: outputs,
-      });
-      return;
-    }
-
     if (req.action === 'sh') {
       const command = String(params.command || '');
       const relCwd = params.cwd ? normalizeApiPath(String(params.cwd)) : '';
@@ -860,6 +934,22 @@ export class AgentBridgeServer {
       } catch {
         // ignore
       }
+    }
+    try {
+      const sessionsFile = getSessionsFilePath();
+      if (fs.existsSync(sessionsFile)) {
+        const entries = JSON.parse(fs.readFileSync(sessionsFile, 'utf-8')) as Record<
+          string,
+          SessionRegistryEntry
+        >;
+        const normRoot = path.resolve(this.config.workspaceRoot);
+        if (entries[normRoot]?.socketPath === this.socketPath) {
+          delete entries[normRoot];
+          fs.writeFileSync(sessionsFile, JSON.stringify(entries, null, 2), { mode: 0o600 });
+        }
+      }
+    } catch {
+      // ignore
     }
   }
 }

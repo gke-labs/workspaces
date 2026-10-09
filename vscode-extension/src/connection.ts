@@ -16,7 +16,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
-import { saveCliSession } from './agentBridge';
+import { loadCliSession, removeCliSession, saveCliSession } from './agentBridge';
 import { JupyterAuthError, JupyterClient, normalizeApiPath } from './core/jupyterClient';
 import { SyncEngine } from './core/syncEngine';
 import { parseJupyterUrl, ParsedJupyterUrl } from './core/urlParser';
@@ -86,6 +86,8 @@ export class ConnectionManager implements vscode.Disposable {
   private activeClient: JupyterClient | null = null;
   private activeServerMeta: SavedServerMetadata | null = null;
   private activeSyncEngine: SyncEngine | null = null;
+  private readonly passiveClients = new Map<string, JupyterClient>();
+  private pendingActivation: Promise<void> | null = null;
   private readonly kernelInitializer = new KernelInitializer();
   private readonly kernelToNotebookPath = new Map<string, string>();
   private collectionDisposable: vscode.Disposable | null = null;
@@ -178,17 +180,23 @@ export class ConnectionManager implements vscode.Disposable {
           }
           const secretToken = (await this.context.secrets.get(`${SECRET_PREFIX}${saved.id}`)) || '';
 
-          if (!this.activeClient || this.activeClient.serverId !== saved.id) {
-            await this.activateServer(saved, secretToken, true);
-          } else if (secretToken && this.activeClient.token !== secretToken) {
-            this.activeClient.updateToken(secretToken);
+          let client: JupyterClient;
+          if (this.activeClient && this.activeClient.serverId === saved.id) {
+            if (secretToken && this.activeClient.token !== secretToken) {
+              this.activeClient.updateToken(secretToken);
+            }
+            client = this.activeClient;
+          } else {
+            // Do NOT activate workspace syncing here: ms-toolsai.jupyter calls resolveJupyterServer
+            // in the background on VS Code startup just to probe cached controllers.
+            // Syncing will be activated lazily when the user actually connects to a remote kernel.
+            client = this.getOrCreatePassiveClient(saved, secretToken);
           }
 
-          const client = this.activeClient!;
           return {
             id: saved.id,
             label: `Jupyter Sync: ${saved.label}`,
-            connectionInformation: this.buildConnectionInformation(client),
+            connectionInformation: this.buildConnectionInformation(client, saved),
           };
         },
       };
@@ -233,7 +241,7 @@ export class ConnectionManager implements vscode.Disposable {
           return {
             id: connected.id,
             label: `Jupyter Sync: ${connected.label}`,
-            connectionInformation: this.buildConnectionInformation(this.activeClient),
+            connectionInformation: this.buildConnectionInformation(this.activeClient, connected),
           };
         },
       };
@@ -250,38 +258,6 @@ export class ConnectionManager implements vscode.Disposable {
       this.callbacks.onLog(
         `[Warn] Failed to register JupyterServerCollection: ${(err as Error).message}`
       );
-    }
-  }
-
-  /**
-   * Restores the previously active server connection on window reload if present.
-   */
-  async restorePreviousSessionIfAny(): Promise<boolean> {
-    const savedServers = this.getSavedServers();
-    const activeId =
-      this.context.workspaceState.get<string>(ACTIVE_SERVER_ID_KEY) || savedServers[0]?.id;
-    if (!activeId) {
-      return false;
-    }
-    const saved = savedServers.find((s) => s.id === activeId);
-    if (!saved) {
-      return false;
-    }
-    const token = await this.context.secrets.get(`${SECRET_PREFIX}${saved.id}`);
-    if (token === undefined) {
-      return false;
-    }
-
-    try {
-      await this.activateServer(saved, token, true);
-      return true;
-    } catch (err) {
-      this.callbacks.onLog(
-        `[Reconnect] Could not restore previous session to ${saved.label}: ${
-          (err as Error).message
-        }`
-      );
-      return false;
     }
   }
 
@@ -313,7 +289,11 @@ export class ConnectionManager implements vscode.Disposable {
    * Connects to a remote Jupyter Server from a raw URL, stores token in SecretStorage,
    * and triggers initial/reconnect workspace sync.
    */
-  async connectFromUrl(rawUrl: string, explicitToken?: string): Promise<SavedServerMetadata> {
+  async connectFromUrl(
+    rawUrl: string,
+    explicitToken?: string,
+    remoteDirOverride?: string
+  ): Promise<SavedServerMetadata> {
     const parsed: ParsedJupyterUrl = parseJupyterUrl(rawUrl, explicitToken);
     const meta: SavedServerMetadata = {
       id: parsed.id,
@@ -326,15 +306,20 @@ export class ConnectionManager implements vscode.Disposable {
       lastConnectedAt: new Date().toISOString(),
     };
 
-    await this.activateServer(meta, parsed.token, false);
+    const client = this.getOrCreatePassiveClient(meta, parsed.token);
+    await this.activateServerWithClient(meta, client, false, remoteDirOverride, true);
     return meta;
   }
 
-  private async activateServer(
-    meta: SavedServerMetadata,
-    token: string,
-    isReconnect: boolean
-  ): Promise<void> {
+  private getOrCreatePassiveClient(meta: SavedServerMetadata, token: string): JupyterClient {
+    const existing = this.passiveClients.get(meta.id);
+    if (existing) {
+      if (token && existing.token !== token) {
+        existing.updateToken(token);
+      }
+      return existing;
+    }
+
     const client = new JupyterClient(
       {
         id: meta.id,
@@ -350,17 +335,67 @@ export class ConnectionManager implements vscode.Disposable {
     );
 
     client.onAuthError(() => {
-      this.callbacks.onTokenExpired(meta);
+      if (this.activeServerMeta?.id === meta.id) {
+        this.callbacks.onTokenExpired(meta);
+      }
     });
 
+    this.passiveClients.set(meta.id, client);
+    return client;
+  }
+
+  private async ensureServerActivated(
+    meta: SavedServerMetadata,
+    client: JupyterClient
+  ): Promise<void> {
+    if (this.activeClient && this.activeClient.serverId === meta.id) {
+      return;
+    }
+    if (this.pendingActivation) {
+      await this.pendingActivation;
+      if (this.activeClient && this.activeClient.serverId === meta.id) {
+        return;
+      }
+    }
+    const p = this.activateServerWithClient(meta, client, true, undefined, false);
+    this.pendingActivation = p;
+    try {
+      await p;
+    } finally {
+      if (this.pendingActivation === p) {
+        this.pendingActivation = null;
+      }
+    }
+  }
+
+  private async activateServerWithClient(
+    meta: SavedServerMetadata,
+    client: JupyterClient,
+    isReconnect: boolean,
+    remoteDirOverride?: string,
+    emitServersChanged = true
+  ): Promise<void> {
     await client.verifyConnection();
 
-    await this.context.secrets.store(`${SECRET_PREFIX}${meta.id}`, token);
+    await this.context.secrets.store(`${SECRET_PREFIX}${meta.id}`, client.token);
     await this.saveServerMetadata(meta);
     await this.context.workspaceState.update(ACTIVE_SERVER_ID_KEY, meta.id);
-    saveCliSession(this.callbacks.getWorkspaceRoot(), {
-      url: token ? `${meta.baseUrl}/?token=${token}` : meta.baseUrl,
-      remoteDir: this.callbacks.getRemoteBaseDir(),
+
+    const workspaceRoot = this.callbacks.getWorkspaceRoot();
+    if (remoteDirOverride) {
+      saveCliSession(workspaceRoot, {
+        url: client.token ? `${meta.baseUrl}/?token=${client.token}` : meta.baseUrl,
+        remoteDir: remoteDirOverride,
+        serverLabel: meta.label,
+        baseUrl: meta.baseUrl,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    const existingCliSession = loadCliSession(workspaceRoot);
+    saveCliSession(workspaceRoot, {
+      url: client.token ? `${meta.baseUrl}/?token=${client.token}` : meta.baseUrl,
+      remoteDir: remoteDirOverride || this.callbacks.getRemoteBaseDir() || existingCliSession?.remoteDir,
       serverLabel: meta.label,
       baseUrl: meta.baseUrl,
       updatedAt: new Date().toISOString(),
@@ -375,7 +410,9 @@ export class ConnectionManager implements vscode.Disposable {
       this.kernelToNotebookPath.clear();
     }
 
-    this.onDidChangeServersEmitter.fire();
+    if (emitServersChanged) {
+      this.onDidChangeServersEmitter.fire();
+    }
     await this.callbacks.onServerConnected(client, isReconnect);
   }
 
@@ -413,6 +450,7 @@ export class ConnectionManager implements vscode.Disposable {
     this.kernelInitializer.invalidate();
     this.kernelToNotebookPath.clear();
     await this.context.workspaceState.update(ACTIVE_SERVER_ID_KEY, undefined);
+    removeCliSession(this.callbacks.getWorkspaceRoot());
     this.onDidChangeServersEmitter.fire();
   }
 
@@ -430,13 +468,16 @@ export class ConnectionManager implements vscode.Disposable {
    * Builds the connectionInformation object for `ms-toolsai.jupyter`, including
    * protocol-layer `fetch` and `WebSocket` interceptors.
    */
-  private buildConnectionInformation(client: JupyterClient): JupyterServerConnectionInformation {
+  private buildConnectionInformation(
+    client: JupyterClient,
+    serverMeta?: SavedServerMetadata
+  ): JupyterServerConnectionInformation {
     return {
       baseUrl: vscode.Uri.parse(client.baseUrl),
       token: client.token,
       headers: client.buildHeaders(),
-      fetch: this.createSyncFetch(client),
-      WebSocket: this.createSyncWebSocketClass(client),
+      fetch: this.createSyncFetch(client, serverMeta),
+      WebSocket: this.createSyncWebSocketClass(client, serverMeta),
     };
   }
 
@@ -444,10 +485,11 @@ export class ConnectionManager implements vscode.Disposable {
    * Protocol-layer `fetch` wrapper for `ms-toolsai.jupyter`:
    * - Normalizes `node-fetch` Request objects passed by `@jupyterlab/services`.
    * - Synchronizes `?token=` query parameter and `Authorization` header on token renewal.
+   * - Lazily activates workspace syncing when a kernel/session is actually connected or started.
    * - Rewrites `POST /api/sessions` path to match the notebook's remote directory.
    * - Tracks `kernelId -> notebookPath` and invalidates kernel init state on `/restart`.
    */
-  private createSyncFetch(client: JupyterClient) {
+  private createSyncFetch(client: JupyterClient, serverMeta?: SavedServerMetadata) {
     return async (input: any, init?: any): Promise<Response> => {
       let rawUrl = typeof input === 'string' ? input : String(input?.url || input);
       const method = String(init?.method || input?.method || 'GET').toUpperCase();
@@ -501,6 +543,20 @@ export class ConnectionManager implements vscode.Disposable {
         } else {
           parsedUrl.searchParams.delete('token');
         }
+      }
+
+      // Activate workspace syncing when VS Code Jupyter extension actually connects to or starts a kernel/session
+      const isKernelConnectOrStart =
+        ((method === 'POST' || method === 'PATCH') &&
+          /\/api\/sessions(?:\/[^/?]+)?$/.test(parsedUrl.pathname)) ||
+        (method === 'POST' && /\/api\/kernels(?:\/[^/?]+\/restart)?$/.test(parsedUrl.pathname));
+
+      if (isKernelConnectOrStart && serverMeta) {
+        await this.ensureServerActivated(serverMeta, client).catch((err) => {
+          this.callbacks.onLog(
+            `[AutoActivate] Could not activate sync for ${serverMeta.label}: ${(err as Error).message}`
+          );
+        });
       }
 
       // Apply latest auth, Origin, and XSRF headers (replacing any stale Authorization header)
@@ -563,7 +619,7 @@ export class ConnectionManager implements vscode.Disposable {
       });
 
       if (resp.status === 401 || resp.status === 403) {
-        if (this.activeServerMeta) {
+        if (this.activeServerMeta && this.activeServerMeta.id === client.serverId) {
           this.callbacks.onTokenExpired(this.activeServerMeta);
         }
       }
@@ -596,7 +652,7 @@ export class ConnectionManager implements vscode.Disposable {
    * - Silently executes the idempotent `cwd` / `sys.path` / `%autoreload 2` setup snippet
    *   on the socket before forwarding the first cell execution for a notebook directory.
    */
-  private createSyncWebSocketClass(client: JupyterClient) {
+  private createSyncWebSocketClass(client: JupyterClient, serverMeta?: SavedServerMetadata) {
     const manager = this;
 
     return class SyncWebSocket extends WebSocket {
@@ -673,6 +729,20 @@ export class ConnectionManager implements vscode.Disposable {
               decoded.content?.silent === false;
 
             if (isUserCellExec) {
+              // Ensure workspace syncing is activated if the user runs a cell on a remote kernel
+              if (
+                serverMeta &&
+                (!manager.activeClient || manager.activeClient.serverId !== serverMeta.id)
+              ) {
+                await manager.ensureServerActivated(serverMeta, client).catch((err) => {
+                  manager.callbacks.onLog(
+                    `[AutoActivate] Could not activate sync on cell execution: ${
+                      (err as Error).message
+                    }`
+                  );
+                });
+              }
+
               // 1. Pre-Cell-Execution Sync Barrier: flush pending file edits & wait for active sync
               if (manager.activeSyncEngine) {
                 const needBanner = manager.activeSyncEngine.isSyncInProgress;

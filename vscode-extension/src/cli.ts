@@ -247,35 +247,105 @@ export async function runCli(argv: string[]): Promise<number> {
   const effectiveUrl = args.url || savedSession?.url;
   const discovered = discoverBridgeSocket(process.cwd());
 
-  // 1. Try active VS Code IPC Bridge first (when connected, unless --url points to a different server)
-  if (discovered && args.command !== 'connect') {
-    let useBridge = false;
+  // 1. Try active VS Code IPC Bridge first
+  if (discovered) {
+    let bridgeAlive = false;
+    let bridgeStatus: any = null;
     try {
-      const bridgeStatus = await callAgentBridge(
+      bridgeStatus = await callAgentBridge(
         discovered.socketPath,
         'status',
         undefined,
         undefined,
         2000
       );
-      useBridge = Boolean(bridgeStatus?.connected || args.command === 'status');
-      if (args.url) {
-        const targetClient = new JupyterClient(args.url);
-        if (!bridgeStatus?.baseUrl || bridgeStatus.baseUrl !== targetClient.baseUrl) {
-          useBridge = false;
-        }
-      }
-      if (!bridgeStatus?.connected && effectiveUrl) {
-        // Bridge is open in VS Code but disconnected; use our headless/saved URL instead
-        useBridge = false;
-      }
+      bridgeAlive = true;
     } catch {
-      // Socket was stale; fall through to headless mode if URL is available
-      useBridge = false;
+      bridgeAlive = false;
     }
 
-    if (useBridge) {
-      return await runViaBridge(discovered.socketPath, args);
+    if (bridgeAlive) {
+      if (args.command === 'outputs') {
+        return await runViaBridge(discovered.socketPath, args);
+      }
+
+      if (args.command === 'status') {
+        const targetBaseUrl = args.url ? new JupyterClient(args.url).baseUrl : undefined;
+        if (
+          bridgeStatus?.connected &&
+          (!targetBaseUrl || bridgeStatus.baseUrl === targetBaseUrl)
+        ) {
+          console.log(
+            JSON.stringify(
+              { mode: 'ipc-bridge', socketPath: discovered.socketPath, ...bridgeStatus },
+              null,
+              2
+            )
+          );
+          return 0;
+        }
+        if (!effectiveUrl) {
+          console.log(
+            JSON.stringify(
+              { mode: 'ipc-bridge', socketPath: discovered.socketPath, ...bridgeStatus },
+              null,
+              2
+            )
+          );
+          return 0;
+        }
+        // If VS Code bridge is currently idle/disconnected, fall through to headless status check
+        // so `jupyter-sync status` reports the saved session without triggering a sync in VS Code.
+      } else {
+        // Agent is initiating a sync or remote execution action (`connect`, `sync`, `exec`, `run-cell`, `sh`, etc.)
+        const targetBaseUrl = args.url ? new JupyterClient(args.url).baseUrl : undefined;
+        const needsBridgeConnect =
+          args.command === 'connect' ||
+          !bridgeStatus?.connected ||
+          Boolean(targetBaseUrl && bridgeStatus?.baseUrl !== targetBaseUrl);
+
+        if (needsBridgeConnect) {
+          if (!effectiveUrl) {
+            console.error(
+              'Error: No active VS Code Jupyter Sync connection or saved session found. Run `jupyter-sync connect "<url>"` or pass `--url "<url>"` once to save the connection.'
+            );
+            return 1;
+          }
+          const connectRes = await callAgentBridge(
+            discovered.socketPath,
+            'connect',
+            { url: effectiveUrl, remoteDir: args.remoteDir },
+            undefined,
+            args.timeoutMs ?? 600000
+          );
+          if (args.command === 'connect') {
+            console.log(
+              `✓ Connected to ${connectRes.serverLabel} (${connectRes.baseUrl}) -> remoteDir: '${connectRes.remoteBaseDir}' (saved for ${connectRes.workspaceRoot})`
+            );
+            if (connectRes.syncSummary) {
+              const s = connectRes.syncSummary;
+              console.log(
+                `✓ Synced ${s.uploadedFiles} file(s), deleted ${s.deletedFiles} file(s), ${s.unchangedFiles} unchanged [${s.durationMs}ms]`
+              );
+            }
+            return 0;
+          }
+          if (
+            (args.command === 'sync' || args.command === 'push') &&
+            !args.force &&
+            !args.overwriteNotebooks &&
+            connectRes?.syncSummary
+          ) {
+            const s = connectRes.syncSummary;
+            console.log(
+              `✓ Synced ${s.uploadedFiles} file(s), deleted ${s.deletedFiles} file(s), ${s.unchangedFiles} unchanged [${s.durationMs}ms]`
+            );
+            return 0;
+          }
+        }
+
+        return await runViaBridge(discovered.socketPath, args);
+      }
     }
   }
 
@@ -528,15 +598,6 @@ async function runHeadless(
     baseUrl: client.baseUrl,
     updatedAt: new Date().toISOString(),
   });
-
-  if (args.command === 'connect') {
-    const discovered = discoverBridgeSocket(workspaceRoot);
-    if (discovered) {
-      await callAgentBridge(discovered.socketPath, 'connect', { url: rawUrl }, undefined, 15000).catch(
-        () => {}
-      );
-    }
-  }
 
   const syncEngine = new SyncEngine(client);
   const initializer = new KernelInitializer();

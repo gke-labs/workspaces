@@ -17,6 +17,13 @@ import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import {
+  AgentBridgeServer,
+  callAgentBridge,
+  loadCliSession,
+  removeCliSession,
+  saveCliSession,
+} from '../../agentBridge';
 import { isProxySafePath, normalizeApiPath } from '../../core/jupyterClient';
 import {
   computeSyncDiff,
@@ -240,6 +247,141 @@ test('kernelInitializer: encodes and decodes both JSON and v1.kernel.websocket.j
   assert.strictEqual(decodedBin!.header.msg_id, 'sync-init-123');
   assert.strictEqual(decodedBin!.content.code, 'import os');
   assert.strictEqual(decodedBin!.content.silent, true);
+});
+
+// 9. Workspace-Scoped CLI Session Inheritance Tests
+test('agentBridge: loadCliSession inherits in subdirectories but never leaks across workspaces', () => {
+  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'jsync-cli-sess-'));
+  const repoA = path.join(tmpBase, 'repo-a');
+  const repoASubdir = path.join(repoA, 'examples', 'torch_tpu');
+  const repoB = path.join(tmpBase, 'repo-b');
+  fs.mkdirSync(repoASubdir, { recursive: true });
+  fs.mkdirSync(repoB, { recursive: true });
+
+  try {
+    saveCliSession(repoA, {
+      url: 'http://localhost:8888/?token=tok-a',
+      remoteDir: 'shared/repo-a',
+      serverLabel: 'local-a',
+      baseUrl: 'http://localhost:8888',
+      updatedAt: new Date().toISOString(),
+    });
+
+    // Subprocess in repoA or nested subdirectory inherits the session
+    const loadedRoot = loadCliSession(repoA);
+    const loadedSubdir = loadCliSession(repoASubdir);
+    assert.ok(loadedRoot);
+    assert.strictEqual(loadedRoot!.url, 'http://localhost:8888/?token=tok-a');
+    assert.ok(loadedSubdir);
+    assert.strictEqual(loadedSubdir!.url, 'http://localhost:8888/?token=tok-a');
+    assert.strictEqual(loadedSubdir!.remoteDir, 'shared/repo-a');
+
+    // Unrelated repoB must NOT inherit repoA's session
+    const loadedRepoB = loadCliSession(repoB);
+    assert.strictEqual(loadedRepoB, undefined);
+
+    // Removing repoA session clears it
+    removeCliSession(repoA);
+    assert.strictEqual(loadCliSession(repoA), undefined);
+  } finally {
+    removeCliSession(repoA);
+    fs.rmSync(tmpBase, { recursive: true, force: true });
+  }
+});
+
+// 10. Lazy Bridge Activation Tests (No sync on status/ping/outputs; activates on agent sync/connect)
+test('agentBridge: stays idle on status/outputs when disconnected and activates when agent initiates sync', async () => {
+  const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), 'jsync-bridge-lazy-'));
+  let connectCalledWith: string | null = null;
+  let syncTriggered = 0;
+
+  const sampleNb = path.join(tmpWs, 'test.ipynb');
+  fs.writeFileSync(
+    sampleNb,
+    JSON.stringify({
+      cells: [
+        {
+          cell_type: 'code',
+          execution_count: 1,
+          source: ['print("hi")\n'],
+          outputs: [{ output_type: 'stream', name: 'stdout', text: ['hi\n'] }],
+        },
+      ],
+    }),
+    'utf-8'
+  );
+
+  saveCliSession(tmpWs, {
+    url: 'http://localhost:9999/?token=lazy-tok',
+    remoteDir: 'shared/lazy',
+    serverLabel: 'lazy-server',
+    baseUrl: 'http://localhost:9999',
+    updatedAt: new Date().toISOString(),
+  });
+
+  const dummySummary = {
+    uploadedFiles: 3,
+    deletedFiles: 0,
+    unchangedFiles: 10,
+    skippedNotebooks: 0,
+    skippedLargeFiles: [] as string[],
+    batchesUsed: 1,
+    totalBytesTransferred: 1024,
+    durationMs: 25,
+    transport: 'tarball' as const,
+  };
+
+  let isConnected = false;
+  const mockClient: any = { label: 'lazy-server', baseUrl: 'http://localhost:9999' };
+  const mockSyncEngine: any = {
+    flushAndWait: async () => {},
+  };
+
+  const bridge = new AgentBridgeServer({
+    workspaceRoot: tmpWs,
+    getClient: () => (isConnected ? mockClient : null),
+    getSyncEngine: () => (isConnected ? mockSyncEngine : null),
+    getKernelInitializer: () => ({ invalidate: () => {} } as any),
+    getRemoteBaseDir: () => 'shared/lazy',
+    getSetKernelWorkingDirectory: () => true,
+    getEnableAutoreload: () => true,
+    getAutoSaveOutputs: () => true,
+    triggerSyncNow: async () => {
+      syncTriggered++;
+      return dummySummary;
+    },
+    connectFromUrl: async (url: string) => {
+      connectCalledWith = url;
+      isConnected = true;
+      syncTriggered++;
+      return dummySummary;
+    },
+  });
+
+  const sockPath = await bridge.start();
+  try {
+    // 1. `status` and `outputs` must NOT trigger connection or syncing
+    const statusBefore = await callAgentBridge(sockPath, 'status');
+    assert.strictEqual(statusBefore.connected, false);
+    assert.strictEqual(connectCalledWith, null);
+    assert.strictEqual(syncTriggered, 0);
+
+    const outCells = await callAgentBridge(sockPath, 'outputs', { notebookPath: 'test.ipynb' });
+    assert.strictEqual(outCells.length, 1);
+    assert.strictEqual(outCells[0].stdout, 'hi\n');
+    assert.strictEqual(connectCalledWith, null);
+    assert.strictEqual(syncTriggered, 0);
+
+    // 2. Agent-initiated `sync` activates connection using saved CLI session
+    const syncRes = await callAgentBridge(sockPath, 'sync');
+    assert.strictEqual(connectCalledWith, 'http://localhost:9999/?token=lazy-tok');
+    assert.strictEqual(isConnected, true);
+    assert.strictEqual(syncRes.uploadedFiles, 3);
+  } finally {
+    await bridge.stop();
+    removeCliSession(tmpWs);
+    fs.rmSync(tmpWs, { recursive: true, force: true });
+  }
 });
 
 async function main() {

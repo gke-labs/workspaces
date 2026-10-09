@@ -16,7 +16,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AgentBridgeServer, CellOutputSummary } from './agentBridge';
+import { AgentBridgeServer, CellOutputSummary, loadCliSession } from './agentBridge';
 import { ConnectionManager, SavedServerMetadata } from './connection';
 import { JupyterClient, KernelExecutionResult } from './core/jupyterClient';
 import { DEFAULT_EXCLUDE_GLOBS, SyncProgressEvent, SyncSummary } from './core/syncEngine';
@@ -37,6 +37,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel.appendLine(`[${ts}] ${msg}`);
   };
 
+  const hasWorkspaceFolder = (): boolean => {
+    const folders = vscode.workspace.workspaceFolders;
+    return Boolean(folders && folders.length > 0);
+  };
+
   const getWorkspaceRoot = (): string => {
     const folders = vscode.workspace.workspaceFolders;
     if (folders && folders.length > 0) {
@@ -50,7 +55,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const getRemoteBaseDir = (): string => {
     const raw = getConfig().get<string>('remoteBaseDir', '${workspaceFolderBasename}');
     const rootName = path.basename(getWorkspaceRoot());
-    return raw.replace(/\$\{workspaceFolderBasename\}/g, rootName).trim();
+    const resolved = raw.replace(/\$\{workspaceFolderBasename\}/g, rootName).trim();
+    if (resolved === rootName) {
+      const cliSession = loadCliSession(getWorkspaceRoot());
+      if (cliSession?.remoteDir) {
+        return cliSession.remoteDir;
+      }
+    }
+    return resolved;
   };
 
   const getAutoSyncOnSave = (): boolean => getConfig().get<boolean>('autoSyncOnSave', true);
@@ -391,8 +403,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   installCompanionCli(false);
 
-  // Start Local Agent IPC Bridge (~/.jupyter-sync/bridge-<hash>.sock)
-  if (getEnableAgentBridge()) {
+  // Start Local Agent IPC Bridge (~/.jupyter-sync/bridge-<hash>.sock) when a workspace folder is open
+  if (getEnableAgentBridge() && hasWorkspaceFolder()) {
     bridgeServer = new AgentBridgeServer({
       workspaceRoot: getWorkspaceRoot(),
       getClient: () => connectionManager.client,
@@ -413,8 +425,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           overwriteNotebooks: opts?.overwriteNotebooks,
         });
       },
-      connectFromUrl: async (url: string) => {
-        await connectionManager.connectFromUrl(url);
+      connectFromUrl: async (url: string, remoteDir?: string) => {
+        await connectionManager.connectFromUrl(url, undefined, remoteDir);
+        return lastSyncSummary;
       },
       hostAdapter: {
         getLiveNotebookOutputs: async (
@@ -644,16 +657,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
+  // Register server provider with ms-toolsai.jupyter without auto-connecting or syncing on startup.
+  // Syncing will only start when the user connects to a remote kernel or an agent initiates syncing.
   await connectionManager.registerWithJupyterExtension();
-
-  const autoConnectUrl = process.env.JUPYTER_SYNC_AUTO_CONNECT_URL;
-  if (autoConnectUrl) {
-    connectionManager.connectFromUrl(autoConnectUrl).catch((err) => {
-      log(`[AutoConnect] Failed: ${(err as Error).message}`);
-    });
-  } else {
-    await connectionManager.restorePreviousSessionIfAny();
-  }
 }
 
 export async function deactivate(): Promise<void> {
