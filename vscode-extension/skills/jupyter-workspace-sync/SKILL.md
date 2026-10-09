@@ -48,14 +48,14 @@ The **`jupyter-sync`** CLI (`~/.local/bin/jupyter-sync`) synchronizes your **loc
 - Each `run_command` tool call runs in a **separate subshell** — running `export JUPYTER_URL="..."` in one command **does NOT persist** to the next command!
 - **Always persist the connection in Step 1** using `jupyter-sync connect`:
   ```bash
-  jupyter-sync connect "<JUPYTER_URL>" --remote-dir "shared/$(basename "$PWD")"
+  jupyter-sync connect "<JUPYTER_URL>"
   ```
 - What `jupyter-sync connect` does:
   1. Verifies the remote Jupyter server connection and token.
   2. Saves the URL and `remoteDir` persistently to `~/.jupyter-sync/cli-sessions.json` for your current workspace directory.
-  3. Performs an initial workspace file sync.
+  3. Performs an initial workspace file sync into `<jupyter-root>/<remoteBaseDir>` (defaulting to `<jupyter-root>/<repo-name>`).
 - Once connected (or after any `jupyter-sync` command is called once with `--url "<JUPYTER_URL>"`), **all subsequent `jupyter-sync` commands in that workspace automatically load the saved URL** from `~/.jupyter-sync/cli-sessions.json` (and `.vscode/settings.json`), even in new subshells!
-- If the user did not paste a URL in the current message, **always run `jupyter-sync status` first** to check whether an active VS Code IPC bridge (`~/.jupyter-sync/bridge-*.sock`) or a saved session URL in `~/.jupyter-sync/cli-sessions.json` is already connected.
+- If the user did not paste a URL in the current message, **always run `jupyter-sync status` first** to check whether an active VS Code IPC bridge (`~/.jupyter-sync/bridge-*.sock`) or a saved session URL in `~/.jupyter-sync/cli-sessions.json` is already configured.
 
 ---
 
@@ -65,8 +65,9 @@ The **`jupyter-sync`** CLI (`~/.local/bin/jupyter-sync`) synchronizes your **loc
 | :--- | :--- |
 | `write_to_file` to `/tmp/test.py` then `python3 /tmp/test.py` | `jupyter-sync exec "$(cat << 'EOF'\n...\nEOF\n)"` (or save file inside repo root) |
 | `python3 -c "import torch_tpu"` | `jupyter-sync exec "import torch_tpu; print(torch_tpu.__file__)"` |
-| `pip install -r torchtitan/requirements.txt` | `jupyter-sync sh "PYTHONUSERBASE=/home/jovyan/shared/.pydeps pip install --user -r torchtitan/requirements.txt"` |
-| `export JUPYTER_URL="..."` in one tool call, then bare commands without saving | `jupyter-sync connect "<JUPYTER_URL>" --remote-dir "shared/$(basename "$PWD")"` (persists URL across subshells) |
+| `pip install -r requirements.txt` (on local machine) | `jupyter-sync sh "pip install --user -r requirements.txt"` |
+| `export JUPYTER_URL="..."` in one tool call, then bare commands without saving | `jupyter-sync connect "<JUPYTER_URL>"` (persists URL across subshells) |
+| Blindly passing `--remote-dir "shared/..."` or overwriting `.vscode/settings.json` | Omit `--remote-dir` to use the workspace default (`<repo-name>`) or existing VS Code `jupyterSync.remoteBaseDir` setting |
 | Editing `.ipynb` raw JSON with text replacement tools | Use `notebook_edit` tool, then run `jupyter-sync run-cell <notebook.ipynb> <cell_idx>` (or `jupyter-sync sync --overwrite-notebooks`) |
 
 ---
@@ -82,15 +83,14 @@ jupyter-sync status
 
 - **If the user provided a connection URL** (e.g. `https://connect.<IP>.sslip.io/workspace/connect/<NS>/<WORKSPACE>/jupyterlab/?token=<JWT>`), bind and save it immediately:
   ```bash
-  jupyter-sync connect "<JUPYTER_URL>" --remote-dir "shared/$(basename "$PWD")"
+  jupyter-sync connect "<JUPYTER_URL>"
   ```
-- **Shared Filestore PVC Convention (`shared/<repo-name>`)**:
-  GKE Workspaces mount a shared `ReadWriteMany` Filestore PVC at `/home/jovyan/shared`. Always set `.vscode/settings.json` in the local project root so both VS Code and `jupyter-sync` sync into `/home/jovyan/shared/<repo-name>`:
-  ```json
-  {
-    "jupyterSync.remoteBaseDir": "shared/${workspaceFolderBasename}"
-  }
-  ```
+- **Respecting `remoteBaseDir` (Do Not Assume `shared/`)**:
+  - By default, both VS Code and `jupyter-sync` sync the local workspace into `<jupyter-root>/<repo-name>` (`jupyterSync.remoteBaseDir: "${workspaceFolderBasename}"`).
+  - **Do NOT** assume a `shared/` directory exists or pass `--remote-dir "shared/..."` unless:
+    1. `jupyter-sync status` or `.vscode/settings.json` already specifies `jupyterSync.remoteBaseDir`, OR
+    2. The user explicitly asks to sync into a custom directory, OR
+    3. A multi-host `TrainJob` workflow specifically requires syncing onto a shared `ReadWriteMany` PVC mounted at `/home/jovyan/shared/<repo-name>`.
 - **If the token is expired (`HTTP 401` / `HTTP 403`)**:
   Ask the user to generate a fresh connection URL from the **Kubeflow Workspaces Dashboard** (`/workspaces/connections` → select workspace → port `jupyterlab` → **Generate connection**), then run `jupyter-sync connect "<NEW_URL>"`.
 
@@ -105,7 +105,7 @@ Once connected via `jupyter-sync connect` (or VS Code IPC Bridge), you do not ne
 jupyter-sync status
 
 # 2. Save/update the remote workspace URL and run an immediate sync
-jupyter-sync connect "<JUPYTER_URL>" [--remote-dir "shared/$(basename "$PWD")"]
+jupyter-sync connect "<JUPYTER_URL>" [--remote-dir "<custom-subdir>"]
 
 # 3. Sync local Git-tracked / modified files in the current workspace to the remote pod
 jupyter-sync sync
@@ -183,14 +183,16 @@ Cloud TPU devices (`/dev/vfio/0`, `/dev/vfio/1`, ...) can only be opened by **on
   jupyter-sync exec "import tpu_lock; tpu_lock.preflight_check(is_distributed=True, auto_clear=True)"
   ```
 
-### B. Installing Dependencies onto the Shared RWX Volume (`/home/jovyan/shared/.pydeps`)
-Never install project requirements locally on the workstation, and avoid ephemeral container root installs when using multi-host `TrainJob`:
-1. Install repo requirements into `/home/jovyan/shared/.pydeps` (`PYTHONUSERBASE`) on the remote pod:
-   ```bash
-   jupyter-sync sh "PYTHONUSERBASE=/home/jovyan/shared/.pydeps pip install --user -q -r torchtitan/requirements.txt"
-   ```
-2. Call `tpu_trainer.configure_runtime_env(user_base="/home/jovyan/shared/.pydeps", extra_pythonpath=repo_dir)` so both the interactive kernel and `torchrun` subprocesses use `/home/jovyan/shared/.pydeps`.
-3. When submitting multi-host Kubeflow `TrainJob` runs via `tpu_trainer.submit_multihost_training(..., src_dir=repo_dir, user_base="/home/jovyan/shared/.pydeps")`, `tpu_trainer` mounts `src_dir` at `/workspace` and `user_base` at `/workspace-deps` (`PYTHONUSERBASE=/workspace-deps`) across all TPU worker pods — enabling **zero-Docker-rebuild** multi-host iteration.
+### B. Installing Remote Dependencies (Single-Host vs. Shared RWX Volume for Multi-Host `TrainJob`)
+Never install project requirements locally on the workstation:
+- **Standard Single-Host Workspace**: Install directly on the remote pod with `jupyter-sync sh "pip install --user -r requirements.txt"`.
+- **Multi-Host `TrainJob` with a Shared RWX Volume (when `/home/jovyan/shared` is mounted)**:
+  1. Sync the repo to `shared/<repo-name>` (`jupyter-sync connect "<JUPYTER_URL>" --remote-dir "shared/$(basename "$PWD")"`) and install repo requirements into `/home/jovyan/shared/.pydeps` (`PYTHONUSERBASE`) on the remote pod:
+     ```bash
+     jupyter-sync sh "PYTHONUSERBASE=/home/jovyan/shared/.pydeps pip install --user -q -r torchtitan/requirements.txt"
+     ```
+  2. Call `tpu_trainer.configure_runtime_env(user_base="/home/jovyan/shared/.pydeps", extra_pythonpath=repo_dir)` so both the interactive kernel and `torchrun` subprocesses use `/home/jovyan/shared/.pydeps`.
+  3. When submitting multi-host Kubeflow `TrainJob` runs via `tpu_trainer.submit_multihost_training(..., src_dir=repo_dir, user_base="/home/jovyan/shared/.pydeps")`, `tpu_trainer` mounts `src_dir` at `/workspace` and `user_base` at `/workspace-deps` (`PYTHONUSERBASE=/workspace-deps`) across all TPU worker pods — enabling **zero-Docker-rebuild** multi-host iteration.
 
 ### C. Querying Kubernetes from Inside the Workspace Pod
 If local `kubectl` / `gcloud` credentials on the workstation are expired (e.g. RAPT token expiration) or unavailable, query the GKE API directly from the remote Workspace pod using its in-cluster ServiceAccount:
