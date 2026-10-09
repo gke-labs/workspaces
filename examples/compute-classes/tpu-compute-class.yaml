@@ -24,6 +24,17 @@ spec:
       type: tpu-v5-lite-podslice
       count: 1
       topology: 1x1
+  - flexStart:
+      enabled: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 1
+      topology: 1x1
+  - spot: false
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 1
+      topology: 1x1
   nodePoolAutoCreation:
     enabled: true
 ---
@@ -38,6 +49,17 @@ spec:
       type: tpu-v5-lite-podslice
       count: 8
       topology: 2x4
+  - flexStart:
+      enabled: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 8
+      topology: 2x4
+  - spot: false
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 8
+      topology: 2x4
   nodePoolAutoCreation:
     enabled: true
 ---
@@ -48,6 +70,17 @@ metadata:
 spec:
   priorities:
   - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x2
+  - flexStart:
+      enabled: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x2
+  - spot: false
     tpu:
       type: tpu-v5-lite-podslice
       count: 4
@@ -67,6 +100,17 @@ spec:
       type: tpu-v5-lite-podslice
       count: 4
       topology: 2x4
+  - flexStart:
+      enabled: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x4
+  - spot: false
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 2x4
   nodePoolAutoCreation:
     enabled: true
 ---
@@ -78,6 +122,17 @@ metadata:
 spec:
   priorities:
   - spot: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 4x8
+  - flexStart:
+      enabled: true
+    tpu:
+      type: tpu-v5-lite-podslice
+      count: 4
+      topology: 4x8
+  - spot: false
     tpu:
       type: tpu-v5-lite-podslice
       count: 4
