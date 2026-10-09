@@ -122,7 +122,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const runSyncWithUiProgress = async (
     client: JupyterClient,
-    options?: { isReconnect?: boolean; isFullResync?: boolean }
+    options?: {
+      isReconnect?: boolean;
+      isFullResync?: boolean;
+      force?: boolean;
+      overwriteNotebooks?: boolean;
+    }
   ): Promise<SyncSummary> => {
     const syncEngine = connectionManager.syncEngine;
     if (!syncEngine) {
@@ -176,7 +181,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             remoteBaseDir,
             excludeGlobs: getExcludeGlobs(),
             maxFileSizeMB: getMaxFileSizeMB(),
-            overwriteNotebooks: getOverwriteNotebooks(),
+            overwriteNotebooks: options?.overwriteNotebooks ?? getOverwriteNotebooks(),
+            force: options?.force ?? false,
             signal: abortController.signal,
             onProgress,
             onLog: log,
@@ -321,7 +327,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Install companion `jupyter-sync` CLI into ~/.local/bin and terminal PATH
+  // Install companion `jupyter-sync` CLI into ~/.local/bin and agent skill into ~/.gemini/skills
   const installCompanionCli = (showNotification = false): string | null => {
     try {
       const cliJsPath = path.join(context.extensionPath, 'dist', 'cli.js');
@@ -346,9 +352,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       ].join('\n');
       fs.writeFileSync(wrapperPath, wrapperScript, { mode: 0o755 });
       context.environmentVariableCollection.prepend('PATH', `${localBinDir}${path.delimiter}`);
+
+      // Also install the bundled `jupyter-workspace-sync` skill for Jetski / Gemini CLI & Claude Code
+      const bundledSkillPath = path.join(
+        context.extensionPath,
+        'skills',
+        'jupyter-workspace-sync',
+        'SKILL.md'
+      );
+      if (fs.existsSync(bundledSkillPath)) {
+        for (const agentDir of ['.gemini', '.claude']) {
+          try {
+            const targetSkillDir = path.join(
+              os.homedir(),
+              agentDir,
+              'skills',
+              'jupyter-workspace-sync'
+            );
+            fs.mkdirSync(targetSkillDir, { recursive: true });
+            fs.copyFileSync(bundledSkillPath, path.join(targetSkillDir, 'SKILL.md'));
+          } catch {
+            // ignore permission errors on optional global skill dirs
+          }
+        }
+      }
+
       if (showNotification) {
         vscode.window.showInformationMessage(
-          `Installed 'jupyter-sync' CLI to ${wrapperPath}`
+          `Installed 'jupyter-sync' CLI (${wrapperPath}) and 'jupyter-workspace-sync' agent skill.`
         );
       }
       return wrapperPath;
@@ -372,11 +403,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       getEnableAutoreload,
       getAutoSaveOutputs,
       getKernelForNotebook: (absNb) => connectionManager.getKernelForNotebook(absNb),
-      triggerSyncNow: async () => {
+      triggerSyncNow: async (opts) => {
         if (!connectionManager.client) {
           throw new Error('Not connected to a remote Jupyter Server');
         }
-        return await runSyncWithUiProgress(connectionManager.client, { isReconnect: true });
+        return await runSyncWithUiProgress(connectionManager.client, {
+          isReconnect: true,
+          force: opts?.force,
+          overwriteNotebooks: opts?.overwriteNotebooks,
+        });
+      },
+      connectFromUrl: async (url: string) => {
+        await connectionManager.connectFromUrl(url);
       },
       hostAdapter: {
         getLiveNotebookOutputs: async (

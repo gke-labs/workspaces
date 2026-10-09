@@ -572,6 +572,23 @@ export class JupyterClient {
   }
 
   /**
+   * Interrupts a running kernel via POST /api/kernels/<id>/interrupt.
+   */
+  async interruptKernel(kernelId: string): Promise<void> {
+    const resp = await this.request(
+      `/api/kernels/${kernelId}/interrupt`,
+      { method: 'POST' },
+      15000
+    );
+    if (!resp.ok && resp.status !== 204) {
+      const text = await resp.text().catch(() => '');
+      throw new Error(
+        `POST /api/kernels/${kernelId}/interrupt failed (HTTP ${resp.status}): ${text}`
+      );
+    }
+  }
+
+  /**
    * Restarts a kernel via POST /api/kernels/<id>/restart.
    */
   async restartKernel(kernelId: string): Promise<void> {
@@ -781,6 +798,7 @@ export class JupyterClient {
       silent?: boolean;
       storeHistory?: boolean;
       timeoutMs?: number;
+      signal?: AbortSignal;
       onStream?: (stream: 'stdout' | 'stderr', text: string) => void;
     }
   ): Promise<KernelExecutionResult> {
@@ -811,12 +829,20 @@ export class JupyterClient {
       let gotIdle = false;
       let settled = false;
 
+      const onAbort = () => {
+        this.interruptKernel(kernelId).catch(() => {});
+        finish(new Error(`Kernel execution aborted on kernel ${kernelId} (remote kernel interrupted)`));
+      };
+
       const finish = (err?: Error) => {
         if (settled) {
           return;
         }
         settled = true;
         clearTimeout(timer);
+        if (options?.signal) {
+          options.signal.removeEventListener('abort', onAbort);
+        }
         try {
           ws.close();
         } catch {
@@ -838,8 +864,21 @@ export class JupyterClient {
         }
       };
 
+      if (options?.signal) {
+        if (options.signal.aborted) {
+          onAbort();
+          return;
+        }
+        options.signal.addEventListener('abort', onAbort, { once: true });
+      }
+
       const timer = setTimeout(() => {
-        finish(new Error(`Kernel execution timed out after ${timeoutMs}ms on kernel ${kernelId}`));
+        this.interruptKernel(kernelId).catch(() => {});
+        finish(
+          new Error(
+            `Kernel execution timed out after ${timeoutMs}ms on kernel ${kernelId} (sent interrupt request)`
+          )
+        );
       }, timeoutMs);
 
       ws.on('open', () => {

@@ -225,26 +225,22 @@ In headless mode, `~/.local/bin/jupyter-sync` talks directly to the remote Jupyt
 
 ---
 
-### Step 4: How to Prompt or Configure `jetski-cli`
+### Step 4: Agent Skill (`jupyter-workspace-sync`)
 
-#### Option 1 — Ask `jetski-cli` Directly in Your Prompt
-> *"Use `~/.local/bin/jupyter-sync` to run and debug `experiments/train.ipynb` on my remote TPU workspace. Whenever you edit `.py` files or notebook cells, verify them on the remote TPU using `~/.local/bin/jupyter-sync run-cell` or `~/.local/bin/jupyter-sync exec`."*
+The extension bundles a complete agent skill at [`skills/jupyter-workspace-sync/SKILL.md`](./skills/jupyter-workspace-sync/SKILL.md) (and at [`_agents/skills/jupyter-workspace-sync/SKILL.md`](../_agents/skills/jupyter-workspace-sync/SKILL.md) in this repository) that teaches AI coding agents (`jetski`, `gemini-cli`, Claude Code) how to:
+- Connect in **Paired VS Code IPC Bridge mode** or **Headless `JUPYTER_URL` mode**
+- Execute and debug Python code (`jupyter-sync exec`), `.ipynb` cells (`jupyter-sync run-cell` / `outputs`), and remote shell commands (`jupyter-sync sh`)
+- Handle TPU `/dev/vfio/*` device lock contention (`tpu_lock.py`) and multi-host GKE TPU `TrainJob` orchestration (`tpu_trainer.py`)
 
-#### Option 2 — Add a Workspace Rule (`.jetski/rules/jupyter-sync.md`)
-Create `.jetski/rules/jupyter-sync.md` in your repository so `jetski-cli` automatically knows how to execute code on the remote TPU/GPU pod in every session:
-
-```markdown
-# Remote Jupyter / TPU Execution (`jupyter-sync`)
-
-When running Python scripts, debugging `.ipynb` notebooks, or installing packages on the remote GPU/TPU workspace, use `~/.local/bin/jupyter-sync`:
-
-- Check connection status: `~/.local/bin/jupyter-sync status`
-- Sync local file edits to remote pod: `~/.local/bin/jupyter-sync sync`
-- Run a Python snippet on the remote kernel: `~/.local/bin/jupyter-sync exec "<python_code>" [--notebook <path/to/notebook.ipynb>]`
-- Run a specific 0-based notebook cell on the remote kernel (and persist outputs to disk): `~/.local/bin/jupyter-sync run-cell <path/to/notebook.ipynb> <cell_index>`
-- Inspect cell outputs/tracebacks: `~/.local/bin/jupyter-sync outputs <path/to/notebook.ipynb> [--cell <cell_index>]`
-- Run a remote shell command (e.g. `pip install`, `nvidia-smi`): `~/.local/bin/jupyter-sync sh "<command>" [--cwd <rel_dir>]`
-```
+#### Automatic Skill Installation
+- **When the VS Code extension activates**, it automatically installs the skill globally to:
+  - `~/.gemini/skills/jupyter-workspace-sync/SKILL.md`
+  - `~/.claude/skills/jupyter-workspace-sync/SKILL.md`
+- **From the CLI (or to add the skill to a specific project repository)**:
+  ```bash
+  # Install globally (~/.gemini/skills & ~/.claude/skills) and into ./_agents/skills/ in the current repo:
+  ~/.local/bin/jupyter-sync install-skill --project
+  ```
 
 ---
 

@@ -84,6 +84,7 @@ export interface SyncOptions {
   excludeGlobs?: string[];
   maxFileSizeMB?: number;
   overwriteNotebooks?: boolean;
+  force?: boolean;
   maxBatchBytes?: number;
   maxBatchFiles?: number;
   forceTarball?: boolean;
@@ -251,14 +252,24 @@ export function scanLocalWorkspace(
       continue;
     }
 
+    const resolvedRoot = path.resolve(localRoot);
     const absPath = path.join(localRoot, relPath);
     let stat: fs.Stats;
     try {
-      stat = fs.lstatSync(absPath);
+      const lstat = fs.lstatSync(absPath);
+      if (lstat.isSymbolicLink()) {
+        const realPath = fs.realpathSync(absPath);
+        if (!realPath.startsWith(resolvedRoot + path.sep)) {
+          continue;
+        }
+        stat = fs.statSync(realPath);
+      } else {
+        stat = lstat;
+      }
     } catch {
       continue;
     }
-    if (!stat.isFile() || stat.isSymbolicLink()) {
+    if (!stat.isFile()) {
       continue;
     }
     if (stat.size > maxBytes) {
@@ -571,7 +582,7 @@ export class SyncEngine {
       const cleanBase = normalizeApiPath(options.remoteBaseDir);
       const excludeGlobs = options.excludeGlobs ?? DEFAULT_EXCLUDE_GLOBS;
       const maxFileSizeMB = options.maxFileSizeMB ?? 10;
-      const overwriteNotebooks = options.overwriteNotebooks ?? false;
+      const overwriteNotebooks = options.force ? true : (options.overwriteNotebooks ?? false);
       const maxBatchBytes = options.maxBatchBytes ?? 5 * 1024 * 1024;
       const maxBatchFiles = options.maxBatchFiles ?? 100;
 
@@ -615,9 +626,9 @@ export class SyncEngine {
         message: `Checking remote manifest on ${this.client.label}...`,
       });
 
-      const remoteManifest = await this.fetchRemoteManifest(cleanBase);
+      const remoteManifest = options.force ? null : await this.fetchRemoteManifest(cleanBase);
       const diff = computeSyncDiff(scan.files, remoteManifest, {
-        overwriteNotebooks,
+        overwriteNotebooks: options.force ? true : overwriteNotebooks,
         skippedLargeFiles: new Set(scan.skippedLargeFiles),
       });
 

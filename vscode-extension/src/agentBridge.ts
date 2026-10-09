@@ -70,13 +70,27 @@ export interface BridgeConfig {
   getEnableAutoreload: () => boolean;
   getAutoSaveOutputs: () => boolean;
   getKernelForNotebook?: (absNotebookPath: string) => string | undefined;
-  triggerSyncNow: () => Promise<SyncSummary>;
+  triggerSyncNow: (options?: {
+    force?: boolean;
+    overwriteNotebooks?: boolean;
+  }) => Promise<SyncSummary>;
+  connectFromUrl?: (url: string) => Promise<void>;
   hostAdapter?: NotebookHostAdapter;
 }
 
 export interface BridgeRequest {
   id: string;
-  action: 'ping' | 'status' | 'sync' | 'exec' | 'run-cell' | 'outputs' | 'sh';
+  action:
+    | 'ping'
+    | 'status'
+    | 'connect'
+    | 'sync'
+    | 'exec'
+    | 'run-cell'
+    | 'outputs'
+    | 'sh'
+    | 'interrupt'
+    | 'restart-kernel';
   params?: Record<string, any>;
 }
 
@@ -111,6 +125,71 @@ export function getSocketPathForWorkspace(workspaceRoot: string): string {
 
 export function getSessionsFilePath(): string {
   return path.join(getBridgeDir(), 'sessions.json');
+}
+
+export interface SavedCliSessionEntry {
+  url: string;
+  remoteDir?: string;
+  serverLabel?: string;
+  baseUrl?: string;
+  updatedAt: string;
+}
+
+export interface SavedCliSessionsFile {
+  workspaces: Record<string, SavedCliSessionEntry>;
+  lastUsed?: SavedCliSessionEntry;
+}
+
+export function getCliSessionsFilePath(): string {
+  return path.join(getBridgeDir(), 'cli-sessions.json');
+}
+
+export function loadCliSession(workspaceRoot: string): SavedCliSessionEntry | undefined {
+  try {
+    const file = getCliSessionsFilePath();
+    if (!fs.existsSync(file)) {
+      return undefined;
+    }
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as SavedCliSessionsFile;
+    let curr = path.resolve(workspaceRoot);
+    while (true) {
+      if (parsed.workspaces && parsed.workspaces[curr]) {
+        return parsed.workspaces[curr];
+      }
+      const parent = path.dirname(curr);
+      if (parent === curr) {
+        break;
+      }
+      curr = parent;
+    }
+    return parsed.lastUsed;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveCliSession(workspaceRoot: string, entry: SavedCliSessionEntry): void {
+  try {
+    const file = getCliSessionsFilePath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    let data: SavedCliSessionsFile = { workspaces: {} };
+    if (fs.existsSync(file)) {
+      try {
+        data = JSON.parse(fs.readFileSync(file, 'utf-8')) as SavedCliSessionsFile;
+        if (!data.workspaces) {
+          data.workspaces = {};
+        }
+      } catch {
+        data = { workspaces: {} };
+      }
+    }
+    const normRoot = path.resolve(workspaceRoot);
+    data.workspaces[normRoot] = entry;
+    data.lastUsed = entry;
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  } catch {
+    // ignore write errors
+  }
 }
 
 interface SessionRegistryEntry {
@@ -367,6 +446,11 @@ export class AgentBridgeServer {
   }
 
   private handleConnection(socket: net.Socket): void {
+    const connAbort = new AbortController();
+    socket.on('close', () => {
+      connAbort.abort();
+    });
+
     let buffer = '';
     socket.on('data', (chunk) => {
       buffer += chunk.toString('utf-8');
@@ -383,7 +467,7 @@ export class AgentBridgeServer {
         } catch {
           continue;
         }
-        this.dispatchRequest(socket, req).catch((err) => {
+        this.dispatchRequest(socket, req, connAbort.signal).catch((err) => {
           this.sendResponse(socket, {
             id: req.id,
             type: 'response',
@@ -415,7 +499,31 @@ export class AgentBridgeServer {
     socket.write(JSON.stringify(msg) + '\n');
   }
 
-  private async dispatchRequest(socket: net.Socket, req: BridgeRequest): Promise<void> {
+  private async syncNotebookFileToRemote(
+    client: JupyterClient,
+    absNbPath: string
+  ): Promise<void> {
+    try {
+      const normRoot = path.resolve(this.config.workspaceRoot);
+      const normNb = path.resolve(absNbPath);
+      if (normNb !== normRoot && !normNb.startsWith(normRoot + path.sep)) {
+        return;
+      }
+      const relNb = path.relative(normRoot, normNb).split(path.sep).join('/');
+      const cleanBase = normalizeApiPath(this.config.getRemoteBaseDir());
+      const remoteNbPath = cleanBase ? `${cleanBase}/${relNb}` : relNb;
+      const content = fs.readFileSync(normNb);
+      await client.putFile(remoteNbPath, content, { overwriteNotebooks: true });
+    } catch {
+      // ignore non-fatal remote notebook sync error
+    }
+  }
+
+  private async dispatchRequest(
+    socket: net.Socket,
+    req: BridgeRequest,
+    connSignal?: AbortSignal
+  ): Promise<void> {
     const params = req.params || {};
 
     if (req.action === 'ping') {
@@ -424,6 +532,31 @@ export class AgentBridgeServer {
         type: 'response',
         ok: true,
         result: { pong: true, workspaceRoot: this.config.workspaceRoot },
+      });
+      return;
+    }
+
+    if (req.action === 'connect') {
+      const url = String(params.url || '');
+      if (!url) {
+        throw new Error('Missing url parameter for connect');
+      }
+      if (!this.config.connectFromUrl) {
+        throw new Error('connectFromUrl is not supported by this bridge host');
+      }
+      await this.config.connectFromUrl(url);
+      const updatedClient = this.config.getClient();
+      this.sendResponse(socket, {
+        id: req.id,
+        type: 'response',
+        ok: true,
+        result: {
+          connected: Boolean(updatedClient),
+          serverLabel: updatedClient?.label || null,
+          baseUrl: updatedClient?.baseUrl || null,
+          workspaceRoot: this.config.workspaceRoot,
+          remoteBaseDir: this.config.getRemoteBaseDir(),
+        },
       });
       return;
     }
@@ -453,11 +586,47 @@ export class AgentBridgeServer {
       );
     }
 
+    if (req.action === 'interrupt') {
+      const notebookRelOrAbs = params.notebookPath ? String(params.notebookPath) : undefined;
+      const targetPath = notebookRelOrAbs
+        ? path.resolve(this.config.workspaceRoot, notebookRelOrAbs)
+        : undefined;
+      const kernelId = await this.resolveOrCreateKernel(client, targetPath);
+      await client.interruptKernel(kernelId);
+      this.sendResponse(socket, {
+        id: req.id,
+        type: 'response',
+        ok: true,
+        result: { kernelId, interrupted: true },
+      });
+      return;
+    }
+
+    if (req.action === 'restart-kernel') {
+      const notebookRelOrAbs = params.notebookPath ? String(params.notebookPath) : undefined;
+      const targetPath = notebookRelOrAbs
+        ? path.resolve(this.config.workspaceRoot, notebookRelOrAbs)
+        : undefined;
+      const kernelId = await this.resolveOrCreateKernel(client, targetPath);
+      await client.restartKernel(kernelId);
+      this.config.getKernelInitializer().invalidate(kernelId);
+      this.sendResponse(socket, {
+        id: req.id,
+        type: 'response',
+        ok: true,
+        result: { kernelId, restarted: true },
+      });
+      return;
+    }
+
     // Synchronous Pre-Execution Sync Barrier for all mutating/execution commands
     await syncEngine.flushAndWait();
 
     if (req.action === 'sync') {
-      const summary = await this.config.triggerSyncNow();
+      const summary = await this.config.triggerSyncNow({
+        force: Boolean(params.force),
+        overwriteNotebooks: Boolean(params.overwriteNotebooks || params.force),
+      });
       this.sendResponse(socket, {
         id: req.id,
         type: 'response',
@@ -498,6 +667,7 @@ export class AgentBridgeServer {
           silent: false,
           storeHistory: true,
           timeoutMs: params.timeoutMs ?? 120000,
+          signal: connSignal,
           onStream: (stream, text) => {
             this.sendStream(socket, req.id, stream, text);
           },
@@ -530,6 +700,9 @@ export class AgentBridgeServer {
         `Agent running cell ${cellIndex} in ${path.basename(absNbPath)}...`
       );
       try {
+        // Push any local notebook_edit cell additions/updates to the remote .ipynb before execution
+        await this.syncNotebookFileToRemote(client, absNbPath);
+
         let execRes: KernelExecutionResult | null = null;
         if (this.config.hostAdapter?.executeCellInEditor) {
           execRes = await this.config.hostAdapter.executeCellInEditor(absNbPath, cellIndex);
@@ -560,6 +733,7 @@ export class AgentBridgeServer {
             silent: false,
             storeHistory: true,
             timeoutMs: params.timeoutMs ?? 120000,
+            signal: connSignal,
             onStream: (stream, text) => {
               this.sendStream(socket, req.id, stream, text);
             },
@@ -569,6 +743,9 @@ export class AgentBridgeServer {
             writeCellExecutionToDiskNotebook(absNbPath, cellIndex, execRes);
           }
         }
+
+        // Push updated .ipynb (with cell outputs) to the remote server so JupyterLab browser UI is in sync
+        await this.syncNotebookFileToRemote(client, absNbPath);
 
         this.sendResponse(socket, {
           id: req.id,

@@ -16,6 +16,7 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
+import { saveCliSession } from './agentBridge';
 import { JupyterAuthError, JupyterClient, normalizeApiPath } from './core/jupyterClient';
 import { SyncEngine } from './core/syncEngine';
 import { parseJupyterUrl, ParsedJupyterUrl } from './core/urlParser';
@@ -256,11 +257,13 @@ export class ConnectionManager implements vscode.Disposable {
    * Restores the previously active server connection on window reload if present.
    */
   async restorePreviousSessionIfAny(): Promise<boolean> {
-    const activeId = this.context.workspaceState.get<string>(ACTIVE_SERVER_ID_KEY);
+    const savedServers = this.getSavedServers();
+    const activeId =
+      this.context.workspaceState.get<string>(ACTIVE_SERVER_ID_KEY) || savedServers[0]?.id;
     if (!activeId) {
       return false;
     }
-    const saved = this.getSavedServers().find((s) => s.id === activeId);
+    const saved = savedServers.find((s) => s.id === activeId);
     if (!saved) {
       return false;
     }
@@ -355,6 +358,13 @@ export class ConnectionManager implements vscode.Disposable {
     await this.context.secrets.store(`${SECRET_PREFIX}${meta.id}`, token);
     await this.saveServerMetadata(meta);
     await this.context.workspaceState.update(ACTIVE_SERVER_ID_KEY, meta.id);
+    saveCliSession(this.callbacks.getWorkspaceRoot(), {
+      url: token ? `${meta.baseUrl}/?token=${token}` : meta.baseUrl,
+      remoteDir: this.callbacks.getRemoteBaseDir(),
+      serverLabel: meta.label,
+      baseUrl: meta.baseUrl,
+      updatedAt: new Date().toISOString(),
+    });
 
     const isSwitchingServer = !this.activeClient || this.activeClient.serverId !== meta.id;
     this.activeClient = client;
@@ -384,6 +394,15 @@ export class ConnectionManager implements vscode.Disposable {
       `${SECRET_PREFIX}${this.activeServerMeta.id}`,
       this.activeClient.token
     );
+    saveCliSession(this.callbacks.getWorkspaceRoot(), {
+      url: this.activeClient.token
+        ? `${this.activeServerMeta.baseUrl}/?token=${this.activeClient.token}`
+        : this.activeServerMeta.baseUrl,
+      remoteDir: this.callbacks.getRemoteBaseDir(),
+      serverLabel: this.activeServerMeta.label,
+      baseUrl: this.activeServerMeta.baseUrl,
+      updatedAt: new Date().toISOString(),
+    });
     this.onDidChangeServersEmitter.fire();
   }
 
