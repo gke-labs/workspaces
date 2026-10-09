@@ -82,9 +82,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   const setStatusDisconnected = () => {
     statusBarItem.text = '$(cloud) Jupyter Sync: Off';
-    statusBarItem.tooltip = new vscode.MarkdownString(
-      '**Jupyter Workspace Sync** is disconnected.\n\nClick to connect to a remote Jupyter Server or GKE Workspace.'
+    const md = new vscode.MarkdownString('', true);
+    md.isTrusted = true;
+    md.appendMarkdown(
+      '**Jupyter Workspace Sync** is disconnected.\n\nClick to connect to a remote Jupyter Server or GKE Workspace.\n\n[$(cloud-upload) Connect](command:jupyterSync.connect) · [$(trash) Remove Saved URLs](command:jupyterSync.removeServer)'
     );
+    statusBarItem.tooltip = md;
     statusBarItem.command = 'jupyterSync.connect';
     statusBarItem.backgroundColor = undefined;
     statusBarItem.show();
@@ -108,7 +111,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
     }
     md.appendMarkdown(
-      `\n[$(sync) Sync Now](command:jupyterSync.syncNow) · [$(output) Show Logs](command:jupyterSync.showLogs) · [$(key) Update Token](command:jupyterSync.updateToken) · [$(debug-disconnect) Disconnect](command:jupyterSync.disconnect)`
+      `\n[$(sync) Sync Now](command:jupyterSync.syncNow) · [$(output) Show Logs](command:jupyterSync.showLogs) · [$(key) Update Token](command:jupyterSync.updateToken) · [$(trash) Remove Saved URLs](command:jupyterSync.removeServer) · [$(debug-disconnect) Disconnect](command:jupyterSync.disconnect)`
     );
     statusBarItem.tooltip = md;
     statusBarItem.show();
@@ -286,6 +289,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
 
       await runSyncWithUiProgress(client, { isReconnect });
+    },
+    onServerDisconnected: () => {
+      if (fileWatcher) {
+        fileWatcher.dispose();
+        fileWatcher = null;
+      }
+      setStatusDisconnected();
     },
     onTokenExpired: (meta) => {
       log(`[Auth] Connection token expired for ${meta.label} (${meta.baseUrl}).`);
@@ -558,14 +568,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.commands.registerCommand('jupyterSync.connect', async (explicitUrl?: string) => {
       try {
-        const url = explicitUrl || (await connectionManager.promptForJupyterUrl());
-        if (!url) {
-          return;
+        if (explicitUrl) {
+          await connectionManager.connectFromUrl(explicitUrl);
+        } else {
+          await connectionManager.selectOrConnectServer();
         }
-        await connectionManager.connectFromUrl(url);
       } catch (err) {
         vscode.window.showErrorMessage(
           `Jupyter Sync connection failed: ${(err as Error).message}`
+        );
+      }
+    }),
+
+    vscode.commands.registerCommand('jupyterSync.removeServer', async () => {
+      try {
+        await connectionManager.promptToRemoveServers();
+      } catch (err) {
+        vscode.window.showErrorMessage(
+          `Failed to remove saved server: ${(err as Error).message}`
         );
       }
     }),

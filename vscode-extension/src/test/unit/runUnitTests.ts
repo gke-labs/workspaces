@@ -22,6 +22,7 @@ import {
   callAgentBridge,
   loadCliSession,
   removeCliSession,
+  removeCliSessionByBaseUrl,
   saveCliSession,
 } from '../../agentBridge';
 import { isProxySafePath, normalizeApiPath } from '../../core/jupyterClient';
@@ -282,6 +283,17 @@ test('agentBridge: loadCliSession inherits in subdirectories but never leaks acr
 
     // Removing repoA session clears it
     removeCliSession(repoA);
+    assert.strictEqual(loadCliSession(repoA), undefined);
+
+    // Removing by baseUrl clears matching workspace session
+    saveCliSession(repoA, {
+      url: 'http://localhost:8888/?token=tok-a',
+      remoteDir: 'shared/repo-a',
+      serverLabel: 'local-a',
+      baseUrl: 'http://localhost:8888',
+      updatedAt: new Date().toISOString(),
+    });
+    removeCliSessionByBaseUrl('http://localhost:8888/');
     assert.strictEqual(loadCliSession(repoA), undefined);
   } finally {
     removeCliSession(repoA);

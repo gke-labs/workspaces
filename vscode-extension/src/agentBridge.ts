@@ -215,6 +215,45 @@ export function removeCliSession(workspaceRoot: string): void {
   }
 }
 
+export function removeCliSessionByBaseUrl(baseUrl?: string): void {
+  try {
+    const file = getCliSessionsFilePath();
+    if (!fs.existsSync(file)) {
+      return;
+    }
+    const data = JSON.parse(fs.readFileSync(file, 'utf-8')) as SavedCliSessionsFile;
+    if (!data.workspaces) {
+      return;
+    }
+    let changed = false;
+    if (!baseUrl) {
+      if (Object.keys(data.workspaces).length > 0 || data.lastUsed) {
+        data.workspaces = {};
+        delete data.lastUsed;
+        changed = true;
+      }
+    } else {
+      const normTarget = baseUrl.replace(/\/+$/, '');
+      for (const [root, entry] of Object.entries(data.workspaces)) {
+        const entryBase = (entry.baseUrl || '').replace(/\/+$/, '');
+        if (entryBase === normTarget || entry.url.startsWith(normTarget)) {
+          delete data.workspaces[root];
+          changed = true;
+        }
+      }
+      if (data.lastUsed) {
+        delete data.lastUsed;
+        changed = true;
+      }
+    }
+    if (changed) {
+      fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+    }
+  } catch {
+    // ignore
+  }
+}
+
 interface SessionRegistryEntry {
   workspaceRoot: string;
   socketPath: string;

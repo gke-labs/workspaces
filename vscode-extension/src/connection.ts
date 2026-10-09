@@ -16,7 +16,12 @@ import * as crypto from 'crypto';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
-import { loadCliSession, removeCliSession, saveCliSession } from './agentBridge';
+import {
+  loadCliSession,
+  removeCliSession,
+  removeCliSessionByBaseUrl,
+  saveCliSession,
+} from './agentBridge';
 import { JupyterAuthError, JupyterClient, normalizeApiPath } from './core/jupyterClient';
 import { SyncEngine } from './core/syncEngine';
 import { parseJupyterUrl, ParsedJupyterUrl } from './core/urlParser';
@@ -59,6 +64,7 @@ export interface JupyterServerCommand {
   description?: string;
   canBeAutoSelected?: boolean;
   url?: string;
+  action?: 'connect' | 'remove';
 }
 
 const SAVED_SERVERS_KEY = 'jupyterSync.savedServers';
@@ -72,6 +78,7 @@ export interface ConnectionManagerCallbacks {
   getEnableAutoreload: () => boolean;
   getAutoSaveOutputs: () => boolean;
   onServerConnected: (client: JupyterClient, isReconnect: boolean) => Promise<void>;
+  onServerDisconnected?: () => void;
   onTokenExpired: (server: SavedServerMetadata) => void;
   onPreCellWaitStart: (msg: string) => void;
   onPreCellWaitEnd: () => void;
@@ -199,6 +206,9 @@ export class ConnectionManager implements vscode.Disposable {
             connectionInformation: this.buildConnectionInformation(client, saved),
           };
         },
+        removeJupyterServer: async (server: JupyterServerItem): Promise<void> => {
+          await this.removeServer(server.id);
+        },
       };
 
       const commandProvider = {
@@ -213,23 +223,42 @@ export class ConnectionManager implements vscode.Disposable {
                 label: `$(cloud-upload) Connect & Sync to ${trimmed}`,
                 description: 'Jupyter Workspace Sync',
                 url: trimmed,
+                action: 'connect',
                 canBeAutoSelected: true,
               },
             ];
           }
-          const hasExisting = this.getSavedServers().length > 0;
-          return [
+          const saved = this.getSavedServers();
+          const hasExisting = saved.length > 0;
+          const commands: JupyterServerCommand[] = [
             {
               label: '$(cloud-upload) Connect & Sync Remote Jupyter Server...',
               description: 'Paste a JupyterLab, JupyterHub, or GKE Workspace URL with token',
+              action: 'connect',
               canBeAutoSelected: !hasExisting,
             },
           ];
+          if (hasExisting) {
+            commands.push({
+              label: '$(trash) Remove Saved Jupyter Server URL...',
+              description: `Delete old or unused server URLs (${saved.length} saved)`,
+              action: 'remove',
+              canBeAutoSelected: false,
+            });
+          }
+          return commands;
         },
         handleCommand: async (
           command: JupyterServerCommand,
           _token: vscode.CancellationToken
         ): Promise<JupyterServerItem | undefined> => {
+          if (command.action === 'remove') {
+            await this.promptToRemoveServers();
+            // Allow ms-toolsai.jupyter's onDidChangeServers listeners to prune uriStorage/finders
+            // before returning undefined (which triggers ms-toolsai.jupyter to re-open the server list).
+            await new Promise((r) => setTimeout(r, 60));
+            return undefined;
+          }
           const rawUrl = command.url || (await this.promptForJupyterUrl());
           if (!rawUrl) {
             return undefined;
@@ -462,6 +491,342 @@ export class ConnectionManager implements vscode.Disposable {
     const existing = this.getSavedServers().filter((s) => s.id !== meta.id);
     existing.unshift(meta);
     await this.context.globalState.update(SAVED_SERVERS_KEY, existing.slice(0, 10));
+  }
+
+  async removeServer(serverId: string): Promise<boolean> {
+    const existing = this.getSavedServers();
+    const target = existing.find((s) => s.id === serverId);
+    if (!target) {
+      return false;
+    }
+    const updated = existing.filter((s) => s.id !== serverId);
+    await this.context.globalState.update(SAVED_SERVERS_KEY, updated);
+    await this.context.secrets.delete(`${SECRET_PREFIX}${serverId}`);
+    this.passiveClients.delete(serverId);
+    removeCliSessionByBaseUrl(target.baseUrl);
+
+    if (this.activeServerMeta?.id === serverId) {
+      await this.disconnect();
+      this.callbacks.onServerDisconnected?.();
+    } else {
+      this.onDidChangeServersEmitter.fire();
+    }
+    this.callbacks.onLog(`Removed saved Jupyter Server '${target.label}' (${target.baseUrl}).`);
+    return true;
+  }
+
+  async clearSavedServers(): Promise<number> {
+    const existing = this.getSavedServers();
+    if (existing.length === 0) {
+      return 0;
+    }
+    for (const s of existing) {
+      await this.context.secrets.delete(`${SECRET_PREFIX}${s.id}`);
+    }
+    await this.context.globalState.update(SAVED_SERVERS_KEY, []);
+    this.passiveClients.clear();
+    removeCliSessionByBaseUrl();
+
+    if (this.activeServerMeta) {
+      await this.disconnect();
+      this.callbacks.onServerDisconnected?.();
+    } else {
+      this.onDidChangeServersEmitter.fire();
+    }
+    this.callbacks.onLog(`Cleared all ${existing.length} saved Jupyter Server URL(s).`);
+    return existing.length;
+  }
+
+  /**
+   * Interactive QuickPick to delete individual saved server URLs (via inline trash icon or row click)
+   * or clear all saved server URLs.
+   */
+  async promptToRemoveServers(): Promise<number> {
+    const initial = this.getSavedServers();
+    if (initial.length === 0) {
+      vscode.window.showInformationMessage('No saved Jupyter Server URLs to remove.');
+      return 0;
+    }
+
+    type RemovePickItem = vscode.QuickPickItem & {
+      serverId?: string;
+      serverLabel?: string;
+      action?: 'clearAll';
+    };
+
+    const trashButton: vscode.QuickInputButton = {
+      iconPath: new vscode.ThemeIcon('trash'),
+      tooltip: 'Delete this saved server URL',
+    };
+
+    const buildItems = (): RemovePickItem[] => {
+      const servers = this.getSavedServers();
+      const items: RemovePickItem[] = servers.map((s) => ({
+        label: `$(server) ${s.label}`,
+        description: s.baseUrl,
+        detail:
+          this.activeServerMeta?.id === s.id
+            ? 'Currently connected — click or press trash icon to remove'
+            : `Last connected: ${new Date(s.lastConnectedAt).toLocaleString()} — click or press trash icon to remove`,
+        serverId: s.id,
+        serverLabel: s.label,
+        buttons: [trashButton],
+      }));
+      if (servers.length > 1) {
+        items.push({
+          label: '',
+          kind: vscode.QuickPickItemKind.Separator,
+        });
+        items.push({
+          label: '$(clear-all) Remove All Saved Server URLs',
+          description: `Delete all ${servers.length} saved entries`,
+          action: 'clearAll',
+        });
+      }
+      return items;
+    };
+
+    return await new Promise<number>((resolve) => {
+      let removedCount = 0;
+      let resolved = false;
+      const qp = vscode.window.createQuickPick<RemovePickItem>();
+      qp.title = 'Jupyter Workspace Sync: Remove Saved Server URLs';
+      qp.placeholder = 'Select a server URL (or click its trash button) to delete it';
+      qp.matchOnDescription = true;
+      qp.items = buildItems();
+
+      const finish = () => {
+        if (!resolved) {
+          resolved = true;
+          qp.dispose();
+          resolve(removedCount);
+        }
+      };
+
+      qp.onDidTriggerItemButton(async (event) => {
+        const item = event.item;
+        if (!item.serverId) {
+          return;
+        }
+        qp.busy = true;
+        try {
+          if (await this.removeServer(item.serverId)) {
+            removedCount++;
+          }
+          const remaining = this.getSavedServers();
+          if (remaining.length === 0) {
+            vscode.window.showInformationMessage('Removed all saved Jupyter Server URLs.');
+            qp.hide();
+          } else {
+            qp.items = buildItems();
+          }
+        } finally {
+          qp.busy = false;
+        }
+      });
+
+      qp.onDidAccept(async () => {
+        const selected = qp.selectedItems[0];
+        if (!selected) {
+          return;
+        }
+        qp.busy = true;
+        try {
+          if (selected.action === 'clearAll') {
+            const count = await this.clearSavedServers();
+            removedCount += count;
+            vscode.window.showInformationMessage(
+              `Removed all ${count} saved Jupyter Server URL(s).`
+            );
+            qp.hide();
+          } else if (selected.serverId) {
+            if (await this.removeServer(selected.serverId)) {
+              removedCount++;
+              vscode.window.showInformationMessage(
+                `Removed saved Jupyter Server '${selected.serverLabel}'.`
+              );
+            }
+            qp.hide();
+          }
+        } finally {
+          qp.busy = false;
+        }
+      });
+
+      qp.onDidHide(() => {
+        finish();
+      });
+
+      qp.show();
+    });
+  }
+
+  /**
+   * Shows a QuickPick of saved servers (with inline trash buttons to delete old URLs)
+   * plus an option to paste a new URL, or prompts directly for a URL if no servers are saved.
+   */
+  async selectOrConnectServer(): Promise<SavedServerMetadata | undefined> {
+    if (this.getSavedServers().length === 0) {
+      const url = await this.promptForJupyterUrl();
+      if (!url) {
+        return undefined;
+      }
+      return await this.connectFromUrl(url);
+    }
+
+    type ConnectPickItem = vscode.QuickPickItem & {
+      server?: SavedServerMetadata;
+      action?: 'newUrl' | 'clearAll';
+    };
+
+    const trashButton: vscode.QuickInputButton = {
+      iconPath: new vscode.ThemeIcon('trash'),
+      tooltip: 'Delete this saved server URL',
+    };
+
+    const buildItems = (): ConnectPickItem[] => {
+      const servers = this.getSavedServers();
+      const items: ConnectPickItem[] = servers.map((s) => ({
+        label: `$(server) ${s.label}`,
+        description: this.activeServerMeta?.id === s.id ? '(Connected)' : s.baseUrl,
+        detail: s.baseUrl,
+        server: s,
+        buttons: [trashButton],
+      }));
+      if (servers.length > 0) {
+        items.push({
+          label: '',
+          kind: vscode.QuickPickItemKind.Separator,
+        });
+      }
+      items.push({
+        label: '$(add) Connect to a New Jupyter Server URL...',
+        description: 'Paste a JupyterLab, JupyterHub, or GKE Workspace URL with token',
+        action: 'newUrl',
+        alwaysShow: true,
+      });
+      if (servers.length > 0) {
+        items.push({
+          label: '$(trash) Remove All Saved Server URLs',
+          description: `Clear ${servers.length} saved server(s)`,
+          action: 'clearAll',
+          alwaysShow: true,
+        });
+      }
+      return items;
+    };
+
+    const choice = await new Promise<
+      { type: 'server'; server: SavedServerMetadata } | { type: 'newUrl'; url?: string } | undefined
+    >((resolve) => {
+      let settled = false;
+      const qp = vscode.window.createQuickPick<ConnectPickItem>();
+      qp.title = 'Jupyter Workspace Sync: Select or Connect to Remote Jupyter Server';
+      qp.placeholder =
+        'Select a saved server, click the trash icon to delete old URLs, or paste a new URL';
+      qp.matchOnDescription = true;
+      qp.matchOnDetail = true;
+      qp.items = buildItems();
+
+      const done = (
+        val:
+          | { type: 'server'; server: SavedServerMetadata }
+          | { type: 'newUrl'; url?: string }
+          | undefined
+      ) => {
+        if (!settled) {
+          settled = true;
+          qp.dispose();
+          resolve(val);
+        }
+      };
+
+      qp.onDidTriggerItemButton(async (event) => {
+        const srv = event.item.server;
+        if (!srv) {
+          return;
+        }
+        qp.busy = true;
+        try {
+          await this.removeServer(srv.id);
+          qp.items = buildItems();
+        } finally {
+          qp.busy = false;
+        }
+      });
+
+      qp.onDidAccept(async () => {
+        const rawInput = qp.value.trim();
+        const selected = qp.selectedItems[0];
+        if (
+          rawInput.startsWith('http://') ||
+          rawInput.startsWith('https://')
+        ) {
+          done({ type: 'newUrl', url: rawInput });
+          return;
+        }
+        if (!selected) {
+          return;
+        }
+        if (selected.action === 'clearAll') {
+          qp.busy = true;
+          try {
+            const count = await this.clearSavedServers();
+            vscode.window.showInformationMessage(
+              `Removed all ${count} saved Jupyter Server URL(s).`
+            );
+            done({ type: 'newUrl' });
+          } finally {
+            qp.busy = false;
+          }
+          return;
+        }
+        if (selected.action === 'newUrl') {
+          done({ type: 'newUrl' });
+          return;
+        }
+        if (selected.server) {
+          done({ type: 'server', server: selected.server });
+        }
+      });
+
+      qp.onDidHide(() => {
+        done(undefined);
+      });
+
+      qp.show();
+    });
+
+    if (!choice) {
+      return undefined;
+    }
+
+    if (choice.type === 'newUrl') {
+      const url = choice.url || (await this.promptForJupyterUrl());
+      if (!url) {
+        return undefined;
+      }
+      return await this.connectFromUrl(url);
+    }
+
+    const saved = choice.server;
+    const secretToken = (await this.context.secrets.get(`${SECRET_PREFIX}${saved.id}`)) || '';
+    const client = this.getOrCreatePassiveClient(saved, secretToken);
+    try {
+      await this.activateServerWithClient(saved, client, false, undefined, true);
+      return saved;
+    } catch (err) {
+      if (err instanceof JupyterAuthError) {
+        const replacement = await this.promptForJupyterUrl(
+          `Token for '${saved.label}' expired. Paste a fresh URL with ?token=...`
+        );
+        if (!replacement) {
+          return undefined;
+        }
+        return await this.connectFromUrl(replacement);
+      }
+      throw err;
+    }
   }
 
   /**

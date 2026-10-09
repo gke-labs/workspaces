@@ -76,6 +76,11 @@
         "icon": "$(debug-disconnect)"
       },
       {
+        "command": "jupyterSync.removeServer",
+        "title": "Jupyter Sync: Remove Saved Server URL...",
+        "icon": "$(trash)"
+      },
+      {
         "command": "jupyterSync.showLogs",
         "title": "Jupyter Sync: Show Sync Output Logs",
         "icon": "$(output)"
