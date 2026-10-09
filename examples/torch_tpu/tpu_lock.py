@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """TPU Hardware Lock Management & Pre-Flight Diagnostics.
 
 Cloud TPU hardware character devices (/dev/vfio/* and /dev/accel*) are opened
@@ -19,7 +33,6 @@ import argparse
 import os
 import pathlib
 import signal
-import sys
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -28,7 +41,7 @@ def get_tpu_devices() -> List[str]:
     """Returns a sorted list of TPU character device paths on this host."""
     devices: Set[str] = set()
 
-    # Cloud TPU v4, v5e, v5p allocate VFIO group device nodes (/dev/vfio/0, 1, ...)
+    # Cloud TPU v4, v5e, v5p, v6e allocate VFIO group device nodes (/dev/vfio/0, 1, ...)
     vfio_dir = pathlib.Path("/dev/vfio")
     if vfio_dir.exists():
         for p in vfio_dir.iterdir():
@@ -62,7 +75,6 @@ def find_tpu_processes(
     exclude_pids: Optional[Set[int]] = None,
 ) -> List[Dict[str, Any]]:
     """Scans /proc to find processes holding open file descriptors to TPU devices
-
     or running distributed worker scripts.
     """
     if exclude_pids is None:
@@ -108,8 +120,12 @@ def find_tpu_processes(
         except Exception:
             pass
 
-        # Identify if this process is holding TPU devices or is a known orphaned worker
-        is_worker = "train_worker.py" in cmdline or ("torchrun" in cmdline and "train_worker" in cmdline)
+        is_worker = (
+            "train_worker.py" in cmdline
+            or "torch.distributed.run" in cmdline
+            or "/torchrun " in cmdline
+            or cmdline.startswith("torchrun ")
+        )
 
         if open_devices or is_worker:
             tpu_procs.append({
@@ -219,7 +235,6 @@ def clear_tpu_locks(verbose: bool = True) -> bool:
 
 def release_current_kernel(restart: bool = True, verbose: bool = True) -> None:
     """Releases exclusive TPU hardware locks held by this Jupyter kernel by restarting
-
     or shutting down the kernel process.
     """
     if verbose:
@@ -241,22 +256,10 @@ def release_current_kernel(restart: bool = True, verbose: bool = True) -> None:
 
 
 def preflight_check(is_distributed: bool = False, auto_clear: bool = False, verbose: bool = True) -> bool:
-    """Comprehensive pre-flight check before running a TPU notebook session.
-
-    Args:
-        is_distributed: If True, also asserts that the CURRENT kernel has NOT
-          initialized TPU hardware, since child worker processes launched via
-          torchrun require exclusive access to /dev/vfio/*.
-        auto_clear: If True, automatically clears locks from external processes.
-        verbose: Whether to print diagnostic messages.
-
-    Returns:
-        True if the hardware is ready and unlocked; False otherwise.
-    """
+    """Comprehensive pre-flight check before running a TPU notebook session."""
     if verbose:
         print("🔍 Running TPU Hardware Pre-Flight Check...")
 
-    # 1. Check if external processes hold the TPU
     locked_procs = check_tpu_locks(verbose=verbose)
     if locked_procs:
         if auto_clear:
@@ -269,7 +272,6 @@ def preflight_check(is_distributed: bool = False, auto_clear: bool = False, verb
                 print("❌ TPU hardware is busy. Call `tpu_lock.clear_tpu_locks()` to release it.")
             return False
 
-    # 2. For distributed orchestrator notebooks, check if the current kernel already locked the TPU
     if is_distributed:
         holding, devs = is_current_kernel_holding_tpu()
         if holding:
@@ -304,7 +306,6 @@ def main() -> None:
     elif args.distributed:
         preflight_check(is_distributed=True, verbose=True)
     else:
-        # Default: print status
         check_tpu_locks(verbose=True)
         holding, devs = is_current_kernel_holding_tpu()
         if holding:
