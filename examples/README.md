@@ -23,6 +23,7 @@ and cleanup instructions.
 | [**distributed**](distributed/) | A 0.1-CPU notebook drives a Spark ETL job, multi-host TPU training, and a serving Deployment — without you writing any YAML | CPU notebook + 5 Spark pods + 2 × TPU v5e host | 1–2 hours |
 | [**tpu**](tpu/) | Interactive JAX training on Cloud TPU v5e (4 chips) directly from Desktop VS Code or JupyterLab | 1 × TPU v5e (4 chips) | 10–20 min |
 | [**torch_tpu**](torch_tpu/) | Interactive PyTorch training on Cloud TPU v5e with TorchTPU, scaling to multi-core DDP with torchrun on a single-host TPU slice | 1 × TPU v5e (1 or 4 chips) | 10–20 min |
+| [**torchtitan**](torchtitan/) | End-to-end TorchTitan (`llama3_debugmodel`, `llama3_1b`) on Cloud TPU: interactive single-host training and zero-Docker-build multi-host GKE training via a shared `ReadWriteMany` Filestore volume | 1 × TPU v5e (1 or 4 chips) + 2 × TPU v5e host (`v5litepod-8`) | 15–30 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
 | [**ray**](ray/) | Elastic distributed computing with Ray (KubeRay): launch on-demand clusters from Python, run interactive tasks, submit batch jobs, and view the Ray Dashboard in-workspace | CPU (`e2-standard-4`) | 15–30 min |
 
