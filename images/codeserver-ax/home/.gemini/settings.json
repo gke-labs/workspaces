@@ -1,0 +1,19 @@
+{
+  "security": {
+    "auth": {
+      "selectedType": "gemini-api-key"
+    }
+  },
+  "general": {
+    "enableAutoUpdate": false
+  },
+  "ide": {
+    "enabled": false,
+    "hasSeenNudge": true
+  },
+  "context": {
+    "includeDirectories": [
+      "/opt/agent-substrate/gemini-extension"
+    ]
+  }
+}

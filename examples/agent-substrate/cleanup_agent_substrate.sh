@@ -44,10 +44,11 @@ if [[ -x "${WORK_DIR}/bin/ax" ]]; then
   done
 fi
 
-echo "==> Removing the \"JupyterLab + AX\" image option from WorkspaceKinds"
+echo "==> Removing the \"Code Server + AX agents\" image option from WorkspaceKinds"
 # Workspaces still using the image keep running until they are recreated; the
-# Workspaces API may refuse to remove an option that is in use.
-for kind in ${WORKSPACE_KINDS:-jupyterlab jupyterlab-resumable}; do
+# Workspaces API may refuse to remove an option that is in use. The optional
+# GEMINI_API_KEY environment variable stays, as on the jupyterlab kind.
+for kind in ${WORKSPACE_KINDS:-codeserver}; do
   "${K[@]}" get workspacekind "${kind}" >/dev/null 2>&1 || continue
   patch="$("${K[@]}" get workspacekind "${kind}" -o json \
     | python3 "${SCRIPT_DIR}/register_workspace_image.py" --remove)"

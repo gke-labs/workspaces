@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""The coding agent that runs inside every AX task of examples/agent-substrate.
+
+``ax-agents launch`` (in the Workspace) creates AX Tasks whose ``spec.command``
+is ``ax-coding-agent run``. ax-task-runner starts it in the project directory
+once the workspace files are in place. Everything the agent produces lives on
+the task's durable ``/workspace`` volume, so it survives suspend and resume:
+
+    /workspace/<project>/      the uploaded project (ax-task-runner rewrites
+                               it on every resume, so the agent never edits it)
+    /workspace/work/<project>/ the agent's working copy: a Git repo with the
+                               original files tagged ``ax-baseline``
+    /workspace/.agent/         status.json, activity.log, summary.md, check.log
+
+Subcommands (the Workspace calls the last three over ``ax ssh``):
+
+    run      Work on the task once. On a resume after the work finished it does
+             nothing; if a suspend interrupted the work, it picks up again from
+             the files on disk.
+    status   Print status.json.
+    logs     Print the activity log and, once finished, the agent's summary.
+    diff     Print the agent's changes as a patch against the original files.
+
+The task comes from the environment, base64-encoded so that any text survives
+the trip through the AX manifest: AGENT_TASK_B64 (required), AGENT_CHECK_B64
+(optional verification command) and AGENT_TIMEOUT (seconds, or 30m / 1h).
+"""
+
+import argparse
+import asyncio
+import base64
+import datetime
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+STATE_DIR = os.environ.get("AGENT_STATE_DIR", "/workspace/.agent")
+WORK_ROOT = os.environ.get("AGENT_WORK_ROOT", "/workspace/work")
+STATUS = os.path.join(STATE_DIR, "status.json")
+ACTIVITY = os.path.join(STATE_DIR, "activity.log")
+SUMMARY = os.path.join(STATE_DIR, "summary.md")
+CHECK_LOG = os.path.join(STATE_DIR, "check.log")
+BASELINE_TAG = "ax-baseline"
+FINAL_STATES = ("done", "failed", "timed-out")
+
+# Build and cache output the agent or the check command may create. Kept out of
+# the patch that `diff` returns.
+GIT_EXCLUDES = [
+    "__pycache__/", "*.pyc", ".pytest_cache/", ".mypy_cache/", ".ruff_cache/",
+    "node_modules/", ".venv/", "venv/", "*.egg-info/", "dist/", "build/", ".DS_Store",
+]
+
+SYSTEM_INSTRUCTIONS = """\
+You are an autonomous software engineering agent working in an isolated sandbox.
+Your working directory, {project}, holds a copy of the user's project.
+
+- Complete the task end to end on your own. Nobody will answer questions.
+- Only create or modify files inside {project}.
+- The sandbox has no internet access apart from the model API: you cannot
+  install packages, download files or clone repositories. Use what is there.
+- If the project has an AGENTS.md or README, read it first.
+- If a verification command is given, run it before you finish and make it pass
+  without weakening or deleting tests.
+- Finish with a short summary (a few lines) of what you changed and why.
+"""
+
+
+# ---------------------------------------------------------------- utilities
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_status():
+    try:
+        with open(STATUS) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_status(**fields):
+    status = read_status()
+    status.update(fields)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = STATUS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(status, f, indent=1)
+    os.replace(tmp, STATUS)
+    return status
+
+
+def activity(line):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
+    with open(ACTIVITY, "a") as f:
+        f.write(f"{stamp}  {line}\n")
+
+
+def env_text(name):
+    raw = os.environ.get(name + "_B64")
+    if raw:
+        return base64.b64decode(raw).decode()
+    return os.environ.get(name, "")
+
+
+def parse_timeout(value, default=30 * 60):
+    value = (value or "").strip().lower()
+    if not value:
+        return default
+    units = {"s": 1, "m": 60, "h": 3600}
+    if value[-1] in units:
+        return int(float(value[:-1]) * units[value[-1]])
+    return int(value)
+
+
+def git(project, *args, check=True):
+    return subprocess.run(["git", "-C", project, *args], check=check,
+                          capture_output=True, text=True)
+
+
+def ensure_baseline(project):
+    """Snapshot the original files once, so `diff` can show the agent's changes."""
+    if git(project, "rev-parse", "-q", "--verify", f"refs/tags/{BASELINE_TAG}", check=False).returncode == 0:
+        return
+    if not os.path.isdir(os.path.join(project, ".git")):
+        git(project, "init", "-q")
+    with open(os.path.join(project, ".git", "info", "exclude"), "a") as f:
+        f.write("\n".join(GIT_EXCLUDES) + "\n")
+    git(project, "add", "-A")
+    git(project, "-c", "user.name=ax-agent", "-c", "user.email=ax-agent@localhost",
+        "commit", "-q", "--allow-empty", "--no-verify", "-m", "Original files")
+    git(project, "tag", BASELINE_TAG)
+
+
+def prepare_project(source):
+    """Copy the uploaded project to the agent's own working copy, once.
+
+    ax-task-runner records "workspace prepared" in /ax, which is not on the
+    durable volume, so it writes the uploaded files again on every resume. The
+    agent therefore works on a copy under WORK_ROOT (also on the durable
+    volume) that the runner never touches.
+    """
+    project = os.path.join(WORK_ROOT, os.path.basename(source.rstrip("/")) or "project")
+    if not os.path.isdir(project):
+        os.makedirs(WORK_ROOT, exist_ok=True)
+        shutil.copytree(source, project, symlinks=True)
+    ensure_baseline(project)
+    return project
+
+
+def describe_tool_call(call):
+    name = getattr(call.name, "value", call.name)
+    args = call.args or {}
+    for key in ("command_line", "command", "CommandLine", "path", "file_path", "AbsolutePath",
+                "TargetFile", "query", "Query", "directory", "DirectoryPath"):
+        if args.get(key):
+            detail = str(args[key])
+            break
+    else:
+        detail = ", ".join(f"{k}={v}" for k, v in list(args.items())[:2])
+    detail = " ".join(detail.split())
+    return f"{name}: {detail[:160]}"
+
+
+# --------------------------------------------------------------------- run
+async def run_agent(project, prompt):
+    from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
+    from google.antigravity.hooks import policy
+    from google.antigravity.types import Text, ToolCall
+
+    data_dir = os.path.join(STATE_DIR, "antigravity")
+    os.makedirs(data_dir, exist_ok=True)
+    config = LocalAgentConfig(
+        workspaces=[project],
+        capabilities=CapabilitiesConfig(),
+        # File tools stay inside the project; everything else (including
+        # run_command, which the SDK denies by default) is allowed.
+        policies=[*policy.workspace_only([project]), policy.allow_all()],
+        api_key=os.environ["GEMINI_API_KEY"],
+        system_instructions=SYSTEM_INSTRUCTIONS.format(project=project),
+        save_dir=data_dir,
+        app_data_dir=data_dir,
+    )
+    text = []
+    async with Agent(config) as agent:
+        response = await agent.chat(prompt)
+        async for chunk in response.chunks:
+            if isinstance(chunk, ToolCall):
+                activity(describe_tool_call(chunk))
+            elif isinstance(chunk, Text):
+                text.append(chunk.text)
+    return "".join(text).strip()
+
+
+def run_check(project, check):
+    activity(f"check: {check}")
+    try:
+        proc = subprocess.run(["sh", "-c", check], cwd=project, capture_output=True,
+                              text=True, timeout=15 * 60)
+        code, out = proc.returncode, proc.stdout + proc.stderr
+    except subprocess.TimeoutExpired as e:
+        code, out = 124, f"{e.stdout or ''}{e.stderr or ''}\ncheck timed out after 15 minutes\n"
+    with open(CHECK_LOG, "w") as f:
+        f.write(out)
+    activity(f"check {'passed' if code == 0 else f'failed (exit {code})'}")
+    return code
+
+
+def cmd_run(_args):
+    status = read_status()
+    project = status.get("project") or prepare_project(os.getcwd())
+    os.chdir(project)
+    task = env_text("AGENT_TASK").strip()
+    check = env_text("AGENT_CHECK").strip()
+    timeout = parse_timeout(os.environ.get("AGENT_TIMEOUT"))
+
+    if status.get("state") in FINAL_STATES:
+        print(f"Already finished ({status['state']}); nothing to do on resume.")
+        return 0
+    if not task:
+        write_status(state="failed", error="no task given (AGENT_TASK_B64 is empty)", finished=now())
+        return 1
+    if not os.environ.get("GEMINI_API_KEY"):
+        write_status(state="failed", error="GEMINI_API_KEY is not set in the sandbox", finished=now())
+        activity("failed: GEMINI_API_KEY is not set in the sandbox")
+        return 1
+
+    attempt = int(status.get("attempt", 0)) + 1
+    write_status(state="working", project=project, task=task, check=check or None,
+                 started=status.get("started") or now(), attempt=attempt)
+
+    prompt = f"Task:\n{task}\n"
+    if check:
+        prompt += f"\nVerification command (run it in {project}; it must pass):\n{check}\n"
+    if attempt > 1:
+        prompt += ("\nNote: you already worked on this task, but the sandbox was suspended "
+                   "and resumed, which stopped you mid-way. Your file changes are still "
+                   "there. Look at the current state of the files and continue.\n")
+        activity(f"resumed after a suspend: continuing (attempt {attempt})")
+    else:
+        activity("started")
+
+    state, error = "done", None
+    try:
+        summary = asyncio.run(asyncio.wait_for(run_agent(project, prompt), timeout))
+    except asyncio.TimeoutError:
+        state, summary, error = "timed-out", "", f"stopped after {timeout}s"
+    except Exception as e:  # noqa: BLE001 - report any agent failure in status
+        state, summary, error = "failed", "", f"{type(e).__name__}: {e}"
+    with open(SUMMARY, "w") as f:
+        f.write(summary + "\n")
+    activity(f"agent {state}" + (f": {error}" if error else ""))
+
+    check_exit = run_check(project, check) if check else None
+    changed = git(project, "diff", "--name-only", BASELINE_TAG, check=False).stdout.split()
+    untracked = git(project, "ls-files", "--others", "--exclude-standard", check=False).stdout.split()
+    write_status(state=state, error=error, finished=now(), checkExit=check_exit,
+                 changedFiles=sorted(set(changed + untracked)))
+    return 0
+
+
+# ----------------------------------------------------------- inspection
+def cmd_status(_args):
+    status = read_status() or {"state": "starting"}
+    print(json.dumps(status))
+    return 0
+
+
+def cmd_logs(args):
+    try:
+        with open(ACTIVITY) as f:
+            lines = f.readlines()
+    except OSError:
+        lines = ["(no activity yet)\n"]
+    sys.stdout.write("".join(lines[-args.lines:]))
+    status = read_status()
+    if status.get("state") in FINAL_STATES:
+        try:
+            with open(SUMMARY) as f:
+                summary = f.read().strip()
+        except OSError:
+            summary = ""
+        if summary:
+            print("\n--- agent summary ---\n" + summary)
+    return 0
+
+
+def cmd_diff(_args):
+    project = read_status().get("project")
+    if not project:
+        print("ax-coding-agent: the agent has not started yet", file=sys.stderr)
+        return 1
+    # Stage everything (new files included) so the patch covers them, then diff
+    # the index against the original files.
+    git(project, "add", "-A")
+    proc = git(project, "diff", "--cached", "--binary", BASELINE_TAG, check=False)
+    sys.stdout.write(proc.stdout)
+    return proc.returncode
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("run", help="work on the task (the AX task command)")
+    sub.add_parser("status", help="print status.json")
+    logs = sub.add_parser("logs", help="print recent activity and the final summary")
+    logs.add_argument("-n", "--lines", type=int, default=40)
+    sub.add_parser("diff", help="print the agent's changes as a patch")
+    args = ap.parse_args()
+    return {"run": cmd_run, "status": cmd_status, "logs": cmd_logs, "diff": cmd_diff}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

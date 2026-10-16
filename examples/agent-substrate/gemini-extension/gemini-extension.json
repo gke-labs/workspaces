@@ -1,0 +1,6 @@
+{
+  "name": "agent-substrate",
+  "version": "0.1.0",
+  "description": "Delegate coding tasks to background agents that run in isolated sandboxes on the cluster's Agent Substrate worker pool (via AX), then review and merge their patches.",
+  "contextFileName": "GEMINI.md"
+}

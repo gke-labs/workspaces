@@ -25,10 +25,11 @@
 #   2. A GCS bucket for actor snapshots, with Workload Identity bindings
 #   3. Agent Substrate (ate-system) from pre-built release images
 #   4. A WorkerPool: the warm worker pods the agents are packed onto
-#   5. AX (ax-system): Redis, ax-server, and the ax-task-runner image;
-#      the `ax` CLI is uploaded to gs://$GCS_BUCKET/tools/ax for Workspaces
-#   6. The "JupyterLab + AX" Workspace image (ax CLI + kubectl + walkthrough),
-#      offered as an image option on the jupyterlab / jupyterlab-resumable kinds
+#   5. AX (ax-system): Redis, ax-server, and the agent runtime image every
+#      agent runs (AX's ax-task-runner + agent-runtime/ax-coding-agent)
+#   6. The "Code Server + AX agents" Workspace image (Gemini CLI with the
+#      agent-substrate extension, ax-agents, ax), offered as an image option
+#      on the codeserver WorkspaceKind
 #   7. fleet-helper (default egress policy + read-only actor view)
 #   8. Access for the tenant: NetworkPolicies and the RBAC `ax ssh` needs
 #   9. A smoke test: one AX task through create -> resume -> ssh -> delete
@@ -54,7 +55,6 @@ export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
 if [[ -z "${REGISTRY:-}" || "${REGISTRY:-}" != *"${PROJECT_ID}"* ]]; then
   export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 fi
-export GCS_BUCKET="${GCS_BUCKET:-${PROJECT_ID}-${TENANT_NAMESPACE}-bucket}"
 
 # Example-specific settings.
 export SUBSTRATE_VERSION
@@ -78,8 +78,9 @@ export WORKER_MEMORY="${WORKER_MEMORY:-4Gi}"
 # Hosts agents may reach (TLS passthrough on :443). The Gemini API is all the
 # Antigravity agent needs; the scripted mode needs no egress at all.
 export EGRESS_HOSTNAMES="${EGRESS_HOSTNAMES:-[\"generativelanguage.googleapis.com\"]}"
-# Optional: enables the notebook's "gemini" mode. Stored as a Secret in
-# ax-system and read by ax-server.
+# The agents' model key. Stored as a Secret in ax-system; ax-server hands it to
+# every agent sandbox. Defaults to the tenant's gemini-api-key Secret, which the
+# codeserver WorkspaceKind also passes to Gemini CLI in the Workspace.
 export GEMINI_API_KEY="${GEMINI_API_KEY:-}"
 if [[ -z "${GEMINI_API_KEY}" ]]; then
   GEMINI_API_KEY="$(kubectl --context "${CONTEXT}" -n "${TENANT_NAMESPACE}" get secret gemini-api-key -o jsonpath='{.data.GEMINI_API_KEY}' 2>/dev/null | base64 -d 2>/dev/null || true)"
@@ -89,14 +90,15 @@ export WORK_DIR="${WORK_DIR:-${HOME}/.cache/gke-workspaces/agent-substrate}"
 # Build the task-runner image with Cloud Build instead of local Docker.
 export USE_CLOUD_BUILD="${USE_CLOUD_BUILD:-false}"
 export SMOKE_TEST="${SMOKE_TEST:-true}"
-# Build the "JupyterLab + AX" Workspace image and add it as an image option to
-# these WorkspaceKinds (those that exist; others are skipped).
+# Build the "Code Server + AX agents" Workspace image and add it as an image
+# option to these WorkspaceKinds (those that exist; others are skipped).
 export BUILD_WORKSPACE_IMAGE="${BUILD_WORKSPACE_IMAGE:-true}"
-export WORKSPACE_KINDS="${WORKSPACE_KINDS:-jupyterlab jupyterlab-resumable}"
+export WORKSPACE_KINDS="${WORKSPACE_KINDS:-codeserver}"
 
 export SUBSTRATE_SRC="${WORK_DIR}/substrate-${SUBSTRATE_VERSION}"
 export AX_SRC="${WORK_DIR}/ax-${AX_REF//\//-}"
 export AX_TASK_IMAGE_REPO="${AX_TASK_IMAGE_REPO:-${REGISTRY}/ax-task-runner}"
+export AGENT_RUNTIME_IMAGE_REPO="${AGENT_RUNTIME_IMAGE_REPO:-${REGISTRY}/ax-agent-runtime}"
 K=(kubectl --context "${CONTEXT}")
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -113,7 +115,7 @@ Deploying Agent Substrate ${SUBSTRATE_VERSION} + AX (${AX_REF}) for Kubeflow Wor
   Worker pool:         ${WORKER_REPLICAS} x (${WORKER_CPU} CPU, ${WORKER_MEMORY}) on node pool ${SUBSTRATE_NODE_POOL}
   Snapshot bucket:     gs://${ATE_SNAPSHOT_BUCKET}
   Artifact Registry:   ${REGISTRY}
-  Gemini mode:         $([[ -n "${GEMINI_API_KEY}" ]] && echo enabled || echo "disabled (set GEMINI_API_KEY to enable)")
+  Gemini API key:      $([[ -n "${GEMINI_API_KEY}" ]] && echo found || echo "MISSING: agents cannot run without one (see README)")
 ==============================================================================
 EOF
 
@@ -145,10 +147,10 @@ AUTOPILOT="$(gcloud container clusters describe "${CLUSTER_NAME}" --location "${
 PROJECT_NUMBER="$(gcloud projects describe "${PROJECT_ID}" --format='value(projectNumber)')"
 
 # ko builds the Go images (ax-server, fleet-helper). Install it if missing.
+export PATH="${WORK_DIR}/bin:${PATH}"
 if ! command -v ko >/dev/null; then
   log "Installing ko into ${WORK_DIR}/bin"
   GOBIN="${WORK_DIR}/bin" go install github.com/google/ko@latest
-  export PATH="${WORK_DIR}/bin:${PATH}"
 fi
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet >/dev/null 2>&1
 
@@ -185,9 +187,9 @@ for member in "${WI}/atelet" "${WI}/ate-api-server"; do
       --member "${member}" --role "${role}" >/dev/null
   done
 done
-# atelet pulls sandbox runtime assets from Artifact Registry.
-gcloud projects add-iam-policy-binding "${PROJECT_ID}" --member "${WI}/atelet" \
-  --role roles/artifactregistry.reader --condition=None >/dev/null
+# atelet pulls the agent images (and sandbox runtime assets) from Artifact Registry.
+gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" --location "${REGION}" \
+  --project "${PROJECT_ID}" --member "${WI}/atelet" --role roles/artifactregistry.reader >/dev/null
 
 # ------------------------------------------------------------------------------
 log "4/9 Agent Substrate ${SUBSTRATE_VERSION} (ate-system)"
@@ -222,7 +224,7 @@ done
 "${K[@]}" -n "${WORKER_NAMESPACE}" get workerpool ax-agents
 
 # ------------------------------------------------------------------------------
-log "6/9 AX (${AX_REF}): task-runner image, ax-server, ax CLI"
+log "6/9 AX (${AX_REF}): agent runtime image, ax-server, ax CLI"
 # ------------------------------------------------------------------------------
 if [[ ! -d "${AX_SRC}/.git" ]]; then
   git clone --quiet --branch "${AX_REF}" "${AX_REPO}" "${AX_SRC}"
@@ -231,25 +233,38 @@ else
 fi
 AX_SHA="$(git -C "${AX_SRC}" rev-parse --short HEAD)"
 
-# Task-runner image: Python 3.12 + git + Antigravity + ax-task-runner as PID 1.
+# Build and push an image, then print its digest-pinned reference (Substrate
+# only accepts digest-pinned images in an ActorTemplate).
+# $1: build context, $2: tag, $3: Dockerfile (relative to $1), $4...: build args.
+build_image() {
+  local ctx="$1" tag="$2" dockerfile="$3"; shift 3
+  local a
+  if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
+    local args=""
+    for a in "$@"; do args+=", --build-arg, \"${a}\""; done
+    printf 'steps:\n- name: gcr.io/cloud-builders/docker\n  args: [build, --platform, linux/amd64, -t, "%s", -f, "%s"%s, .]\nimages: ["%s"]\n' \
+      "${tag}" "${dockerfile}" "${args}" "${tag}" > "${WORK_DIR}/cloudbuild-image.yaml"
+    gcloud builds submit "${ctx}" --project "${PROJECT_ID}" --config "${WORK_DIR}/cloudbuild-image.yaml" >&2
+  else
+    local build_args=()
+    for a in "$@"; do build_args+=(--build-arg "${a}"); done
+    docker buildx build --platform linux/amd64 -t "${tag}" --push -f "${ctx}/${dockerfile}" \
+      ${build_args[@]+"${build_args[@]}"} "${ctx}" >&2
+  fi
+  echo "${tag%:*}@$(gcloud artifacts docker images describe "${tag}" --format='value(image_summary.digest)')"
+}
+
+# AX's task image: Python 3.12, git, the Antigravity SDK and ax-task-runner as PID 1.
 (cd "${AX_SRC}" && mkdir -p bin/linux_amd64 && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags="-s -w" -o bin/linux_amd64/ax-task-runner ./cmd/ax-task-runner)
-TASK_IMAGE_TAG="${AX_TASK_IMAGE_REPO}:${AX_SHA}"
-if [[ "${USE_CLOUD_BUILD}" == "true" ]]; then
-  cat > "${WORK_DIR}/cloudbuild-task-runner.yaml" <<EOF
-steps:
-- name: gcr.io/cloud-builders/docker
-  args: [build, --platform, linux/amd64, -t, "${TASK_IMAGE_TAG}", -f, Dockerfile.task-runner, .]
-images: ["${TASK_IMAGE_TAG}"]
-EOF
-  gcloud builds submit "${AX_SRC}" --project "${PROJECT_ID}" --config "${WORK_DIR}/cloudbuild-task-runner.yaml"
-else
-  docker buildx build --platform linux/amd64 -t "${TASK_IMAGE_TAG}" --push -f "${AX_SRC}/Dockerfile.task-runner" "${AX_SRC}"
-fi
-# Substrate only accepts digest-pinned images in an ActorTemplate.
-TASK_DIGEST="$(gcloud artifacts docker images describe "${TASK_IMAGE_TAG}" --format='value(image_summary.digest)')"
-export AX_TASK_IMAGE="${AX_TASK_IMAGE_REPO}@${TASK_DIGEST}"
-echo "Task image: ${AX_TASK_IMAGE}"
+AX_TASK_IMAGE="$(build_image "${AX_SRC}" "${AX_TASK_IMAGE_REPO}:${AX_SHA}" Dockerfile.task-runner)"
+echo "AX task image:  ${AX_TASK_IMAGE}"
+# The agent runtime adds the coding agent (agent-runtime/ax-coding-agent) on top.
+RUNTIME_SHA="$(cat "${SCRIPT_DIR}/agent-runtime/Dockerfile" "${SCRIPT_DIR}/agent-runtime/ax-coding-agent" | sha256sum | cut -c1-10)"
+AX_AGENT_IMAGE="$(build_image "${SCRIPT_DIR}/agent-runtime" \
+  "${AGENT_RUNTIME_IMAGE_REPO}:${AX_SHA}-${RUNTIME_SHA}" Dockerfile "BASE_IMAGE=${AX_TASK_IMAGE}")"
+export AX_AGENT_IMAGE
+echo "Agent runtime:  ${AX_AGENT_IMAGE}"
 
 "${K[@]}" apply -f "${AX_SRC}/deploy/redis.yaml"
 (cd "${AX_SRC}" && KO_DOCKER_REPO="${REGISTRY}/ax" ko resolve --base-import-paths -f deploy/ax-server.yaml) \
@@ -259,33 +274,27 @@ if [[ -n "${GEMINI_API_KEY}" ]]; then
     --from-literal=GEMINI_API_KEY="${GEMINI_API_KEY}" --dry-run=client -o yaml | "${K[@]}" apply -f -
   "${K[@]}" -n ax-system set env deployment/ax-server --from=secret/gemini-api-secret >/dev/null
 fi
+# Tasks that do not name an image (all of them, with ax-agents) run the agent runtime.
 "${K[@]}" -n ax-system set env deployment/ax-server \
   AX_SNAPSHOTS_BUCKET="gs://${ATE_SNAPSHOT_BUCKET}/ax/" \
-  AX_DEFAULT_TASK_IMAGE="${AX_TASK_IMAGE}" >/dev/null
+  AX_DEFAULT_TASK_IMAGE="${AX_AGENT_IMAGE}" >/dev/null
 "${K[@]}" -n ax-system rollout status deployment/ax-redis --timeout=180s
 "${K[@]}" -n ax-system rollout status deployment/ax-server --timeout=300s
 
-# The ax CLI for Workspaces (linux/amd64) and for this workstation.
+# The ax CLI: for the Workspace image (linux/amd64) and for this workstation.
 (cd "${AX_SRC}" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${WORK_DIR}/ax-linux-amd64" ./cmd/ax \
   && go build -trimpath -o "${WORK_DIR}/bin/ax" ./cmd/ax)
-if gcloud storage buckets describe "gs://${GCS_BUCKET}" --project "${PROJECT_ID}" >/dev/null 2>&1; then
-  gcloud storage cp --quiet "${WORK_DIR}/ax-linux-amd64" "gs://${GCS_BUCKET}/tools/ax"
-  echo "Uploaded the ax CLI to gs://${GCS_BUCKET}/tools/ax"
-else
-  echo "WARNING: gs://${GCS_BUCKET} not found (see examples/README.md step 3). Upload ${WORK_DIR}/ax-linux-amd64"
-  echo "         to a location your Workspace can read and set AX_CLI_URI in the notebook."
-fi
 
 # ------------------------------------------------------------------------------
-log "7/9 Workspace image: JupyterLab + AX"
+log "7/9 Workspace image: Code Server + AX agents"
 # ------------------------------------------------------------------------------
 if [[ "${BUILD_WORKSPACE_IMAGE}" == "true" ]]; then
   WS_IMAGE_TAG="v$(date -u +%Y%m%d-%H%M%S)-ax-${AX_SHA}"
-  BUILD_FLAGS=(--jupyterlab-ax --registry-path "${REGISTRY}" --tag "${WS_IMAGE_TAG}"
+  BUILD_FLAGS=(--codeserver-ax --registry-path "${REGISTRY}" --tag "${WS_IMAGE_TAG}"
                --ax-repo "${AX_REPO}" --ax-ref "${AX_REF}")
   [[ "${USE_CLOUD_BUILD}" == "true" ]] && BUILD_FLAGS+=(--cloud-build)
   "${REPO_ROOT}/images/build.sh" "${BUILD_FLAGS[@]}"
-  export AX_WORKSPACE_IMAGE="${REGISTRY}/jupyterlab-ax:${WS_IMAGE_TAG}"
+  export AX_WORKSPACE_IMAGE="${REGISTRY}/codeserver-ax:${WS_IMAGE_TAG}"
   for kind in ${WORKSPACE_KINDS}; do
     if ! "${K[@]}" get workspacekind "${kind}" >/dev/null 2>&1; then
       echo "WorkspaceKind ${kind} not found; skipping."
@@ -296,10 +305,10 @@ if [[ "${BUILD_WORKSPACE_IMAGE}" == "true" ]]; then
     if [[ -n "${patch}" ]]; then
       "${K[@]}" patch workspacekind "${kind}" --type=json -p "${patch}"
     fi
-    echo "WorkspaceKind ${kind}: image option \"JupyterLab + AX agents (CPU)\" -> ${AX_WORKSPACE_IMAGE}"
+    echo "WorkspaceKind ${kind}: image option \"Code Server + AX agents (CPU)\" -> ${AX_WORKSPACE_IMAGE}"
   done
 else
-  echo "Skipped (BUILD_WORKSPACE_IMAGE=false). The notebook downloads the ax CLI from gs://${GCS_BUCKET}/tools/ax instead."
+  echo "Skipped (BUILD_WORKSPACE_IMAGE=false)."
 fi
 
 # ------------------------------------------------------------------------------
@@ -335,9 +344,10 @@ fi
 cat <<EOF
 
 ==============================================================================
-Done. Next: create a Workspace in ${TENANT_NAMESPACE} with kind "jupyterlab"
-(or "jupyterlab-resumable") and image "JupyterLab + AX agents (CPU)", then open
-~/agent-substrate/agent_fleet_walkthrough.ipynb.
+Done. Next: create a Workspace in ${TENANT_NAMESPACE} with kind "codeserver"
+and image "Code Server + AX agents (CPU)", open a terminal, and run: gemini
+Try: "The tests in ~/textkit fail. Send one background agent per failing test
+module to fix them, then merge the fixes."
 
 From this workstation:
   ${WORK_DIR}/bin/ax --context ${CONTEXT} -a ${TENANT_NAMESPACE} get tasks

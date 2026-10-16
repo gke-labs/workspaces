@@ -1,0 +1,11 @@
+description = "Fan out one background agent per failing test, then merge the fixes. Usage: /agents:fix-tests [project dir]"
+prompt = """
+Activate the agent-substrate skill, then:
+
+1. Run the test suite of the project in {{args}} (default: the current directory) and list the failing tests.
+2. Launch one background agent per failing test module with `ax-agents launch --agents-file -`,
+   each with a self-contained task and that module's test command as its check.
+3. Wait for them with `ax-agents wait`, review each patch with `ax-agents diff`, and tell me what each agent changed.
+4. Apply the patches whose checks passed with `ax-agents apply`, run the full test suite locally, and report the result.
+Do not delete the agents; I will decide when to clean up.
+"""

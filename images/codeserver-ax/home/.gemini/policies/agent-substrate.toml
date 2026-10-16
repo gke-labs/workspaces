@@ -1,0 +1,17 @@
+# Seeded by the Code Server + AX agents image (examples/agent-substrate).
+# Lets Gemini CLI run `ax-agents` (launch, list, wait, logs, diff, apply, ...)
+# without asking for confirmation every time. allowRedirection covers the
+# `ax-agents launch --agents-file - <<'EOF'` form the agent-substrate skill uses.
+# Deleting agents still asks first. Delete this file to be asked every time.
+[[rule]]
+toolName = "run_shell_command"
+commandPrefix = "ax-agents"
+decision = "allow"
+allowRedirection = true
+priority = 100
+
+[[rule]]
+toolName = "run_shell_command"
+commandPrefix = "ax-agents delete"
+decision = "ask_user"
+priority = 110

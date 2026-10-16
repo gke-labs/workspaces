@@ -1,0 +1,689 @@
+#!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""ax-agents: run background coding agents on Agent Substrate from a Workspace.
+
+Each agent gets its own copy of a local project directory, works on one task in
+an isolated sandbox on the cluster's shared worker pool, and leaves a patch you
+can review and apply. Idle agents can be suspended (they then cost only a
+snapshot in Cloud Storage) and resumed later with their files intact.
+
+  ax-agents launch --dir ~/textkit --check "python3 -m unittest -q tests.test_roman" \\
+      --agent fix-roman "Fix the roman numeral parser"
+  ax-agents list                  # what every agent is doing
+  ax-agents wait                  # block until the agents finish
+  ax-agents logs fix-roman        # recent activity and the agent's summary
+  ax-agents diff fix-roman        # the agent's changes, as a patch
+  ax-agents apply fix-roman       # apply them to the local project
+  ax-agents suspend --all         # park every agent; `resume` brings them back
+  ax-agents delete --all          # remove agents (and their sandboxes)
+
+Under the hood this is a thin wrapper around the `ax` CLI (AX Tasks and
+Workspaces on Agent Substrate). Only the Python standard library is used.
+"""
+
+# ==============================================================================
+# Why this exists, and why the raw `ax` CLI is not enough
+# ==============================================================================
+# (Kept out of the docstring above, which doubles as `--help`.)
+#
+# `ax` works on resources: apply Task/Workspace/Model manifests, list tasks,
+# suspend/resume/delete them, and `ssh` into one. Users (and Gemini, through
+# the agent-substrate skill) think in coding jobs: "send this directory and
+# this task to an agent, tell me when it is done, give me the patch". This
+# script closes the gap between the two. Each point below is something `ax`
+# does not do, or does in a way that breaks an agent driving it:
+#
+# 1. Getting code in. AX cannot upload a directory. A Workspace takes either
+#    `spec.git` (useless here: sandboxes may reach only the Gemini API) or
+#    `spec.files` with every file's contents inlined in the manifest.
+#    pack_project() builds that list (skipping VCS dirs, virtualenvs, caches
+#    and binaries, with size limits) and names the Workspace after a hash of
+#    the contents, so agents launched on the same files share one copy. An
+#    LLM writing that YAML by hand burns tokens on the whole project and makes
+#    mistakes.
+#
+# 2. Correct Task manifests. cmd_launch() bakes in what testing on a real
+#    cluster showed:
+#    - The agent runs as `spec.command` (`ax-coding-agent run`, from the
+#      agent runtime image), NOT as a workspace `goal`: AX runs the goal while
+#      the task reports not-ready, and Substrate gives a resuming actor only
+#      30s to become ready, so the first resume fails.
+#    - Task text and check command travel base64-encoded in env vars: AX
+#      re-serializes the Task to YAML for its runner, and a multi-line command
+#      produced YAML the runner could not parse.
+#    - `debug: true` on every task: without it `ax ssh` refuses to connect,
+#      and status/logs/diff all go through `ax ssh`.
+#    - Names are validated up front (RFC 1123, at most 40 characters, because
+#      AX appends `-tmpl-xxxxxxxx` for the ActorTemplate name) and checked for
+#      clashes with existing tasks.
+#
+# 3. Starting. `ax apply` creates tasks suspended; each needs its own
+#    `ax resume task NAME`. launch resumes them in parallel and reports
+#    per-agent failures.
+#
+# 4. Knowing whether an agent is done. `ax get tasks` only shows the phase
+#    (Running/Suspended), and AX does not read the command's exit status back,
+#    so a finished agent and a busy one both look "Running". The runtime writes
+#    /workspace/.agent/status.json; remote_status() reads it over `ax ssh`
+#    (in parallel) so `list` can show done/failed, check pass/fail, changed
+#    files and elapsed time, and `wait` can block until agents finish (AX has
+#    no wait). The WORKER column comes from fleet-helper, because Workspaces
+#    are deliberately kept away from the Substrate control API.
+#
+# 5. Getting results out. AX has no `cp`/download. The runtime commits the
+#    original files as a Git baseline before the agent starts, so `diff` is
+#    `git diff` over `ax ssh`, and `apply` replays it locally with `git apply`
+#    (clean hunks applied, conflicts left as *.rej), into the directory the
+#    agent was launched from (remembered in the state file).
+#
+# 6. CLI footguns, handled once in ax():
+#    - `ax ssh` forwards stdin and hangs forever unless stdin is closed.
+#    - `ax` defaults to the `default` atespace; every call needs
+#      `-a <namespace>`, read here from the pod's service account.
+#    - every call gets a timeout and a readable error.
+#
+# 7. Ownership and cleanup. AX has no labels or owners. ~/.ax-agents/agents.json
+#    records which agents this Workspace started, from which directory, with
+#    which uploaded Workspace. `list`/`suspend --all`/`delete --all` touch only
+#    those; `delete` refuses other tasks without --force (Gemini once deleted
+#    another demo's tasks to reuse their names); and it garbage-collects
+#    uploaded Workspaces no remaining agent uses.
+#
+# 8. Gemini fit. One command prefix (`ax-agents`) can be allowed in a Gemini
+#    CLI policy, with `ax-agents delete` still asking, instead of approving
+#    `ax`, `kubectl` and heredoc YAML piecemeal. And the skill can say "run
+#    `ax-agents launch --agents-file -`" instead of teaching the model AX's
+#    manifest format, the runner contract and the workarounds above.
+#
+# Raw `ax` stays available through `ax-agents ax <args>` (with the right
+# server and atespace). This script could shrink or go away if AX gains file
+# upload/download, task status from the command's exit code, labels for
+# ownership, a wait command and a default atespace from the environment, or if
+# an MCP server exposed those.
+# ==============================================================================
+
+import argparse
+import base64
+import concurrent.futures as cf
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+NS_FILE = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
+STATE_FILE = os.path.expanduser(os.environ.get("AX_AGENTS_STATE", "~/.ax-agents/agents.json"))
+FINAL_STATES = ("done", "failed", "timed-out")
+# RFC 1123 label, capped at 40 so AX's "-tmpl-xxxxxxxx" ActorTemplate suffix fits in 63 (see 2.).
+NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,38}[a-z0-9])?$")
+
+# What `launch` leaves out when it copies a project into an agent's sandbox.
+SKIP_DIRS = {".git", ".hg", ".svn", "__pycache__", "node_modules", ".venv", "venv", ".tox",
+             ".mypy_cache", ".pytest_cache", ".ruff_cache", ".ipynb_checkpoints", "dist", "build"}
+MAX_FILE_BYTES = 512 * 1024
+MAX_TOTAL_BYTES = 3 * 1024 * 1024
+
+
+class Error(Exception):
+    pass
+
+
+# ------------------------------------------------------------------ helpers
+def namespace():
+    try:
+        with open(NS_FILE) as f:
+            return f.read().strip()
+    except OSError:
+        return os.environ.get("TENANT_NAMESPACE", "kubeflow-user")
+
+
+def ax(*args, check=True, timeout=120, stdin=None):
+    """Run the ax CLI against this namespace's atespace (footguns: see 6.)."""
+    cmd = ["ax", "-a", namespace(), *args]
+    server = os.environ.get("AX_SERVER")
+    if server:
+        cmd[1:1] = ["--server", server]
+    try:
+        # stdin must be closed (or fed), or `ax ssh` waits for input forever.
+        proc = subprocess.run(cmd, input=stdin, capture_output=True, text=True, timeout=timeout,
+                              stdin=None if stdin is not None else subprocess.DEVNULL)
+    except FileNotFoundError:
+        raise Error("the `ax` CLI is not installed (use the 'Code Server + AX agents' Workspace image)")
+    except subprocess.TimeoutExpired:
+        raise Error(f"`ax {' '.join(args[:3])}` timed out after {timeout}s")
+    if check and proc.returncode != 0:
+        raise Error((proc.stderr or proc.stdout).strip() or f"ax {args[0]} failed")
+    return proc
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {"agents": {}}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(tmp, STATE_FILE)
+
+
+def b64(text):
+    return base64.b64encode(text.encode()).decode()
+
+
+def slug(text, limit=30):
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:limit].strip("-")
+    return s or "project"
+
+
+def parallel(fn, items, workers=8):
+    with cf.ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(fn, items))
+
+
+def tasks():
+    """{name: phase} for every AX task in the namespace (from `ax get tasks`)."""
+    out = ax("get", "tasks").stdout.splitlines()
+    result = {}
+    for line in out[1:]:
+        cols = line.split()
+        if len(cols) >= 3:
+            result[cols[0]] = cols[2]
+    return result
+
+
+def remote_status(name):
+    """The agent's status.json, read over `ax ssh` (AX itself only knows the phase; see 4.)."""
+    proc = ax("ssh", name, "--", "ax-coding-agent", "status", check=False, timeout=60)
+    if proc.returncode != 0:
+        return {"state": "unknown", "error": (proc.stderr or proc.stdout).strip()[:200]}
+    try:
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return {"state": "unknown"}
+
+
+def placements():
+    """{task: worker pod} from fleet-helper's read-only actor view (best effort)."""
+    url = os.environ.get("FLEET_HELPER_URL")
+    if not url:
+        return {}
+    try:
+        with urllib.request.urlopen(f"{url}/v1/actors?atespace={namespace()}", timeout=5) as resp:
+            actors = json.load(resp).get("actors") or []
+    except Exception:  # noqa: BLE001 - the view is optional
+        return {}
+    return {a["name"]: a.get("workerPod", "") for a in actors}
+
+
+def elapsed(start, end=None):
+    if not start:
+        return ""
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    t0 = time.mktime(time.strptime(start, fmt))
+    t1 = time.mktime(time.strptime(end, fmt)) if end else time.mktime(time.gmtime())
+    secs = max(0, int(t1 - t0))
+    return f"{secs // 60}m{secs % 60:02d}s"
+
+
+def resolve_names(args, state, phases, require=False):
+    """The agents a command applies to: the names given, or every managed agent.
+
+    With require=True (suspend, resume, delete), acting on every agent needs an
+    explicit --all.
+    """
+    use_all = getattr(args, "all", False)
+    if args.names and use_all:
+        raise Error("give agent names or --all, not both")
+    if args.names:
+        missing = [n for n in args.names if n not in phases]
+        if missing:
+            raise Error(f"no such agent: {', '.join(missing)}")
+        return args.names
+    if require and not use_all:
+        raise Error("give one or more agent names, or --all")
+    names = [n for n in state["agents"] if n in phases]
+    if not names:
+        raise Error("no agents yet (start some with `ax-agents launch`)")
+    return names
+
+
+# ----------------------------------------------------------------- packing
+def pack_project(directory):
+    """Read a project directory into AX Workspace `files` entries (AX has no upload; see 1.)."""
+    files, total, skipped = [], 0, []
+    for root, dirs, names in os.walk(directory):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS and not d.endswith(".egg-info"))
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            rel = os.path.relpath(path, directory)
+            if os.path.islink(path) or name.endswith((".pyc", ".pyo")):
+                continue
+            size = os.path.getsize(path)
+            if size > MAX_FILE_BYTES:
+                skipped.append(f"{rel} (too large)")
+                continue
+            try:
+                with open(path, encoding="utf-8") as f:
+                    content = f.read()
+            except (UnicodeDecodeError, OSError):
+                skipped.append(f"{rel} (binary)")
+                continue
+            total += size
+            if total > MAX_TOTAL_BYTES:
+                raise Error(f"{directory} has more than {MAX_TOTAL_BYTES // (1024 * 1024)} MiB of text files; "
+                            "launch the agents on a smaller directory")
+            files.append({"path": rel, "content": content})
+    if not files:
+        raise Error(f"no files to send in {directory}")
+    return files, skipped
+
+
+# ---------------------------------------------------------------- commands
+def read_agents(args):
+    """[(name, task, check)] from --agent pairs and/or --agents-file."""
+    agents = [(n, t, args.check) for n, t in (args.agent or [])]
+    if args.agents_file:
+        try:
+            f = sys.stdin if args.agents_file == "-" else open(os.path.expanduser(args.agents_file))
+        except OSError as e:
+            raise Error(f"cannot read --agents-file: {e}")
+        with f:
+            try:
+                spec = json.load(f)
+            except ValueError as e:
+                raise Error(f"--agents-file must be a JSON list of {{name, task, check}} objects: {e}")
+        if not isinstance(spec, list):
+            raise Error("--agents-file must be a JSON list of {name, task, check} objects")
+        for item in spec:
+            if not isinstance(item, dict) or not item.get("name") or not item.get("task"):
+                raise Error(f"every agent needs a name and a task: {item!r}")
+            agents.append((item["name"], item["task"], item.get("check") or args.check))
+    if not agents:
+        raise Error('give at least one --agent NAME "TASK" (or --agents-file)')
+    return agents
+
+
+def cmd_launch(args):
+    directory = os.path.abspath(os.path.expanduser(args.dir))
+    if not os.path.isdir(directory):
+        raise Error(f"{args.dir} is not a directory")
+    agents = read_agents(args)
+    names = [n for n, _, _ in agents]
+    for n in names:
+        if not NAME_RE.match(n):
+            raise Error(f"bad agent name {n!r}: use lowercase letters, digits and '-', at most 40 characters")
+    if len(set(names)) != len(names):
+        raise Error("agent names must be unique")
+    existing = tasks()
+    clash = [n for n in names if n in existing]
+    if clash:
+        raise Error(f"agent(s) already exist: {', '.join(clash)}. Pick other names (for example {clash[0]}-2)")
+
+    files, skipped = pack_project(directory)
+    project = slug(os.path.basename(directory))
+    digest = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()[:8]
+    workspace = f"{project}-{digest}"
+    atespace = namespace()
+    docs = [{
+        "apiVersion": "ax.io/v1alpha1", "kind": "Workspace",
+        "metadata": {"name": workspace, "atespace": atespace},
+        "spec": {"files": files},
+    }]
+    for name, task, check in agents:
+        # Base64 keeps any text (newlines, quotes, YAML syntax) intact on its
+        # way through the AX manifest into the sandbox.
+        env = [{"name": "AGENT_TASK_B64", "value": b64(task)},
+               {"name": "AGENT_TIMEOUT", "value": args.timeout}]
+        if check:
+            env.append({"name": "AGENT_CHECK_B64", "value": b64(check)})
+        spec = {
+            # The work runs as the command, never as a workspace `goal` (see 2.).
+            "command": ["ax-coding-agent", "run"],
+            "env": env,
+            "resources": {"requests": {"cpu": "250m", "memory": "512Mi"},
+                          "limits": {"cpu": args.cpu, "memory": args.memory}},
+            "workspaces": [{"name": workspace, "path": f"/workspace/{project}"}],
+            "debug": True,  # lets `ax ssh` (status, logs, diff) reach the sandbox
+        }
+        if args.image or os.environ.get("AX_AGENT_IMAGE"):
+            spec["image"] = args.image or os.environ["AX_AGENT_IMAGE"]
+        docs.append({"apiVersion": "ax.io/v1alpha1", "kind": "Task",
+                     "metadata": {"name": name, "atespace": atespace}, "spec": spec})
+    # JSON is valid YAML, and keeps this script free of a PyYAML dependency.
+    ax("apply", "-f", "-", stdin="\n---\n".join(json.dumps(d) for d in docs) + "\n")
+
+    state = load_state()
+    for name, task, check in agents:
+        state["agents"][name] = {"dir": directory, "workspace": workspace, "task": task,
+                                 "check": check, "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    save_state(state)
+
+    # `ax apply` leaves tasks suspended; resume each one (see 3.).
+    print(f"Sent {len(files)} files from {directory} ({len(names)} agent(s)); starting them...")
+    if skipped:
+        print(f"  skipped: {', '.join(skipped[:8])}{' ...' if len(skipped) > 8 else ''}")
+    results = parallel(lambda n: (n, ax("resume", "task", n, check=False, timeout=180)), names)
+    failed = 0
+    for name, proc in results:
+        ok = proc.returncode == 0
+        failed += not ok
+        print(f"  {name:<24} {'started' if ok else 'FAILED: ' + (proc.stderr or proc.stdout).strip()[:300]}")
+    print("Follow them with `ax-agents list`, or block until they finish with `ax-agents wait`.")
+    return 1 if failed else 0
+
+
+def collect(names, phases):
+    running = [n for n in names if phases.get(n) == "Running"]
+    statuses = dict(zip(running, parallel(remote_status, running)))
+    return {n: statuses.get(n, {}) for n in names}
+
+
+def render_table(names, phases, statuses, where):
+    rows = []
+    for n in names:
+        st = statuses.get(n) or {}
+        phase = phases.get(n, "?")
+        state = st.get("state", "") if phase == "Running" else phase.lower()
+        check = st.get("checkExit")
+        rows.append([
+            n,
+            state or "-",
+            "" if check is None else ("pass" if check == 0 else f"fail ({check})"),
+            str(len(st.get("changedFiles") or [])) if st.get("state") in FINAL_STATES else "",
+            elapsed(st.get("started"), st.get("finished")) if st else "",
+            (where.get(n) or "")[-5:] if phase == "Running" else "",
+        ])
+    header = ["AGENT", "STATE", "CHECK", "FILES", "TIME", "WORKER"]
+    widths = [max(len(str(r[i])) for r in rows + [header]) for i in range(len(header))]
+    lines = ["  ".join(str(c).ljust(w) for c, w in zip(r, widths)).rstrip() for r in [header] + rows]
+    pods = {where.get(n) for n in names if phases.get(n) == "Running" and where.get(n)}
+    running = sum(phases.get(n) == "Running" for n in names)
+    if pods:
+        lines.append(f"\n{running} running agent(s) share {len(pods)} worker pod(s); "
+                     f"{len(names) - running} suspended or stopped.")
+    return "\n".join(lines)
+
+
+def cmd_list(args):
+    state = load_state()
+    phases = tasks()
+    names = sorted(n for n in state["agents"] if n in phases)
+    if args.all_tasks:
+        names = sorted(phases)
+    if not names:
+        print("No agents. Start some with `ax-agents launch`.")
+        return 0
+    statuses = collect(names, phases)
+    if args.json:
+        print(json.dumps({n: {"phase": phases.get(n), **statuses.get(n, {})} for n in names}, indent=1))
+        return 0
+    print(render_table(names, phases, statuses, placements()))
+    return 0
+
+
+def cmd_wait(args):
+    state = load_state()
+    phases = tasks()
+    names = resolve_names(args, state, phases)
+    names = [n for n in names if phases.get(n) == "Running"]
+    if not names:
+        print("None of these agents is running (resume them first).")
+        return 0
+    deadline = time.time() + args.timeout * 60
+    last = {}
+    while True:
+        statuses = collect(names, tasks())
+        for n in names:
+            s = statuses[n].get("state", "unknown")
+            if last.get(n) != s:
+                extra = ""
+                if s in FINAL_STATES and statuses[n].get("checkExit") is not None:
+                    extra = " (check " + ("passed" if statuses[n]["checkExit"] == 0 else "failed") + ")"
+                print(f"{time.strftime('%H:%M:%S')}  {n}: {s}{extra}", flush=True)
+                last[n] = s
+        pending = [n for n in names if last[n] not in FINAL_STATES]
+        if not pending:
+            print(f"\nAll {len(names)} agent(s) finished.\n")
+            break
+        if time.time() > deadline:
+            print(f"\nStill working after {args.timeout} min: {', '.join(pending)}. "
+                  "Run `ax-agents wait` again to keep waiting.\n")
+            break
+        time.sleep(args.interval)
+    phases = tasks()
+    print(render_table(names, phases, collect(names, phases), placements()))
+    return 0
+
+
+def require_running(name):
+    phase = tasks().get(name)
+    if phase is None:
+        raise Error(f"no such agent: {name}")
+    if phase != "Running":
+        raise Error(f"{name} is {phase}; run `ax-agents resume {name}` first")
+
+
+def cmd_logs(args):
+    require_running(args.name)
+    proc = ax("ssh", args.name, "--", "ax-coding-agent", "logs", "-n", str(args.lines), timeout=60)
+    sys.stdout.write(proc.stdout)
+    return 0
+
+
+def fetch_diff(name):
+    """The agent's `git diff` against its baseline, over `ax ssh` (AX has no download; see 5.)."""
+    require_running(name)
+    return ax("ssh", name, "--", "ax-coding-agent", "diff", timeout=120).stdout
+
+
+def cmd_diff(args):
+    patch = fetch_diff(args.name)
+    if not patch.strip():
+        print(f"{args.name} has not changed any files.")
+        return 0
+    if args.stat:
+        proc = subprocess.run(["git", "apply", "--stat", "-"], input=patch, capture_output=True, text=True)
+        sys.stdout.write(proc.stdout or proc.stderr)
+    else:
+        sys.stdout.write(patch)
+    return 0
+
+
+def cmd_apply(args):
+    state = load_state()
+    status = 0
+    for name in args.names:
+        target = os.path.abspath(os.path.expanduser(args.to or state["agents"].get(name, {}).get("dir", "")))
+        if not os.path.isdir(target):
+            raise Error(f"don't know where to apply {name}'s changes; pass --to DIR")
+        patch = fetch_diff(name)
+        if not patch.strip():
+            print(f"{name}: no changes")
+            continue
+        check = subprocess.run(["git", "apply", "--check", "-"], cwd=target, input=patch,
+                               capture_output=True, text=True)
+        if check.returncode != 0:
+            # Apply what applies cleanly and leave *.rej files for the rest.
+            proc = subprocess.run(["git", "apply", "--reject", "--whitespace=nowarn", "-"], cwd=target,
+                                  input=patch, capture_output=True, text=True)
+            print(f"{name}: CONFLICT applying to {target}; clean hunks applied, rejected hunks are in *.rej files")
+            sys.stdout.write(proc.stderr)
+            status = 1
+            continue
+        subprocess.run(["git", "apply", "--whitespace=nowarn", "-"], cwd=target, input=patch,
+                       capture_output=True, text=True, check=True)
+        files = subprocess.run(["git", "apply", "--numstat", "-"], input=patch, capture_output=True,
+                               text=True).stdout.split("\n")
+        changed = [ln.split("\t")[-1] for ln in files if ln.strip()]
+        print(f"{name}: applied to {target}: {', '.join(changed)}")
+    return status
+
+
+def cmd_sh(args):
+    require_running(args.name)
+    if not args.command:
+        raise Error("give a command, e.g. `ax-agents sh fix-roman -- ls`")
+    command = args.command[1:] if args.command[0] == "--" else args.command
+    proc = ax("ssh", args.name, "--", *command, check=False, timeout=args.timeout)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+def run_verb(verb, names):
+    """Run `ax <verb> task NAME` for every agent in parallel; returns {name: ok}."""
+    done = {"suspend": "suspended", "resume": "resumed", "delete": "deleted"}[verb]
+    t0 = time.time()
+    results = parallel(lambda n: (n, ax(verb, "task", n, check=False, timeout=180)), names)
+    ok = {}
+    for name, proc in results:
+        ok[name] = proc.returncode == 0
+        print(f"  {name:<24} {done if ok[name] else 'FAILED: ' + (proc.stderr or proc.stdout).strip()[:300]}")
+    print(f"{done.capitalize()} {sum(ok.values())} of {len(names)} agent(s) in {time.time() - t0:.1f}s.")
+    return ok
+
+
+def lifecycle(verb):
+    def run(args):
+        phases = tasks()
+        names = resolve_names(args, load_state(), phases, require=True)
+        names = [n for n in names if (phases.get(n) == "Running") == (verb == "suspend")]
+        if not names:
+            print(f"Nothing to {verb}.")
+            return 0
+        return 0 if all(run_verb(verb, names).values()) else 1
+    return run
+
+
+def cmd_delete(args):
+    state = load_state()
+    phases = tasks()
+    names = resolve_names(args, state, phases, require=True)
+    # AX has no owners, so only agents recorded in the state file are ours (see 7.).
+    foreign = [n for n in names if n not in state["agents"]]
+    if foreign and not args.force:
+        raise Error(f"not started by ax-agents in this Workspace: {', '.join(foreign)}. "
+                    "Someone else may own them; pass --force to delete them anyway")
+    candidates = {state["agents"][n]["workspace"] for n in names if n in state["agents"]}
+    ok = run_verb("delete", names)
+    for name, deleted in ok.items():
+        if deleted:
+            state["agents"].pop(name, None)
+    save_state(state)
+    # Delete the uploaded project copies (AX Workspaces) no remaining agent uses.
+    in_use = {a["workspace"] for a in state["agents"].values()}
+    for ws in sorted(candidates - in_use):
+        ax("delete", "workspace", ws, check=False)
+    return 0 if all(ok.values()) else 1
+
+
+def cmd_ax(args):
+    proc = ax(*args.args, check=False, timeout=600)
+    sys.stdout.write(proc.stdout)
+    sys.stderr.write(proc.stderr)
+    return proc.returncode
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="ax-agents", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+
+    p = sub.add_parser("launch", help="start agents, each on its own copy of a project directory")
+    p.add_argument("--dir", required=True, help="project directory to copy into each agent's sandbox")
+    p.add_argument("--agent", nargs=2, action="append", metavar=("NAME", "TASK"),
+                   help="an agent name (lowercase, '-') and its task in plain language; repeat for more agents")
+    p.add_argument("--agents-file", metavar="FILE",
+                   help='JSON list of {"name", "task", "check"} objects, one per agent ("-" reads stdin); '
+                        "use it when agents need different checks")
+    p.add_argument("--check", help="shell command that verifies the work (run in the project dir), "
+                                   "e.g. 'python3 -m unittest -q tests.test_roman'; default for every agent")
+    p.add_argument("--timeout", default="30m", help="stop an agent after this long (default 30m)")
+    p.add_argument("--cpu", default="1", help="CPU limit per agent (default 1)")
+    p.add_argument("--memory", default="2Gi", help="memory limit per agent (default 2Gi)")
+    p.add_argument("--image", help=argparse.SUPPRESS)
+    p.set_defaults(fn=cmd_launch)
+
+    p = sub.add_parser("list", aliases=["ls", "status"], help="show every agent's state")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--all-tasks", action="store_true", help="include AX tasks not started by ax-agents")
+    p.set_defaults(fn=cmd_list)
+
+    p = sub.add_parser("wait", help="wait until agents finish, printing progress")
+    p.add_argument("names", nargs="*", help="agents to wait for (default: all running agents)")
+    p.add_argument("--timeout", type=float, default=20, help="give up after this many minutes (default 20)")
+    p.add_argument("--interval", type=int, default=15, help="seconds between polls (default 15)")
+    p.set_defaults(fn=cmd_wait)
+
+    p = sub.add_parser("logs", help="recent activity of an agent, and its summary once finished")
+    p.add_argument("name")
+    p.add_argument("-n", "--lines", type=int, default=40)
+    p.set_defaults(fn=cmd_logs)
+
+    p = sub.add_parser("diff", help="an agent's changes as a patch")
+    p.add_argument("name")
+    p.add_argument("--stat", action="store_true", help="only list the changed files")
+    p.set_defaults(fn=cmd_diff)
+
+    p = sub.add_parser("apply", help="apply agents' changes to the local project (or --to DIR)")
+    p.add_argument("names", nargs="+")
+    p.add_argument("--to", help="directory to apply to (default: the directory the agent was launched from)")
+    p.set_defaults(fn=cmd_apply)
+
+    p = sub.add_parser("sh", help="run a command inside an agent's sandbox: ax-agents sh NAME -- CMD")
+    p.add_argument("name")
+    p.add_argument("command", nargs=argparse.REMAINDER)
+    p.add_argument("--timeout", type=int, default=300)
+    p.set_defaults(fn=cmd_sh)
+
+    for verb, text in (("suspend", "snapshot agents to Cloud Storage and free their CPU and memory"),
+                       ("resume", "bring suspended agents back, files intact")):
+        p = sub.add_parser(verb, help=text)
+        p.add_argument("names", nargs="*")
+        p.add_argument("--all", action="store_true", help="every agent started by ax-agents")
+        p.set_defaults(fn=lifecycle(verb))
+
+    p = sub.add_parser("delete", help="delete agents and their sandboxes")
+    p.add_argument("names", nargs="*")
+    p.add_argument("--all", action="store_true", help="every agent started by ax-agents")
+    p.add_argument("--force", action="store_true", help="also delete AX tasks not started by ax-agents here")
+    p.set_defaults(fn=cmd_delete)
+
+    p = sub.add_parser("ax", help="run any `ax` command against this namespace: ax-agents ax get tasks")
+    p.add_argument("args", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_ax)
+
+    args = ap.parse_args()
+    try:
+        return args.fn(args)
+    except Error as e:
+        print(f"ax-agents: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -18,7 +18,7 @@
 # - VS Code (codeserver-python) [CPU, CUDA GPU, TPU]
 # - JupyterLab [CPU, CUDA GPU, TPU]
 # - Apache Spark (spark-py312)
-# - JupyterLab + AX (jupyterlab-ax), opt-in with --jupyterlab-ax
+# - Code Server + AX agents (codeserver-ax), opt-in with --codeserver-ax
 #
 # Copies sample notebooks from images/samples into the images.
 # Users pass the container registry path via --registry-path (or REGISTRY env var).
@@ -32,7 +32,7 @@ CODESERVER_DIR="${SCRIPT_DIR}/codeserver-python"
 JUPYTERLAB_DIR="${SCRIPT_DIR}/jupyterlab"
 SPARK_DIR="${SCRIPT_DIR}/spark"
 MCP_SERVER_DIR="${SCRIPT_DIR}/agent-sandbox-mcp-server"
-JUPYTERLAB_AX_DIR="${SCRIPT_DIR}/jupyterlab-ax"
+CODESERVER_AX_DIR="${SCRIPT_DIR}/codeserver-ax"
 AGENT_SUBSTRATE_DIR="${SCRIPT_DIR}/../examples/agent-substrate"
 
 # Default Configuration & Environment Variables
@@ -43,7 +43,7 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 # step with AGENT_SANDBOX_VERSION in examples/agent-sandbox/deploy_agent_sandbox.sh,
 # which selects the matching sandbox runtime image.
 AGENT_SANDBOX_VERSION="${AGENT_SANDBOX_VERSION:-v1.0.3}"
-# AX source for the jupyterlab-ax image's `ax` CLI. Defaults come from
+# AX source for the codeserver-ax image's `ax` CLI. Defaults come from
 # examples/agent-substrate/versions.env so the CLI matches the cluster's ax-server.
 if [[ -f "${AGENT_SUBSTRATE_DIR}/versions.env" ]]; then
   # shellcheck source=../examples/agent-substrate/versions.env
@@ -71,12 +71,12 @@ Images and Hardware Variants:
   jupyterlab   JupyterLab (jupyterlab)     [cpu, gpu, tpu]
   spark        Apache Spark (spark-py312)  [generic/cpu]
   mcp-server   Agent Sandbox MCP server (agent-sandbox-mcp-server) [generic/cpu]
-  jupyterlab-ax JupyterLab + AX CLI for examples/agent-substrate (jupyterlab-ax) [cpu]
+  codeserver-ax Code Server + Gemini CLI + AX agents (codeserver-ax) [cpu]
 
 Target Selection Options:
   --image, -i <name>        Select target image: codeserver, jupyterlab, spark, mcp-server,
-                            jupyterlab-ax, or all
-                            (default: all, which excludes mcp-server and jupyterlab-ax)
+                            codeserver-ax, or all
+                            (default: all, which excludes mcp-server and codeserver-ax)
   --codeserver              Shorthand to build codeserver-python
                             (alias: --codeserver-python)
   --jupyterlab              Shorthand to build jupyterlab
@@ -84,7 +84,7 @@ Target Selection Options:
   --mcp-server              Shorthand to build the Agent Sandbox MCP server
                             (alias: --agent-sandbox-mcp-server)
                             (needed by examples/agent-sandbox; not built by --all)
-  --jupyterlab-ax           Shorthand to build JupyterLab + AX (jupyterlab-ax)
+  --codeserver-ax           Shorthand to build Code Server + AX agents (codeserver-ax)
                             (needed by examples/agent-substrate; not built by --all)
   --all                     Build codeserver, jupyterlab and spark (default)
 
@@ -109,7 +109,7 @@ Registry & Tag Options:
                                <registry-path>/jupyterlab:<tag>
                                <registry-path>/spark-py312:<tag>
                                <registry-path>/agent-sandbox-mcp-server:<tag>
-                               <registry-path>/jupyterlab-ax:<tag>
+                               <registry-path>/codeserver-ax:<tag>
   --tag, -t <tag>            Image tag prefix (env var: IMAGE_TAG; default: timestamp,
                              e.g. v20260922-120000). The hardware suffix -cpu/-gpu/-tpu
                              is appended automatically; do not include one here.
@@ -119,7 +119,7 @@ Registry & Tag Options:
                              with AGENT_SANDBOX_VERSION in
                              examples/agent-sandbox/deploy_agent_sandbox.sh.
   --ax-repo <url> / --ax-ref <ref>
-                             AX source the jupyterlab-ax image builds its `ax` CLI from
+                             AX source the codeserver-ax image builds its `ax` CLI from
                              (env vars: AX_REPO / AX_REF; defaults from
                              examples/agent-substrate/versions.env). Must match the
                              cluster's ax-server.
@@ -147,8 +147,8 @@ Examples:
   # 4b. Build the Agent Sandbox MCP server (for examples/agent-sandbox):
   ./build.sh --mcp-server --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
-  # 4c. Build JupyterLab + AX (for examples/agent-substrate):
-  ./build.sh --jupyterlab-ax --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
+  # 4c. Build Code Server + AX agents (for examples/agent-substrate):
+  ./build.sh --codeserver-ax --registry-path us-central1-docker.pkg.dev/my-proj/kubeflow-repo
 
   # 5. Build locally without pushing (local testing):
   ./build.sh --codeserver --cpu --no-push my-local-repo
@@ -181,8 +181,8 @@ while [[ $# -gt 0 ]]; do
       TARGET_IMAGES+=("mcp-server")
       shift
       ;;
-    --jupyterlab-ax)
-      TARGET_IMAGES+=("jupyterlab-ax")
+    --codeserver-ax)
+      TARGET_IMAGES+=("codeserver-ax")
       shift
       ;;
     --all)
@@ -320,13 +320,13 @@ else
           RESOLVED_IMAGES+=("mcp-server")
         fi
         ;;
-      jupyterlab-ax)
-        if [[ ! " ${RESOLVED_IMAGES[*]} " =~ " jupyterlab-ax " ]]; then
-          RESOLVED_IMAGES+=("jupyterlab-ax")
+      codeserver-ax)
+        if [[ ! " ${RESOLVED_IMAGES[*]} " =~ " codeserver-ax " ]]; then
+          RESOLVED_IMAGES+=("codeserver-ax")
         fi
         ;;
       *)
-        echo "ERROR: Unknown target image '${img}'. Allowed: codeserver, jupyterlab, spark, mcp-server, jupyterlab-ax, all" >&2
+        echo "ERROR: Unknown target image '${img}'. Allowed: codeserver, jupyterlab, spark, mcp-server, codeserver-ax, all" >&2
         exit 1
         ;;
     esac
@@ -378,8 +378,8 @@ get_target_image_base() {
     mcp-server)
       base_name="agent-sandbox-mcp-server"
       ;;
-    jupyterlab-ax)
-      base_name="jupyterlab-ax"
+    codeserver-ax)
+      base_name="codeserver-ax"
       ;;
   esac
 
@@ -647,26 +647,26 @@ if [[ " ${RESOLVED_IMAGES[*]} " =~ " mcp-server " ]]; then
     "AGENT_SANDBOX_VERSION=${AGENT_SANDBOX_VERSION}"
 fi
 
-# E. Build JupyterLab + AX (not part of --all; opt in with --jupyterlab-ax)
-if [[ " ${RESOLVED_IMAGES[*]} " =~ " jupyterlab-ax " ]]; then
-  jlax_base="$(get_target_image_base "jupyterlab-ax")"
-  # Assemble a context holding the Dockerfile plus the walkthrough files, which
-  # the image pre-seeds into ~/agent-substrate.
-  jlax_ctx="$(mktemp -d)"
-  cp -r "${JUPYTERLAB_AX_DIR}/." "${jlax_ctx}/"
-  mkdir -p "${jlax_ctx}/agent-substrate"
-  cp -r "${AGENT_SUBSTRATE_DIR}/agent_fleet_walkthrough.ipynb" \
-        "${AGENT_SUBSTRATE_DIR}/axfleet.py" \
-        "${AGENT_SUBSTRATE_DIR}/project" "${jlax_ctx}/agent-substrate/"
-  find "${jlax_ctx}" -name __pycache__ -prune -exec rm -rf {} +
+# E. Build Code Server + AX agents (not part of --all; opt in with --codeserver-ax)
+if [[ " ${RESOLVED_IMAGES[*]} " =~ " codeserver-ax " ]]; then
+  csax_base="$(get_target_image_base "codeserver-ax")"
+  # Assemble a context holding the Dockerfile plus, from examples/agent-substrate,
+  # the Gemini CLI extension (installed under /opt) and the sample project
+  # (seeded into ~/textkit).
+  csax_ctx="$(mktemp -d)"
+  cp -r "${CODESERVER_AX_DIR}/." "${csax_ctx}/"
+  mkdir -p "${csax_ctx}/agent-substrate"
+  cp -r "${AGENT_SUBSTRATE_DIR}/gemini-extension" \
+        "${AGENT_SUBSTRATE_DIR}/textkit" "${csax_ctx}/agent-substrate/"
+  find "${csax_ctx}" -name __pycache__ -prune -exec rm -rf {} +
   if [[ -f "${HOME}/.cache/gke-workspaces/agent-substrate/ax-linux-amd64" ]]; then
-    cp "${HOME}/.cache/gke-workspaces/agent-substrate/ax-linux-amd64" "${jlax_ctx}/ax"
+    cp "${HOME}/.cache/gke-workspaces/agent-substrate/ax-linux-amd64" "${csax_ctx}/ax"
   elif [[ -d "${AX_REPO}" ]]; then
-    (cd "${AX_REPO}" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${jlax_ctx}/ax" ./cmd/ax)
+    (cd "${AX_REPO}" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${csax_ctx}/ax" ./cmd/ax)
   fi
-  build_and_tag_image "${jlax_ctx}" "Dockerfile" "${jlax_base}" "" "JupyterLab + AX (${AX_REF})" "false" "false" \
+  build_and_tag_image "${csax_ctx}" "Dockerfile" "${csax_base}" "" "Code Server + AX agents (${AX_REF})" "false" "false" \
     "AX_REPO=${AX_REPO} AX_REF=${AX_REF}"
-  rm -rf "${jlax_ctx}"
+  rm -rf "${csax_ctx}"
 fi
 
 echo ""

@@ -51,11 +51,13 @@ Your workspace doesn't have to be big to drive big jobs. From a small, inexpensi
 
 ![From one lightweight notebook: data processing, multi-host TPU training, and model serving](../examples/distributed/demo_workspaces_distributed.gif)
 
-Building AI agents? Instead of running untrusted, agent-generated code inside your own notebook, your agent can use [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) to spin up separate, throwaway Linux containers on the cluster, run the code there, and pull the results back. Each sandbox starts fresh with its own isolated disk and CPU/memory limits — it can't touch your workspace's files or credentials, and cluster network rules block sandboxes from reaching back into your workspace or other notebooks (while outbound internet access follows your cluster's firewall rules).
+### 5. Background coding agents — off your laptop, on the cluster
 
-![An AI coding agent fanning out across isolated sandboxes](../examples/agent-sandbox/agent_sandbox_demo.gif)
+Running a fleet of coding agents on your laptop drains your battery, exposes your local files and credentials to agent-run code, and stops when you close the lid. From a GKE Workspace, you can ask your favorite coding agent to hand off parallel tasks — like fixing failing tests across a repo — to background agents running on in-cluster sandbox providers such as **[Agent Substrate](https://github.com/agent-substrate/substrate)**, with nothing to install locally. Instead of spawning processes on your workspace machine, each agent runs in its own isolated sandbox on shared cluster nodes, continues working when you disconnect, snapshots to Cloud Storage at zero compute cost when idle, and returns a clean patch for you to review and merge.
 
-### 5. Lightweight and secure by default
+![Gemini CLI in a GKE Workspace dispatching background coding agents on Agent Substrate](../examples/agent-substrate/demo_agent_substrate.gif)
+
+### 6. Lightweight and secure by default
 
 GKE Workspaces runs on its own on GKE Standard or Autopilot — you don't need to install the full Kubeflow platform. Users sign in with their Google accounts, traffic is encrypted with Google-managed certificates, and each team's work is isolated from the others.
 

@@ -18,7 +18,7 @@ This directory is a dedicated, cloud-agnostic build workspace for creating custo
   - [Common Build Examples](#common-build-examples)
   - [Image Tagging Conventions](#image-tagging-conventions)
   - [Agent Sandbox MCP server (`--mcp-server`)](#agent-sandbox-mcp-server---mcp-server)
-  - [JupyterLab + AX (`--jupyterlab-ax`)](#jupyterlab--ax---jupyterlab-ax)
+  - [Code Server + AX agents (`--codeserver-ax`)](#code-server--ax-agents---codeserver-ax)
 - [Customizing Images](#customizing-images)
   - [Adding Python Dependencies](#adding-python-dependencies)
   - [Adding Sample Notebooks & Datasets](#adding-sample-notebooks--datasets)
@@ -67,16 +67,15 @@ This repository builds five custom image targets:
      builds and pushes it for you; to build it by hand, opt in with
      `--mcp-server`. Single generic image — no CPU/GPU/TPU variants.
 
-5. **JupyterLab + AX (`jupyterlab-ax`)**:
-   - A Workspace image for
+5. **Code Server + AX agents (`codeserver-ax`)**:
+   - A VS Code Workspace image for
      [`examples/agent-substrate/`](../examples/agent-substrate/). It is the upstream
-     `jupyter-scipy:v1.11.0` plus the `ax` CLI (built from the AX source pinned in
-     `examples/agent-substrate/versions.env`), `kubectl`, and the walkthrough
-     notebook pre-seeded into `~/agent-substrate`.
+     `codeserver-python:v1.11.0` plus Gemini CLI with the `agent-substrate`
+     extension (a skill and `/agents:*` commands for delegating work to background
+     agents), the `ax-agents` and `ax` CLIs, and a sample project in `~/textkit`.
    - **Not built by `--all`.** `examples/agent-substrate/deploy_agent_substrate.sh`
-     builds it and adds it as an image option to the `jupyterlab` and
-     `jupyterlab-resumable` WorkspaceKinds. To build it by hand, opt in with
-     `--jupyterlab-ax`. CPU only.
+     builds it and adds it as an image option to the `codeserver` WorkspaceKind.
+     To build it by hand, opt in with `--codeserver-ax`. CPU only.
 
 ### Hardware Accelerator Variants
 
@@ -405,29 +404,30 @@ source is vendored into this repository.
 > `AGENT_SANDBOX_VERSION`, so the operator, the sandbox runtime image and the MCP
 > server stay in step when the image is built by that script.
 
-### JupyterLab + AX (`--jupyterlab-ax`)
+### Code Server + AX agents (`--codeserver-ax`)
 
-[`jupyterlab-ax/Dockerfile`](jupyterlab-ax/Dockerfile) builds a Workspace image
-that can drive [AX](https://github.com/google/ax) agent fleets on Agent Substrate
-without any setup inside the Workspace. It is used by
+[`codeserver-ax/Dockerfile`](codeserver-ax/Dockerfile) builds a VS Code Workspace
+image in which Gemini CLI can hand coding tasks to background agents on Agent
+Substrate, with no setup inside the Workspace. It is used by
 [`examples/agent-substrate/`](../examples/agent-substrate/).
 
 | Property | Value |
 | :--- | :--- |
-| Image name | `${REGISTRY}/jupyterlab-ax` |
-| Built by `--all`? | **No.** `examples/agent-substrate/deploy_agent_substrate.sh` runs `--jupyterlab-ax` for you. By hand, opt in with `--jupyterlab-ax` / `--image jupyterlab-ax`. |
+| Image name | `${REGISTRY}/codeserver-ax` |
+| Built by `--all`? | **No.** `examples/agent-substrate/deploy_agent_substrate.sh` runs `--codeserver-ax` for you. By hand, opt in with `--codeserver-ax` / `--image codeserver-ax`. |
 | Hardware variants | CPU only (`--cpu`/`--gpu`/`--tpu` are ignored); the agents run on Substrate worker pods, not in the Workspace |
-| Base image | `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0` (pinned by digest; override with `--build-arg BASE_IMG=...`) |
-| Adds | `/usr/local/bin/ax`, `kubectl` (only if the base lacks it), `AX_SERVER` / `FLEET_HELPER_URL` / `AX_SYSTEM_NAMESPACE` defaults, `~/agent-substrate/` (notebook, `axfleet.py`, `project/`) |
+| Base image | `ghcr.io/kubeflow/kubeflow/notebook-servers/codeserver-python:v1.11.0` (override with `--build-arg BASE_IMG=...`) |
+| Adds | Node.js + Gemini CLI (`GEMINI_CLI_VERSION`, default `0.64.0`); the `agent-substrate` Gemini CLI extension in `/opt/agent-substrate/gemini-extension`, linked from `~/.gemini/extensions/`; `/usr/local/bin/ax-agents` and `/usr/local/bin/ax`; `kubectl` (only if the base lacks it); `AX_SERVER` / `FLEET_HELPER_URL` defaults; `~/.gemini/settings.json` (API-key auth) and `~/.gemini/policies/agent-substrate.toml` (lets Gemini run `ax-agents` without asking); the sample project in `~/textkit` |
 | AX pin | `AX_REPO` / `AX_REF`, read from `examples/agent-substrate/versions.env`; override with `--ax-repo` / `--ax-ref` |
 
-It is a two-stage build. Stage one clones AX at `AX_REF` and builds a static `ax`
-binary. Stage two copies it into the JupyterLab image. Build the CLI from the same
-AX source as the cluster's `ax-server`, so the client and the server agree on the API.
+It is a two-stage build. Stage one builds a static `ax` binary from AX at `AX_REF`
+(or uses a prebuilt one). Stage two adds it to the code-server image. Build the CLI
+from the same AX source as the cluster's `ax-server`, so the client and the server
+agree on the API.
 
-The build context is assembled by `build.sh`. It copies the walkthrough files from
-`examples/agent-substrate/` next to the Dockerfile, so building with plain
-`docker build images/jupyterlab-ax` does not work; use `build.sh`.
+The build context is assembled by `build.sh`. It copies `gemini-extension/` and
+`textkit/` from `examples/agent-substrate/` next to the Dockerfile, so building
+with plain `docker build images/codeserver-ax` does not work; use `build.sh`.
 
 ---
 

@@ -1,0 +1,7 @@
+description = "Show what the background agents on Agent Substrate are doing."
+prompt = """
+Activate the agent-substrate skill. Run `ax-agents list` and summarize the result for me:
+which agents are still working, which are done (and whether their checks passed),
+which failed, and which are suspended. For finished agents whose patches have not been
+applied yet, suggest the next step. {{args}}
+"""
