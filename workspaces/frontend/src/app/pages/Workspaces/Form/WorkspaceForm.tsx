@@ -51,6 +51,7 @@ import { submitFormData } from '~/app/pages/Workspaces/Form/submitHelper';
 import { WorkspaceFormSummaryPanel } from '~/app/pages/Workspaces/Form/WorkspaceFormSummaryPanel';
 import { WorkspaceFormRedirectConfirmModal } from '~/app/pages/Workspaces/Form/WorkspaceFormRedirectConfirmModal';
 import { generateResourceName, validateDisplayName, validateName } from './helpers';
+import { resolveContextualDefaultId } from './utils/filterDefaults';
 
 enum WorkspaceFormSteps {
   KindSelection,
@@ -109,6 +110,24 @@ const WorkspaceForm: React.FC = () => {
       imageId: data.imageConfig,
     });
 
+  const effectivePodConfigDefaultId = useMemo(() => {
+    if (
+      !data.imageConfig ||
+      !allValuesLoaded ||
+      !filteredValuesLoaded ||
+      !allValuesData ||
+      !filteredValuesData
+    ) {
+      return undefined;
+    }
+
+    return resolveContextualDefaultId({
+      allOptions: allValuesData.podConfig.values ?? [],
+      contextualOptions: filteredValuesData.podConfig.values ?? [],
+      defaultId: allValuesData.podConfig.default,
+    });
+  }, [data.imageConfig, allValuesLoaded, filteredValuesLoaded, allValuesData, filteredValuesData]);
+
   // Store original values for edit mode diff view
   const [originalData, setOriginalData] = useState<WorkspaceFormData | undefined>(undefined);
 
@@ -119,6 +138,10 @@ const WorkspaceForm: React.FC = () => {
   // Refs for filter control
   const imageFilterControlRef = useRef<ImageSelectionFilterHandle>(null);
   const podConfigFilterControlRef = useRef<PodConfigSelectionFilterHandle>(null);
+  const autoSelectedPodConfigRef = useRef<string | undefined>(undefined);
+  // Id of a hidden pod config the user explicitly picked (e.g. via the "show hidden" filter).
+  // Used so the compatibility-cleanup effect doesn't discard a deliberate choice.
+  const userSelectedHiddenPodConfigRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (!initialFormDataLoaded || mode === 'create') {
       return;
@@ -127,32 +150,100 @@ const WorkspaceForm: React.FC = () => {
     // Store original values for diff comparison
     setOriginalData(initialFormData);
   }, [initialFormData, initialFormDataLoaded, mode, replaceData]);
+  function resolveUsableDefault<
+    T extends { id: string; hidden?: boolean; restrictions?: { deny?: boolean } },
+  >(values: T[] | undefined, defaultId: string | undefined): string | undefined {
+    if (!values) {
+      return undefined;
+    }
+    const isUsable = (opt?: T) => !opt?.restrictions?.deny && !opt?.hidden;
+    const defaultOption = values.find((v) => v.id === defaultId);
 
-  // Apply default imageConfig and podConfig from listValues when a kind is first selected.
-  // Only sets defaults when the values are unset (undefined), so user selections are never overwritten.
+    if (defaultOption && isUsable(defaultOption)) {
+      return defaultId;
+    }
+
+    const fallback = values.find((v) => isUsable(v));
+
+    return fallback?.id;
+  }
+
+  // Apply the usable image default.
   useEffect(() => {
     if (!allValuesData || !allValuesLoaded || !data.kind) {
       return;
     }
-    if (!data.imageConfig && allValuesData.imageConfig.default) {
-      setData('imageConfig', allValuesData.imageConfig.default);
-    }
-    if (!data.podConfig && allValuesData.podConfig.default) {
-      setData('podConfig', allValuesData.podConfig.default);
-    }
-  }, [allValuesData, allValuesLoaded, data.kind, data.imageConfig, data.podConfig, setData]);
 
-  // Clear podConfig when filtered values reload and the current selection is no longer compatible
+    if (!data.imageConfig && allValuesData.imageConfig.default) {
+      const resolved = resolveUsableDefault(
+        allValuesData.imageConfig.values,
+        allValuesData.imageConfig.default,
+      );
+
+      if (resolved) {
+        setData('imageConfig', resolved);
+      }
+    }
+  }, [allValuesData, allValuesLoaded, data.kind, data.imageConfig, setData]);
+
+  // Apply the PodConfig default after image-context filtering.
+  useEffect(() => {
+    if (
+      !data.kind ||
+      !data.imageConfig ||
+      !filteredValuesLoaded ||
+      !filteredValuesData ||
+      data.podConfig ||
+      !effectivePodConfigDefaultId
+    ) {
+      return;
+    }
+
+    autoSelectedPodConfigRef.current = effectivePodConfigDefaultId;
+    setData('podConfig', effectivePodConfigDefaultId);
+  }, [
+    data.kind,
+    data.imageConfig,
+    data.podConfig,
+    filteredValuesLoaded,
+    filteredValuesData,
+    effectivePodConfigDefaultId,
+    setData,
+  ]);
+
+  // Clear incompatible PodConfig selections and auto-selected defaults
+  // that are no longer valid in the selected image context.
   useEffect(() => {
     if (!filteredValuesLoaded || !filteredValuesData || !data.podConfig) {
       return;
     }
+
     const podConfigOptions = filteredValuesData.podConfig.values ?? [];
-    const isStillValid = podConfigOptions.some((pc) => pc.id === data.podConfig);
-    if (!isStillValid) {
+    const current = podConfigOptions.find((pc) => pc.id === data.podConfig);
+
+    const isAutoSelected = autoSelectedPodConfigRef.current === data.podConfig;
+    const isEffectiveDefault = effectivePodConfigDefaultId === data.podConfig;
+
+    const isUserSelectedHidden =
+      !!current?.hidden && userSelectedHiddenPodConfigRef.current === current.id;
+
+    const canKeepHidden =
+      !current?.hidden || isUserSelectedHidden || (isAutoSelected && isEffectiveDefault);
+
+    const shouldClear = !current || !canKeepHidden || (isAutoSelected && !isEffectiveDefault);
+
+    if (shouldClear) {
+      autoSelectedPodConfigRef.current = undefined;
+      userSelectedHiddenPodConfigRef.current = undefined;
       setData('podConfig', undefined);
     }
-  }, [filteredValuesData, filteredValuesLoaded, data.podConfig, setData]);
+  }, [
+    filteredValuesData,
+    filteredValuesLoaded,
+    data.podConfig,
+    effectivePodConfigDefaultId,
+    setData,
+  ]);
 
   const onDisplayNameChange = useCallback(
     (value: string) => {
@@ -277,6 +368,9 @@ const WorkspaceForm: React.FC = () => {
         return;
       }
       if (mode === 'create') {
+        autoSelectedPodConfigRef.current = undefined;
+        userSelectedHiddenPodConfigRef.current = undefined;
+
         resetData();
         setData('kind', kind);
         setDisplayNameError(null);
@@ -304,12 +398,15 @@ const WorkspaceForm: React.FC = () => {
 
   const handlePodConfigSelect = useCallback(
     (podConfig: OptionsPodConfigValue | undefined) => {
+      autoSelectedPodConfigRef.current = undefined;
       if (podConfig) {
         if (podConfig.hidden || podConfig.redirect !== undefined) {
           podConfigFilterControlRef.current?.adaptFiltersForPodConfig(podConfig);
         }
+        userSelectedHiddenPodConfigRef.current = podConfig.hidden ? podConfig.id : undefined;
         setData('podConfig', podConfig.id);
       } else {
+        userSelectedHiddenPodConfigRef.current = undefined;
         setData('podConfig', undefined);
       }
     },
@@ -574,25 +671,24 @@ const WorkspaceForm: React.FC = () => {
                           title="Failed to load pod config options"
                           error={(filteredValuesError ?? allValuesError)!}
                         />
-                      ) : !(filteredValuesLoaded || allValuesLoaded) ? (
+                      ) : !filteredValuesLoaded ? (
                         <LoadingSpinner />
                       ) : (
                         <WorkspaceFormPodConfigSelection
                           selectedPodConfig={selectedPodConfig}
                           onSelect={handlePodConfigSelect}
-                          podConfigs={(filteredValuesData ?? allValuesData)?.podConfig.values ?? []}
-                          defaultPodConfigId={
-                            (filteredValuesData ?? allValuesData)?.podConfig.default
-                          }
+                          podConfigs={filteredValuesData?.podConfig.values ?? []}
+                          defaultPodConfigId={effectivePodConfigDefaultId}
                           filterControlRef={podConfigFilterControlRef}
                         />
                       ))}
                     {currentStep === WorkspaceFormSteps.Properties && (
                       <WorkspaceFormPropertiesSelection
                         mode={mode}
+                        namespace={namespace}
                         selectedProperties={data.properties}
                         onSelect={(properties) => setData('properties', properties)}
-                        homeVolumeMountPath={data.kind?.podTemplate.volumeMounts.home}
+                        homeVolumeMountPath={data.kind?.podTemplate.volumeMountPaths.home}
                         displayNameError={displayNameError}
                         onDisplayNameChange={onDisplayNameChange}
                         resourceNameError={resourceNameError}

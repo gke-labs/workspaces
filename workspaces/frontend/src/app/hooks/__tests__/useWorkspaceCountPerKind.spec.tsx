@@ -49,6 +49,8 @@ const basePodConfigTest: OptionsPodConfigValue = {
   hidden: false,
   clusterMetrics: undefined,
   restrictions: { deny: false },
+  podMetadata: { labels: {}, annotations: {} },
+  statefulSetMetadata: { labels: {}, annotations: {} },
 };
 
 describe('useWorkspaceCountPerKind', () => {
@@ -130,7 +132,7 @@ describe('useWorkspaceCountPerKind', () => {
         podTemplate: {
           podMetadata: { labels: {}, annotations: {} },
           statefulSetMetadata: { labels: {}, annotations: {} },
-          volumeMounts: { home: '/home' },
+          volumeMountPaths: { home: '/home' },
           options: {
             imageConfig: {
               default: 'image1',
@@ -171,7 +173,7 @@ describe('useWorkspaceCountPerKind', () => {
         podTemplate: {
           podMetadata: { labels: {}, annotations: {} },
           statefulSetMetadata: { labels: {}, annotations: {} },
-          volumeMounts: { home: '/home' },
+          volumeMountPaths: { home: '/home' },
           options: {
             imageConfig: {
               default: 'image1',
@@ -245,7 +247,7 @@ describe('useWorkspaceCountPerKind', () => {
         podTemplate: {
           podMetadata: { labels: {}, annotations: {} },
           statefulSetMetadata: { labels: {}, annotations: {} },
-          volumeMounts: { home: '/home' },
+          volumeMountPaths: { home: '/home' },
           options: {
             imageConfig: {
               default: baseImageConfigTest.id,
@@ -264,7 +266,7 @@ describe('useWorkspaceCountPerKind', () => {
         podTemplate: {
           podMetadata: { labels: {}, annotations: {} },
           statefulSetMetadata: { labels: {}, annotations: {} },
-          volumeMounts: { home: '/home' },
+          volumeMountPaths: { home: '/home' },
           options: {
             imageConfig: {
               default: 'empty',
@@ -339,7 +341,7 @@ describe('useWorkspaceCountPerKind', () => {
       podTemplate: {
         podMetadata: { labels: {}, annotations: {} },
         statefulSetMetadata: { labels: {}, annotations: {} },
-        volumeMounts: { home: '/home' },
+        volumeMountPaths: { home: '/home' },
         options: {
           imageConfig: {
             default: baseImageConfigTest.id,

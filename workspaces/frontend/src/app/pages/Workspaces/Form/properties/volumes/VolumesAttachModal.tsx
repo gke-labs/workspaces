@@ -25,7 +25,6 @@ import {
 import { MountPathField } from '~/app/pages/Workspaces/Form/MountPathField';
 import usePVCs from '~/app/hooks/usePVCs';
 import useStorageClasses from '~/app/hooks/useStorageClasses';
-import { useNamespaceSelectorWrapper } from '~/app/hooks/useNamespaceSelectorWrapper';
 import { LoadingSpinner } from '~/app/components/LoadingSpinner';
 
 const PVC_SELECT_EMPTY_KEY = 'pvc-select-empty';
@@ -34,11 +33,12 @@ export interface VolumesAttachModalProps {
   isOpen: boolean;
   setIsOpen: (isOpen: boolean) => void;
   onAttach: (pvc: PvcsPVCListItem, mountPath: string, readOnly: boolean) => void;
+  namespace: string;
   /** Set of mount paths already in use across all attached volumes */
   mountedPaths: Set<string>;
   /**
    * When provided the mount path is locked to this value (sourced from the
-   * workspace kind's podTemplate.volumeMounts.home) and cannot be edited.
+   * workspace kind's podTemplate.volumeMountPaths.home) and cannot be edited.
    */
   fixedMountPath?: string;
   /** PVC names already mounted in the other volume section (home or data) */
@@ -55,15 +55,15 @@ export const VolumesAttachModal: React.FC<VolumesAttachModalProps> = ({
   isOpen,
   setIsOpen,
   onAttach,
+  namespace,
   mountedPaths,
   fixedMountPath,
   excludedPvcNames,
 }) => {
   // ── Data fetching ───────────────────────────────────────────────────────
 
-  const { pvcs: availablePVCs, pvcsLoaded, pvcLoadError, refreshPVCs } = usePVCs();
-  const { selectedNamespace } = useNamespaceSelectorWrapper();
-  const { storageClasses } = useStorageClasses(selectedNamespace);
+  const { pvcs: availablePVCs, pvcsLoaded, pvcLoadError, refreshPVCs } = usePVCs(namespace);
+  const { storageClasses } = useStorageClasses(namespace);
 
   // ── Form state ───────────────────────────────────────────────────────────
 

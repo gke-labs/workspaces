@@ -95,8 +95,8 @@ func NewWorkspaceKindModelFromWorkspaceKind(cfg *config.EnvConfig, wsk *kubeflow
 				Labels:      stsLabels,
 				Annotations: stsAnnotations,
 			},
-			VolumeMounts: PodVolumeMounts{
-				Home: wsk.Spec.PodTemplate.VolumeMounts.Home,
+			VolumeMountPaths: PodVolumeMountPaths{
+				Home: wsk.Spec.PodTemplate.VolumeMountPaths.Home,
 			},
 			ActivityProbe: buildActivityProbe(wsk.Spec.PodTemplate.ActivityProbe),
 			Options:       *podTemplateOptions,
@@ -111,27 +111,13 @@ func buildActivityProbe(probe *kubefloworgv1beta1.ActivityProbe) *ActivityProbe 
 		return nil
 	}
 
-	var podExec *ActivityProbePodExec
-	if probe.PodExec != nil {
-		// NOTE: Script is excluded from ActivityProbePodExec in the WSK list for size reasons.
-		podExec = &ActivityProbePodExec{
-			TimeoutSeconds: ptr.Deref(probe.PodExec.TimeoutSeconds, kubefloworgv1beta1.DefaultPodExecTimeoutSeconds),
-		}
-	}
-
-	var jupyter *ActivityProbeJupyter
-	if probe.Jupyter != nil {
-		jupyter = &ActivityProbeJupyter{
-			LastActivity: probe.Jupyter.LastActivity,
-			PortId:       string(probe.Jupyter.PortId),
-		}
-	}
-
 	return &ActivityProbe{
 		MinProbeIntervalSeconds: ptr.Deref(probe.MinProbeIntervalSeconds, kubefloworgv1beta1.DefaultMinProbeIntervalSeconds),
 		ProbeIntervalSeconds:    ptr.Deref(probe.ProbeIntervalSeconds, kubefloworgv1beta1.DefaultProbeIntervalSeconds),
-		PodExec:                 podExec,
-		Jupyter:                 jupyter,
+		// NOTE: Script is excluded from ActivityProbePodExec in the WSK list for size reasons.
+		PodExec: ActivityProbePodExec{
+			TimeoutSeconds: ptr.Deref(probe.PodExec.TimeoutSeconds, kubefloworgv1beta1.DefaultPodExecTimeoutSeconds),
+		},
 	}
 }
 
@@ -141,23 +127,20 @@ func buildActivityRules(rules []kubefloworgv1beta1.ActivityRule) []ActivityRule 
 	}
 	res := make([]ActivityRule, len(rules))
 	for i, rule := range rules {
-		var match *ActivityRuleMatch
-		if rule.Match != nil {
-			var matchNs *MatchNamespace
-			if rule.Match.MatchNamespace != nil {
-				matchNs = &MatchNamespace{
-					Selector: *rule.Match.MatchNamespace.Selector.DeepCopy(),
+		var match []ActivityRuleMatch
+		if len(rule.Match) > 0 {
+			match = make([]ActivityRuleMatch, len(rule.Match))
+			for j, m := range rule.Match {
+				if m.MatchNamespace != nil {
+					match[j].MatchNamespace = &ActivityRuleSelector{
+						Selector: *m.MatchNamespace.Selector.DeepCopy(),
+					}
 				}
-			}
-			var matchPodConfig *MatchPodConfig
-			if rule.Match.MatchPodConfig != nil {
-				matchPodConfig = &MatchPodConfig{
-					Selector: *rule.Match.MatchPodConfig.Selector.DeepCopy(),
+				if m.MatchPodConfig != nil {
+					match[j].MatchPodConfig = &ActivityRuleSelector{
+						Selector: *m.MatchPodConfig.Selector.DeepCopy(),
+					}
 				}
-			}
-			match = &ActivityRuleMatch{
-				MatchNamespace: matchNs,
-				MatchPodConfig: matchPodConfig,
 			}
 		}
 

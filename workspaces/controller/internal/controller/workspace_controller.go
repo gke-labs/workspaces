@@ -63,11 +63,6 @@ const (
 	// pod template constants
 	workspacePodTemplateContainerName = "main"
 
-	// requeue delay when the local cache is known to be stale (fixed delay,
-	// since a stale cache is not write contention, so no exponential backoff
-	// is needed)
-	requeueAfterStaleCache = 250 * time.Millisecond
-
 	// lengths for resource names
 	generateNameSuffixLength    = 6
 	nameHashLength              = 8
@@ -90,7 +85,6 @@ const (
 	stateMsgErrorMultipleStatefulSets      = "Workspace owns multiple StatefulSets: %s"
 	stateMsgErrorMultipleServices          = "Workspace owns multiple Services: %s"
 	stateMsgErrorMultipleServiceAccounts   = "Workspace owns multiple ServiceAccounts: %s"
-	stateMsgErrorServiceAccountNotOwned    = "Workspace ServiceAccount %s already exists and is not owned by the Workspace"
 	stateMsgErrorMultipleVirtualServices   = "Workspace owns multiple VirtualServices: %s"
 	stateMsgErrorStatefulSetWarningEvent   = "Workspace StatefulSet has warning event: %s"
 	stateMsgErrorPodUnschedulable          = "Workspace Pod is unschedulable: %s"
@@ -117,10 +111,6 @@ type WorkspaceReconciler struct {
 	// PodExecutor executes activity probe scripts inside Workspace Pods.
 	// If nil, podExec probes fail with a failure probe result indicating exec is not configured.
 	PodExecutor helper.PodExecutor
-
-	// HTTPProber performs HTTP requests for Jupyter activity probes.
-	// If nil, jupyter probes fail with a failure probe result indicating http prober is not configured.
-	HTTPProber helper.HTTPProber
 }
 
 // +kubebuilder:rbac:groups=kubeflow.org,resources=workspaces,verbs=create;delete;get;list;patch;update;watch
@@ -251,7 +241,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 
 	//
 	// TODO: in the future, we might want to use "pendingRestart" for other changes to WorkspaceKind that update the PodTemplate
-	//       like `podMetadata`, `probes`, `extraEnv`, or `containerSecurityContext`. But for now, changes to these fields
+	//       like `podMetadata`, `podSpec.mainContainer.livenessProbe`, `podSpec.mainContainer.extraEnv`, or
+	//       `podSpec.mainContainer.securityContext`. But for now, changes to these fields
 	//       will result in a forced restart of all Workspaces using the WorkspaceKind.
 	//
 
@@ -264,8 +255,8 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// fetch ServiceAccounts
-	// NOTE: even though the ServiceAccount has a deterministic name, we still filter by owner
-	//       so that a ServiceAccount left behind by an older name format is detected rather than orphaned
+	// NOTE: we filter by ServiceAccounts that are owned by the Workspace, not by name
+	//       this allows us to generate a random name for the ServiceAccount with `metadata.generateName`
 	var serviceAccountName string
 	ownedServiceAccounts := &corev1.ServiceAccountList{}
 	listOpts := &client.ListOptions{
@@ -292,31 +283,6 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		)
 	case numServiceAccounts == 0:
 		if err := r.Create(ctx, serviceAccount); err != nil {
-			// NOTE: the ServiceAccount name is deterministic, so `AlreadyExists` is reachable, and
-			//       means either our cache is stale or something else already owns that name
-			if apierrors.IsAlreadyExists(err) {
-				existingServiceAccount := &corev1.ServiceAccount{}
-				if getErr := r.Get(ctx, client.ObjectKeyFromObject(serviceAccount), existingServiceAccount); getErr != nil {
-					if apierrors.IsNotFound(getErr) {
-						// the cache is stale; requeue after a short delay instead of relying on the
-						// owned-object watch, which will not fire if the ServiceAccount is owned by another controller
-						log.V(2).Info("ServiceAccount already exists but is not in the cache yet, will requeue")
-						return ctrl.Result{RequeueAfter: requeueAfterStaleCache}, nil
-					}
-					log.Error(getErr, "unable to get existing ServiceAccount")
-					return ctrl.Result{}, getErr
-				}
-				if !metav1.IsControlledBy(existingServiceAccount, workspace) {
-					log.Error(err, "ServiceAccount already exists and is not owned by the Workspace", "serviceAccount", existingServiceAccount.Name)
-					return r.updateWorkspaceState(ctx, log, workspace,
-						kubefloworgv1beta1.WorkspaceStateError,
-						fmt.Sprintf(stateMsgErrorServiceAccountNotOwned, existingServiceAccount.Name),
-					)
-				}
-				// the cache is stale (the owner index did not return the ServiceAccount), requeue after
-				// a short delay so we pick it up once the cache catches up
-				return ctrl.Result{RequeueAfter: requeueAfterStaleCache}, nil
-			}
 			log.Error(err, "unable to create ServiceAccount")
 			return ctrl.Result{}, err
 		}
@@ -325,7 +291,18 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	default:
 		foundServiceAccount := &ownedServiceAccounts.Items[0]
 		serviceAccountName = foundServiceAccount.Name
-		if helper.CopyServiceAccountFields(serviceAccount, foundServiceAccount) {
+		// NOTE: as with the StatefulSet, the found ServiceAccount may retain the controller reference
+		//       of a previously deleted Workspace instance with the same name (different UID).
+		//       Adopting it keeps the ServiceAccount name stable, otherwise it would be garbage
+		//       collected and replaced by one with a new random name, restarting the Workspace Pod.
+		controllerRefUpdated, err := helper.ReplaceWorkspaceAsController(foundServiceAccount, workspace, r.Scheme)
+		if err != nil {
+			// should never happen, we only list ServiceAccounts that are owned by a Workspace
+			// and ReplaceWorkspaceAsController only fails if the current controller is not a Workspace.
+			log.Error(err, "INTERNAL ERROR: unable to replace controller reference on ServiceAccount")
+			return ctrl.Result{}, err
+		}
+		if helper.CopyServiceAccountFields(serviceAccount, foundServiceAccount) || controllerRefUpdated {
 			if err := r.Update(ctx, foundServiceAccount); err != nil {
 				if apierrors.IsConflict(err) {
 					log.V(2).Info("update conflict while updating ServiceAccount, will requeue")
@@ -339,7 +316,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	}
 
 	// generate StatefulSet
-	statefulSet, err := generateStatefulSet(workspace, workspaceKind, currentImageConfig.Spec, currentPodConfig.Spec, serviceAccountName)
+	statefulSet, err := generateStatefulSet(workspace, workspaceKind, &currentImageConfig.Spec, &currentPodConfig.Spec, serviceAccountName)
 	if err != nil {
 		log.V(0).Info("failed to generate StatefulSet for Workspace", "error", err.Error())
 		return r.updateWorkspaceState(ctx, log, workspace,
@@ -588,7 +565,7 @@ func (r *WorkspaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	//  - this may run an activity probe, update `status.activity`, and pause the Workspace
 	//  - it returns a requeue result used to schedule the next probe (unless a more urgent
 	//    requeue was already requested by the status generation above)
-	activityResult, paused, err := r.reconcileActivity(ctx, log, workspace, workspaceKind, currentImageConfig, currentPodConfig, pod)
+	activityResult, paused, err := r.reconcileActivity(ctx, log, workspace, workspaceKind, currentPodConfig, pod)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -854,31 +831,18 @@ func hashName(parts ...string) string {
 	return hex.EncodeToString(sum[:])[:nameHashLength]
 }
 
-// generateServiceAccountName generates the name of the ServiceAccount for a Workspace,
-// the format is "ws-{WORKSPACE_NAME}", truncated with a hash suffix if it does not fit
-func generateServiceAccountName(workspaceName string) string {
-	// NOTE: this name is deterministic, unlike the `metadata.generateName` used by the other owned
-	//       resources, because users and other controllers reference the ServiceAccount by name
-	//       (in RoleBindings, and in Istio AuthorizationPolicy principals)
-	name := fmt.Sprintf("ws-%s", workspaceName)
-	if len(name) <= maxServiceAccountNameLength {
-		return name
-	}
-	// NOTE: we hash the Workspace name rather than the truncated result, so two Workspaces
-	//       sharing a long prefix get different ServiceAccount names
-	suffix := hashName(workspaceName)
-	return fmt.Sprintf("%s-%s", name[:maxServiceAccountNameLength-len(suffix)-1], suffix)
-}
-
 // generateServiceAccount generates a ServiceAccount for a Workspace
 func generateServiceAccount(workspace *kubefloworgv1beta1.Workspace) *corev1.ServiceAccount {
+	// generate name prefix
+	namePrefix := generateNamePrefix(workspace.Name, maxServiceAccountNameLength)
+
 	//
 	// NOTE: if you add new fields, ensure they are reflected in `helper.CopyServiceAccountFields()`
 	//
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      generateServiceAccountName(workspace.Name),
-			Namespace: workspace.Namespace,
+			GenerateName: namePrefix,
+			Namespace:    workspace.Namespace,
 			Labels: map[string]string{
 				workspaceNameLabel: workspace.Name,
 			},
@@ -998,7 +962,7 @@ func (r *WorkspaceReconciler) reconcileRoleBindings(ctx context.Context, log log
 }
 
 // generateStatefulSet generates a StatefulSet for a Workspace
-func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind *kubefloworgv1beta1.WorkspaceKind, imageConfigSpec kubefloworgv1beta1.ImageConfigSpec, podConfigSpec kubefloworgv1beta1.PodConfigSpec, serviceAccountName string) (*appsv1.StatefulSet, error) { //nolint:gocyclo
+func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind *kubefloworgv1beta1.WorkspaceKind, imageConfigSpec *kubefloworgv1beta1.ImageConfigSpec, podConfigSpec *kubefloworgv1beta1.PodConfigSpec, serviceAccountName string) (*appsv1.StatefulSet, error) {
 	// generate name prefix
 	namePrefix := generateNamePrefix(workspace.Name, maxStatefulSetNameLength)
 
@@ -1009,12 +973,21 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	// generate pod metadata
-	// NOTE: pod metadata from the Workspace takes precedence over the WorkspaceKind
+	//
+	// NOTE: precedence is Workspace > podConfig > WorkspaceKind (later copies win on key conflicts);
+	//       controller-owned labels are layered on top via labels.Merge when the Pod template is built
+	//
+	// NOTE: entries in this field are currently NOT allowed and blocked via a CRD CEL validation rules
+	// 		 until the security model for Workspace-level Pod metadata is defined and implemented
 	podAnnotations := make(map[string]string)
 	podLabels := make(map[string]string)
 	if workspaceKind.Spec.PodTemplate.PodMetadata != nil {
 		maps.Copy(podAnnotations, workspaceKind.Spec.PodTemplate.PodMetadata.Annotations)
 		maps.Copy(podLabels, workspaceKind.Spec.PodTemplate.PodMetadata.Labels)
+	}
+	if podConfigSpec.PodMetadata != nil {
+		maps.Copy(podAnnotations, podConfigSpec.PodMetadata.Annotations)
+		maps.Copy(podLabels, podConfigSpec.PodMetadata.Labels)
 	}
 	if workspace.Spec.PodTemplate.PodMetadata != nil {
 		maps.Copy(podAnnotations, workspace.Spec.PodTemplate.PodMetadata.Annotations)
@@ -1022,12 +995,17 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	// generate statefulset metadata
-	// NOTE: statefulset metadata is only configurable at the WorkspaceKind level
+	// NOTE: precedence is podConfig > WorkspaceKind (podConfig copies win on key conflicts);
+	//       statefulset metadata is not configurable at the Workspace level
 	stsAnnotations := make(map[string]string)
 	stsLabels := make(map[string]string)
 	if workspaceKind.Spec.PodTemplate.StatefulSetMetadata != nil {
 		maps.Copy(stsAnnotations, workspaceKind.Spec.PodTemplate.StatefulSetMetadata.Annotations)
 		maps.Copy(stsLabels, workspaceKind.Spec.PodTemplate.StatefulSetMetadata.Labels)
+	}
+	if podConfigSpec.StatefulSetMetadata != nil {
+		maps.Copy(stsAnnotations, podConfigSpec.StatefulSetMetadata.Annotations)
+		maps.Copy(stsLabels, podConfigSpec.StatefulSetMetadata.Labels)
 	}
 
 	// generate container imagePullPolicy
@@ -1067,18 +1045,13 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	// generate container env
-	containerEnv := make([]corev1.EnvVar, len(workspaceKind.Spec.PodTemplate.ExtraEnv))
-	for i, env := range workspaceKind.Spec.PodTemplate.ExtraEnv {
-		env := env.DeepCopy() // copy to avoid modifying the original
-		if env.Value != "" {
-			rawValue := env.Value
-			outValue, err := helper.RenderGoTemplate(rawValue, httpPathPrefixFunc)
-			if err != nil {
-				return nil, fmt.Errorf("failed to render extraEnv %q: %w", env.Name, err)
-			}
-			env.Value = outValue
-		}
-		containerEnv[i] = *env
+	containerEnv, err := generateContainerEnv(
+		workspaceKind.Spec.PodTemplate.PodSpec.MainContainer.ExtraEnv,
+		podConfigSpec.ExtraEnv,
+		httpPathPrefixFunc,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	// generate container resources
@@ -1090,26 +1063,16 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	// generate scheduler name
 	// NOTE: the schedulerName from the podConfig takes precedence over the WorkspaceKind
 	//       an empty value causes the Kubernetes API server to apply its own default
-	schedulerName := ptr.Deref(workspaceKind.Spec.PodTemplate.SchedulerName, "")
+	schedulerName := ptr.Deref(workspaceKind.Spec.PodTemplate.PodSpec.SchedulerName, "")
 	if podConfigSpec.SchedulerName != nil {
 		schedulerName = *podConfigSpec.SchedulerName
 	}
 
 	// generate container probes
-	var readinessProbe *corev1.Probe
-	var livenessProbe *corev1.Probe
-	var startupProbe *corev1.Probe
-	if workspaceKind.Spec.PodTemplate.Probes != nil {
-		if workspaceKind.Spec.PodTemplate.Probes.ReadinessProbe != nil {
-			readinessProbe = workspaceKind.Spec.PodTemplate.Probes.ReadinessProbe
-		}
-		if workspaceKind.Spec.PodTemplate.Probes.LivenessProbe != nil {
-			livenessProbe = workspaceKind.Spec.PodTemplate.Probes.LivenessProbe
-		}
-		if workspaceKind.Spec.PodTemplate.Probes.StartupProbe != nil {
-			startupProbe = workspaceKind.Spec.PodTemplate.Probes.StartupProbe
-		}
-	}
+	mainContainer := workspaceKind.Spec.PodTemplate.PodSpec.MainContainer
+	readinessProbe := mainContainer.ReadinessProbe
+	livenessProbe := mainContainer.LivenessProbe
+	startupProbe := mainContainer.StartupProbe
 
 	// generate volumes and volumeMounts
 	volumes := make([]corev1.Volume, 0)
@@ -1129,7 +1092,7 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 		}
 		homeVolumeMount := corev1.VolumeMount{
 			Name:      homeVolume.Name,
-			MountPath: workspaceKind.Spec.PodTemplate.VolumeMounts.Home,
+			MountPath: workspaceKind.Spec.PodTemplate.VolumeMountPaths.Home,
 		}
 		seenVolumeNames[homeVolume.Name] = true
 		seenVolumeMountPaths[homeVolumeMount.MountPath] = true
@@ -1202,7 +1165,7 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	// add extra volumes
-	for _, extraVolume := range workspaceKind.Spec.PodTemplate.ExtraVolumes {
+	for _, extraVolume := range workspaceKind.Spec.PodTemplate.PodSpec.ExtraVolumes {
 		if seenVolumeNames[extraVolume.Name] {
 			// silently skip duplicate volume names
 			continue
@@ -1212,7 +1175,7 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	// add extra volumeMounts
-	for _, extraVolumeMount := range workspaceKind.Spec.PodTemplate.ExtraVolumeMounts {
+	for _, extraVolumeMount := range workspaceKind.Spec.PodTemplate.PodSpec.MainContainer.ExtraVolumeMounts {
 		if seenVolumeMountPaths[extraVolumeMount.MountPath] {
 			// silently skip duplicate mount paths
 			continue
@@ -1272,7 +1235,7 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 							ReadinessProbe:  readinessProbe,
 							LivenessProbe:   livenessProbe,
 							StartupProbe:    startupProbe,
-							SecurityContext: workspaceKind.Spec.PodTemplate.ContainerSecurityContext,
+							SecurityContext: workspaceKind.Spec.PodTemplate.PodSpec.MainContainer.SecurityContext,
 							VolumeMounts:    volumeMounts,
 							Env:             containerEnv,
 							Resources:       containerResources,
@@ -1280,7 +1243,7 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 					},
 					NodeSelector:       podConfigSpec.NodeSelector,
 					SchedulerName:      schedulerName,
-					SecurityContext:    workspaceKind.Spec.PodTemplate.SecurityContext,
+					SecurityContext:    workspaceKind.Spec.PodTemplate.PodSpec.SecurityContext,
 					ServiceAccountName: serviceAccountName,
 					Tolerations:        podConfigSpec.Tolerations,
 					Volumes:            volumes,
@@ -1290,6 +1253,53 @@ func generateStatefulSet(workspace *kubefloworgv1beta1.Workspace, workspaceKind 
 	}
 
 	return statefulSet, nil
+}
+
+// generateContainerEnv combines the WorkspaceKind-level extraEnv with the extraEnv of the
+// selected podConfig, then renders the Go templates in each resulting EnvVar value.
+//
+// The result starts with the WorkspaceKind-level variables, in their declared order. Then, for each
+// podConfig variable:
+//   - if a variable with the same name already exists, its definition is replaced, but it keeps its
+//     position (Kubernetes only expands `$(VAR_NAME)` references to EARLIER variables, so keeping
+//     the position avoids changing which references resolve);
+//   - otherwise, it is appended to the end, in its declared order.
+func generateContainerEnv(
+	wskExtraEnv []corev1.EnvVar,
+	podConfigExtraEnv []corev1.EnvVar,
+	httpPathPrefixFunc func(kubefloworgv1beta1.PortId) string,
+) ([]corev1.EnvVar, error) {
+	mergedEnv := make([]corev1.EnvVar, 0, len(wskExtraEnv)+len(podConfigExtraEnv))
+	envIndexByName := make(map[string]int, len(wskExtraEnv)+len(podConfigExtraEnv))
+
+	for _, env := range wskExtraEnv {
+		envCopy := *env.DeepCopy()
+		envIndexByName[envCopy.Name] = len(mergedEnv)
+		mergedEnv = append(mergedEnv, envCopy)
+	}
+
+	for _, env := range podConfigExtraEnv {
+		envCopy := *env.DeepCopy()
+		if idx, exists := envIndexByName[envCopy.Name]; exists {
+			mergedEnv[idx] = envCopy
+		} else {
+			envIndexByName[envCopy.Name] = len(mergedEnv)
+			mergedEnv = append(mergedEnv, envCopy)
+		}
+	}
+
+	for i := range mergedEnv {
+		if mergedEnv[i].Value != "" {
+			rawValue := mergedEnv[i].Value
+			outValue, err := helper.RenderGoTemplate(rawValue, httpPathPrefixFunc)
+			if err != nil {
+				return nil, fmt.Errorf("failed to render extraEnv %q: %w", mergedEnv[i].Name, err)
+			}
+			mergedEnv[i].Value = outValue
+		}
+	}
+
+	return mergedEnv, nil
 }
 
 // generateService generates a Service for a Workspace

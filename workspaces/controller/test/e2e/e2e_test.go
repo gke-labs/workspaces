@@ -93,10 +93,6 @@ const (
 	// has_activity: false test configs
 	hasActivityFalseWorkspaceKindName = "jupyterlab-has-activity-false"
 	hasActivityFalseWorkspaceName     = "jupyterlab-workspace-has-activity-false"
-
-	// probe test configs
-	probeWorkspaceKindName = "jupyterlab-probe"
-	probeWorkspaceName     = "jupyterlab-workspace-probe"
 )
 
 var (
@@ -780,10 +776,10 @@ var _ = Describe("controller", Ordered, func() {
 			// - secondsSinceActive=16 is the minimum allowed by the CRD validation
 			// - minRunningSeconds=60 ensures the Workspace stays Running long enough for the
 			//   test to observe its Running state and status before pausing triggers
-			// - an empty match makes this a catch-all rule that applies to all Workspaces
+			// - an empty match list makes this a catch-all rule that applies to all Workspaces
 			rulesPatch := `[` +
 				`{"op":"replace","path":"/spec/activityRules","value":[` +
-				`{"config":{"secondsSinceActive":16,"minRunningSeconds":60},"match":{},"effect":{"pauseWorkspace":true}}` +
+				`{"config":{"secondsSinceActive":16,"minRunningSeconds":60},"match":[],"effect":{"pauseWorkspace":true}}` +
 				`]}]`
 			patchRules := func() error {
 				cmd := exec.Command("kubectl", "patch", "workspacekind", activityWorkspaceKindName,
@@ -958,9 +954,9 @@ var _ = Describe("controller", Ordered, func() {
 			// - second rule: catch-all with pauseWorkspace: true
 			rulesPatch := `[` +
 				`{"op":"replace","path":"/spec/activityRules","value":[` +
-				`{"config":{"secondsSinceActive":16},"match":{"matchNamespace":` +
-				`{"selector":{"matchLabels":{"exempt":"true"}}}},"effect":{"pauseWorkspace":false}},` +
-				`{"config":{"secondsSinceActive":16},"match":{},"effect":{"pauseWorkspace":true}}` +
+				`{"config":{"secondsSinceActive":16},"match":[{"matchNamespace":` +
+				`{"selector":{"matchLabels":{"exempt":"true"}}}}],"effect":{"pauseWorkspace":false}},` +
+				`{"config":{"secondsSinceActive":16},"match":[],"effect":{"pauseWorkspace":true}}` +
 				`]}]`
 			patchRules := func() error {
 				cmd := exec.Command("kubectl", "patch", "workspacekind", exemptionWorkspaceKindName,
@@ -1085,7 +1081,7 @@ var _ = Describe("controller", Ordered, func() {
 			By("overriding the activityRules with a single fast catch-all pause rule")
 			rulesPatch := `[` +
 				`{"op":"replace","path":"/spec/activityRules","value":[` +
-				`{"config":{"secondsSinceActive":16,"minRunningSeconds":0},"match":{},"effect":{"pauseWorkspace":true}}` +
+				`{"config":{"secondsSinceActive":16,"minRunningSeconds":0},"match":[],"effect":{"pauseWorkspace":true}}` +
 				`]}]`
 			patchRules := func() error {
 				cmd := exec.Command("kubectl", "patch", "workspacekind", failingProbeWorkspaceKindName,
@@ -1180,7 +1176,7 @@ var _ = Describe("controller", Ordered, func() {
 			By("overriding activityRules with secondsSinceActive=16 and minRunningSeconds=15")
 			rulesPatch := `[` +
 				`{"op":"replace","path":"/spec/activityRules","value":[` +
-				`{"config":{"secondsSinceActive":16,"minRunningSeconds":15},"match":{},"effect":{"pauseWorkspace":true}}` +
+				`{"config":{"secondsSinceActive":16,"minRunningSeconds":15},"match":[],"effect":{"pauseWorkspace":true}}` +
 				`]}]`
 			patchRules := func() error {
 				cmd := exec.Command("kubectl", "patch", "workspacekind", staleWorkspaceKindName,
@@ -1312,7 +1308,7 @@ var _ = Describe("controller", Ordered, func() {
 			// - minRunningSeconds=15
 			rulesPatch := `[` +
 				`{"op":"replace","path":"/spec/activityRules","value":[` +
-				`{"config":{"secondsSinceActive":16,"minRunningSeconds":15},"match":{},"effect":{"pauseWorkspace":true}}` +
+				`{"config":{"secondsSinceActive":16,"minRunningSeconds":15},"match":[],"effect":{"pauseWorkspace":true}}` +
 				`]}]`
 			patchRules := func() error {
 				cmd := exec.Command("kubectl", "patch", "workspacekind", hasActivityFalseWorkspaceKindName,
@@ -1432,97 +1428,6 @@ var _ = Describe("controller", Ordered, func() {
 				return nil
 			}
 			Consistently(verifyStaysRunning, 10*time.Second, interval).Should(Succeed())
-		})
-	})
-
-	Context("Activity Probes", func() {
-
-		AfterAll(func() {
-			By("deleting the probe Workspace")
-			cmd := exec.Command("kubectl", "delete", "workspace", probeWorkspaceName,
-				"-n", workspaceNamespace, "--ignore-not-found=true", "--wait",
-				fmt.Sprintf("--timeout=%s", timeout),
-			)
-			_, _ = utils.Run(cmd)
-
-			By("deleting the probe WorkspaceKind")
-			cmd = exec.Command("kubectl", "delete", "workspacekind", probeWorkspaceKindName,
-				"--ignore-not-found=true",
-			)
-			_, _ = utils.Run(cmd)
-		})
-
-		It("should update activity status using Jupyter probe", func() {
-			By("creating a WorkspaceKind with short Jupyter probe intervals")
-			// We use a very short probe interval to verify the status updates quickly.
-			kindYAML, err := utils.RenderActivityWorkspaceKind(
-				filepath.Join(projectDir, "manifests/kustomize/samples/jupyterlab_v1beta1_workspacekind.yaml"),
-				probeWorkspaceKindName,
-			)
-			Expect(err).NotTo(HaveOccurred())
-
-			// Patch the intervals to be very short for the test
-			kindYAML = strings.Replace(kindYAML, "minProbeIntervalSeconds: 300", "minProbeIntervalSeconds: 5", 1)
-			kindYAML = strings.Replace(kindYAML, "probeIntervalSeconds: 3600", "probeIntervalSeconds: 10", 1)
-
-			applyKind := func() error {
-				cmd := exec.Command("kubectl", "apply", "-f", "-")
-				cmd.Stdin = strings.NewReader(kindYAML)
-				_, err := utils.Run(cmd)
-				return err
-			}
-			Eventually(applyKind, timeout, interval).Should(Succeed())
-
-			By("creating a Workspace using the Jupyter probe WorkspaceKind")
-			workspaceYAML, err := utils.RenderActivityWorkspace(
-				filepath.Join(projectDir, "manifests/kustomize/samples/jupyterlab_v1beta1_workspace.yaml"),
-				probeWorkspaceName,
-				probeWorkspaceKindName,
-			)
-			Expect(err).NotTo(HaveOccurred())
-
-			applyWorkspace := func() error {
-				cmd := exec.Command("kubectl", "apply", "-f", "-", "-n", workspaceNamespace)
-				cmd.Stdin = strings.NewReader(workspaceYAML)
-				_, err := utils.Run(cmd)
-				return err
-			}
-			Eventually(applyWorkspace, timeout, interval).Should(Succeed())
-
-			By("waiting for the workspace to be Running")
-			verifyRunning := func(g Gomega) error {
-				statusState, err := utils.GetWorkspaceJSONPath(probeWorkspaceName, workspaceNamespace, "{.status.state}")
-				g.Expect(err).NotTo(HaveOccurred())
-				if statusState != string(kubefloworgv1beta1.WorkspaceStateRunning) {
-					return fmt.Errorf("workspace not Running yet, state=%q", statusState)
-				}
-				return nil
-			}
-			Eventually(verifyRunning, timeout, interval).Should(Succeed())
-
-			By("verifying that lastProbe and lastActivity are updated")
-			verifyActivityUpdated := func(g Gomega) error {
-				lastProbeResult, err := utils.GetWorkspaceJSONPath(
-					probeWorkspaceName, workspaceNamespace, "{.status.activity.lastProbe.result}")
-				g.Expect(err).NotTo(HaveOccurred())
-
-				if lastProbeResult != string(kubefloworgv1beta1.WorkspaceProbeResultSuccess) {
-					lastProbeMessage, _ := utils.GetWorkspaceJSONPath(
-						probeWorkspaceName, workspaceNamespace, "{.status.activity.lastProbe.message}")
-					return fmt.Errorf("last probe not successful yet, result=%q, message=%q", lastProbeResult, lastProbeMessage)
-				}
-
-				lastActivity, err := utils.GetWorkspaceJSONPath(
-					probeWorkspaceName, workspaceNamespace, "{.status.activity.lastActivity}")
-				g.Expect(err).NotTo(HaveOccurred())
-				if lastActivity == "" || lastActivity == "0" {
-					return fmt.Errorf("lastActivity not updated yet")
-				}
-
-				return nil
-			}
-			// It might take a few seconds for the first probe to run after reaching Running state
-			Eventually(verifyActivityUpdated, time.Minute, interval).Should(Succeed())
 		})
 	})
 })
