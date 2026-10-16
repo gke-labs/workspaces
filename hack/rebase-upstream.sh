@@ -103,13 +103,37 @@ resolve_compliance_conflicts() {
             fi
         fi
     done
+
+    # Always use upstream version for files in workspaces/
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        if [[ "$file" == workspaces/* ]]; then
+            echo "Resolving conflict in $file: using upstream version from ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}..."
+            if git cat-file -e "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}:${file}" 2>/dev/null; then
+                git checkout --theirs -- "$file" 2>/dev/null || git checkout --ours -- "$file" 2>/dev/null || true
+                git checkout "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" -- "$file" 2>/dev/null || git show "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}:${file}" > "$file"
+                git add "$file"
+            else
+                git rm -f "$file"
+            fi
+        fi
+    done <<< "${conflicted_files}"
+}
+
+sync_workspaces_to_upstream() {
+    if [ -n "$(git diff "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" -- workspaces/)" ] || \
+       [ -n "$(git diff --cached "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" -- workspaces/)" ]; then
+        echo "Syncing workspaces/ to match ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}..."
+        git checkout "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" -- workspaces/
+        git add workspaces/
+    fi
 }
 
 if [ "$STRATEGY" = "merge" ]; then
     echo "Syncing via merge with ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}..."
 
     if ! git merge "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" --no-commit; then
-        echo "Conflicts detected during merge. Attempting automatic resolution for compliance files..."
+        echo "Conflicts detected during merge. Attempting automatic resolution for compliance and workspaces files..."
         resolve_compliance_conflicts
 
         remaining_conflicts=$(git diff --name-only --diff-filter=U)
@@ -120,6 +144,8 @@ if [ "$STRATEGY" = "merge" ]; then
             exit 1
         fi
     fi
+
+    sync_workspaces_to_upstream
 
     # Check if merge needs committing
     if [ -f .git/MERGE_HEAD ]; then
@@ -134,7 +160,7 @@ elif [ "$STRATEGY" = "rebase" ]; then
 
     if ! git rebase "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}"; then
         while [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; do
-            echo "Conflicts detected during rebase. Attempting automatic resolution for compliance files..."
+            echo "Conflicts detected during rebase. Attempting automatic resolution for compliance and workspaces files..."
             resolve_compliance_conflicts
 
             remaining_conflicts=$(git diff --name-only --diff-filter=U)
