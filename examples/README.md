@@ -11,7 +11,7 @@ and cleanup instructions.
 > [!TIP]
 > **One-time platform setup (~20–30 min without custom images, ~35–60 min with them):** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–6**) **once**. After that, the cluster, storage, images, and templates are in place, and you can run any (or all) of the examples without repeating the setup.
 >
-> **Steps 4–5 (custom images, ~15–30 min) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you.)
+> **Steps 4–5 (custom images, ~15–30 min) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you. Likewise, [agent-substrate](agent-substrate/)'s deploy script builds its own `jupyterlab-ax` Workspace image and `ax-task-runner`.)
 
 ---
 
@@ -25,6 +25,7 @@ and cleanup instructions.
 | [**torch_tpu**](torch_tpu/) | Interactive PyTorch training on Cloud TPU v5e with TorchTPU, scaling to multi-core DDP with torchrun on a single-host TPU slice | 1 × TPU v5e (1 or 4 chips) | 10–20 min |
 | [**agent-sandbox**](agent-sandbox/) | Give a Gemini coding agent a fleet of isolated, throwaway Linux sandboxes; fan out 20 parallel agents | CPU only | 30–60 min |
 | [**ray**](ray/) | Elastic distributed computing with Ray (KubeRay): launch on-demand clusters from Python, run interactive tasks, submit batch jobs, and view the Ray Dashboard in-workspace | CPU (`e2-standard-4`) | 15–30 min |
+| [**agent-substrate**](agent-substrate/) | From one notebook, send a fleet of AX coding agents to fix bugs in parallel on Agent Substrate: several agents share each warm worker pod, are suspended to GCS when idle, and resume in seconds | CPU only (separate node pool; **needs GKE ≥ 1.37**) | 45–90 min |
 
 Plus shared utilities and building blocks:
 
@@ -542,19 +543,19 @@ By default, files are placed in the remote user's home directory (`~`, matching 
 
 The platform and components configured in the **one-time setup** (steps 1–6) provide everything these examples require. Custom images are optional except where marked **required**:
 
-| | resumable-notebooks | distributed | tpu | agent-sandbox | ray |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Custom images from `images/build.sh` (optional unless marked **required**; otherwise `pip install` into the base image) | Not needed: CPU notebook runs on the base image as-is; GPU notebook installs `transformers` in its Step 0 cell | JupyterLab CPU + **`spark-py312` (required)** | JupyterLab TPU | VS Code (`codeserver-python`) CPU + `agent-sandbox-mcp-server` (required; built and pushed by `deploy_agent_sandbox.sh`) | JupyterLab CPU (with `jupyter-server-proxy`) |
-| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` |
-| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none | none (standard CPU node pool) |
-| GKE Pod Snapshots + gVisor | ✅ | — | — | — | — (requires standard non-gVisor node pool) |
-| Kubeflow Trainer v2 | — | ✅ | — | — | — |
-| Kubeflow Spark Operator | — | ✅ | — | — | — |
-| Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) | — |
-| KubeRay operator | — | — | — | — | ✅ (GKE Ray add-on or Helm, in that example's Step 1) |
-| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — | — |
-| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — | — |
+| | resumable-notebooks | distributed | tpu | agent-sandbox | ray | agent-substrate |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Custom images from `images/build.sh` (optional unless marked **required**; otherwise `pip install` into the base image) | Not needed: CPU notebook runs on the base image as-is; GPU notebook installs `transformers` in its Step 0 cell | JupyterLab CPU + **`spark-py312` (required)** | JupyterLab TPU | VS Code (`codeserver-python`) CPU + `agent-sandbox-mcp-server` (required; built and pushed by `deploy_agent_sandbox.sh`) | JupyterLab CPU (with `jupyter-server-proxy`) | `jupyterlab-ax` (JupyterLab + `ax` CLI + walkthrough) and `ax-task-runner`, both built and pushed by `deploy_agent_substrate.sh` |
+| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` | `jupyterlab` / `jupyterlab-resumable`, image option "JupyterLab + AX agents (CPU)" (added by the deploy script) |
+| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none | none (standard CPU node pool) | none (dedicated `substrate-pool` node pool, created by the deploy script) |
+| GKE Pod Snapshots + gVisor | ✅ | — | — | — | — (requires standard non-gVisor node pool) | — (Substrate runs its own gVisor inside worker pods; needs a non-gVisor node pool) |
+| Kubeflow Trainer v2 | — | ✅ | — | — | — | — |
+| Kubeflow Spark Operator | — | ✅ | — | — | — | — |
+| Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) | — | — (uses Agent Substrate + AX instead, installed by that example's deploy script) |
+| KubeRay operator | — | — | — | — | ✅ (GKE Ray add-on or Helm, in that example's Step 1) | — |
+| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — | — | data bucket (holds the `ax` CLI) + actor snapshot bucket (created by the deploy script) |
+| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — | — | — |
 
 ---
 
@@ -597,7 +598,9 @@ needs, so you can also just dive into one.
 | **Artifact Registry** | Google Cloud's container image registry, where `images/build.sh` pushes. |
 | **GCS bucket** | Cloud Storage: where datasets, model checkpoints, and pod snapshots are kept. |
 | **Agent Sandbox** (`Sandbox`) | The operator and Custom Resource used by the `agent-sandbox` example: each `Sandbox` is one disposable Pod an AI agent can run code in. |
-| **gVisor** | A different, unrelated isolation mechanism — a user-space kernel GKE can run a container inside. Used only by the `resumable-notebooks` example, which needs it for checkpointing. Agent Sandbox pods do **not** use it. |
+| **gVisor** | A different, unrelated isolation mechanism — a user-space kernel GKE can run a container inside. The `resumable-notebooks` example uses GKE's built-in gVisor (GKE Sandbox) for checkpointing. The `agent-substrate` example uses gVisor too, but Agent Substrate runs it itself inside ordinary worker pods, so it needs a regular (non-gVisor) node pool. Agent Sandbox pods do **not** use it. |
+| **Agent Substrate** (actor, `WorkerPool`) | The runtime used by the `agent-substrate` example. It packs many sandboxed **actors** onto a few warm worker pods (a `WorkerPool`), snapshots idle actors to Cloud Storage, and restores them onto any free worker. |
+| **AX** (`Task`) | A declarative agent API on top of Agent Substrate, with an `ax` CLI. Each AX `Task` (one agent) runs as one Substrate actor. |
 
 ---
 

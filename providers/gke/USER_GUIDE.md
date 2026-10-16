@@ -42,7 +42,7 @@ To streamline the entire installation, use the scripts in this directory:
 | --- | --- |
 | `providers/gke/` (this directory) | The core standalone deployment only: [`deploy_standalone.sh`](deploy_standalone.sh), [`cleanup_standalone.sh`](cleanup_standalone.sh), the Go sources (`cmd/`, `internal/`), the Dockerfiles for the five platform images, [`manifests/`](manifests/) (`pilot`, `proxy`, `snapshot`, `tenant`, `upstream`), [`scripts/`](scripts/), and the [`Makefile`](Makefile). |
 | [`images/`](../../images/README.md) | Custom workspace container images (JupyterLab, in-browser VS Code via `codeserver-python`, Spark, Agent Sandbox MCP server), the [`build.sh`](../../images/build.sh) builder, sample notebooks, and ready-made `WorkspaceKind` templates in [`images/workspacekinds/`](../../images/workspacekinds/). (`codeserver-python` is the *image* name; the `WorkspaceKind` it backs is named **`codeserver`**.) |
-| [`examples/`](../../examples/README.md) | End-to-end examples: [`distributed/`](../../examples/distributed/) (Spark ETL + TPU training), [`resumable-notebooks/`](../../examples/resumable-notebooks/) (stateful pause & resume), [`agent-sandbox/`](../../examples/agent-sandbox/), and [`compute-classes/`](../../examples/compute-classes/) (GPU / TPU ComputeClasses). |
+| [`examples/`](../../examples/README.md) | End-to-end examples: [`distributed/`](../../examples/distributed/) (Spark ETL + TPU training), [`resumable-notebooks/`](../../examples/resumable-notebooks/) (stateful pause & resume), [`agent-sandbox/`](../../examples/agent-sandbox/), [`agent-substrate/`](../../examples/agent-substrate/) (agent fleets on Agent Substrate + AX), and [`compute-classes/`](../../examples/compute-classes/) (GPU / TPU ComputeClasses). |
 
 ## 1. Prerequisites & Cluster Setup
 
@@ -902,6 +902,7 @@ For step-by-step examples demonstrating how to use the standalone GKE deployment
 - **[Distributed ML Workflow (Spark ETL + TPU Training)](../../examples/distributed/)**
 - **[Stateful Pause & Resume](../../examples/resumable-notebooks/)**
 - **[Agent Sandbox (AI Coding Agents)](../../examples/agent-sandbox/)**
+- **[Coding-Agent Fleets on Agent Substrate + AX](../../examples/agent-substrate/)** (needs GKE ≥ 1.37, or 1.36 created with the pod-certificate beta APIs)
 - **[GPU & TPU ComputeClasses](../../examples/compute-classes/)** (a prerequisite for the accelerator pod options used by the other examples)
 
 *(Note: The Kubeflow Trainer and Spark Operator installed in Step 5.3 are used by the distributed ML example. If you are not running that example, you can skip their installation by setting `INSTALL_TRAINER=false` and `INSTALL_SPARK_OPERATOR=false`.)*

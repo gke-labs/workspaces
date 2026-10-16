@@ -1,0 +1,49 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Warm capacity for the agents. Substrate packs many actors (AX Tasks) onto
+# these worker pods and moves them between pods on suspend/resume; no new Pod
+# is scheduled when an agent wakes up.
+#
+# The workers run gVisor (runsc) themselves inside unprivileged pods, so they
+# must NOT land on GKE Sandbox (gVisor) nodes; the nodeSelector pins them to
+# the dedicated node pool deploy_agent_substrate.sh creates.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${WORKER_NAMESPACE}
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: ax-agents
+  namespace: ${WORKER_NAMESPACE}
+  labels:
+    workload: ax-agents
+spec:
+  replicas: ${WORKER_REPLICAS}
+  workerImage: ${WORKER_IMAGE}
+  sandboxClasses:
+  - name: gvisor
+  template:
+    nodeSelector:
+      cloud.google.com/gke-nodepool: ${SUBSTRATE_NODE_POOL}
+    # Per-worker capacity: the limits are what Substrate packs actors into.
+    resources:
+      limits:
+        cpu: "${WORKER_CPU}"
+        memory: ${WORKER_MEMORY}
+      requests:
+        cpu: 500m
+        memory: ${WORKER_MEMORY}

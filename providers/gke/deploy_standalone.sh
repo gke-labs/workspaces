@@ -345,7 +345,7 @@ ensure_certificate() {
   if gcloud certificate-manager certificates describe "${cert_name}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     local existing_domains
     existing_domains=$(gcloud certificate-manager certificates describe "${cert_name}" \
-      --project="${PROJECT_ID}" --format='value(domains)' 2>/dev/null || true)
+      --project="${PROJECT_ID}" --format='value(managed.domains,sanDnsnames)' 2>/dev/null || true)
     if [[ "${existing_domains}" == *"${target_domain}"* ]]; then
       echo "Certificate '${cert_name}' covers '${target_domain}'."
       eval "${out_var}=\"${cert_name}\""

@@ -1,0 +1,95 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# How a tenant's Workspaces reach AX, and nothing more.
+#
+#  * Workspace pods (namespace ${TENANT_NAMESPACE}) may call ax-server and
+#    fleet-helper on :8080. Nothing else may, and only ax-server may reach Redis.
+#  * The tenant namespace is NOT labeled ate.dev/api-access=true, so the
+#    Substrate NetworkPolicies keep Workspace pods away from ate-api; only
+#    ax-system (labeled by AX's own manifest) can call it.
+#  * `ax ssh` reaches an agent through `kubectl port-forward svc/atenet-router`
+#    (worker pods only accept traffic from the router), so the tenant's service
+#    accounts get exactly the verbs that port-forward needs in ate-system.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ax-api-from-tenant
+  namespace: ax-system
+spec:
+  podSelector:
+    matchExpressions:
+    - key: app.kubernetes.io/name
+      operator: In
+      values: [ax-server, fleet-helper]
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ${TENANT_NAMESPACE}
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ax-redis-from-server
+  namespace: ax-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: ax-redis
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: ax-server
+    ports:
+    - protocol: TCP
+      port: 6379
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ax-ssh-router-portforward
+  namespace: ate-system
+rules:
+- apiGroups: [""]
+  resources: ["services"]
+  resourceNames: ["atenet-router"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/portforward"]
+  verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ax-ssh-router-portforward-${TENANT_NAMESPACE}
+  namespace: ate-system
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:serviceaccounts:${TENANT_NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: ax-ssh-router-portforward
