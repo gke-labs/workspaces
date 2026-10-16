@@ -182,7 +182,7 @@ spec:
     - config:
         secondsSinceActive: 86400  # auto pauses the notebook after 24h of inactivity
         minRunningSeconds: 3600  # ensures the workspace runs for at least 1h after startup/resume before auto-pausing
-      match: {}
+      match: []
       effect:
         pauseWorkspace: true
 
@@ -196,20 +196,16 @@ spec:
     activityProbe:
       minProbeIntervalSeconds: 100
       probeIntervalSeconds: 300
-      jupyter:
-        lastActivity: true
-        portId: "jupyterlab"
-    probes:
-      startupProbe:
-        tcpSocket:
-          port: 8888
-        periodSeconds: 5
-        failureThreshold: 60
-      readinessProbe:
-        tcpSocket:
-          port: 8888
-        periodSeconds: 5
-    volumeMounts:
+      podExec:
+        timeoutSeconds: 60
+        script: |-
+          #!/usr/bin/env python3
+          import os, shutil, urllib.request
+          prefix = os.environ.get("NB_PREFIX", "").rstrip("/")
+          url = f"http://127.0.0.1:8888{prefix}/api/status"
+          with urllib.request.urlopen(url, timeout=10) as resp, open(os.environ["OUTPUT_JSON_PATH"], "wb") as out:
+              shutil.copyfileobj(resp, out)
+    volumeMountPaths:
       home: "/home/jovyan"
     ports:
       - id: "jupyterlab"
@@ -218,53 +214,64 @@ spec:
         httpProxy:
           removePathPrefix: false
           requestHeaders: {}
-    extraEnv:
-      - name: "NB_PREFIX"
-        value: |-
-          {{ httpPathPrefix "jupyterlab" }}
-      - name: "JUPYTERHUB_SERVICE_PREFIX"
-        value: |-
-          {{ httpPathPrefix "jupyterlab" }}
-      - name: "LD_LIBRARY_PATH"
-        value: "/usr/local/nvidia/lib64"
-      - name: "PATH"
-        value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      - name: "REGISTRY"
-        value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-      - name: "GCS_BUCKET"
-        value: "${GCS_BUCKET}"
-      - name: "WORKSPACE_NAME"
-        valueFrom:
-          fieldRef:
-            fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
-      # Optional shared API key for jupyter-ai (gemini/* models).
-      # If the 'gemini-api-key' Secret exists in a namespace, all 'jupyterlab'
-      # Workspaces in that namespace will receive this environment variable.
-      - name: "GEMINI_API_KEY"
-        valueFrom:
-          secretKeyRef:
-            name: "gemini-api-key"
-            key: "GEMINI_API_KEY"
-            optional: true
-    extraVolumeMounts:
-      - name: "dshm"
-        mountPath: "/dev/shm"
-    extraVolumes:
-      - name: "dshm"
-        emptyDir:
-          medium: "Memory"
-    securityContext:
-      fsGroup: 100
-      seccompProfile:
-        type: RuntimeDefault
-    containerSecurityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop:
-          - ALL
-      runAsNonRoot: true
-      seccompProfile:
-        type: RuntimeDefault
+    podSpec:
+      securityContext:
+        fsGroup: 100
+        seccompProfile:
+          type: RuntimeDefault
+      extraVolumes:
+        - name: "dshm"
+          emptyDir:
+            medium: "Memory"
+      mainContainer:
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        startupProbe:
+          tcpSocket:
+            port: 8888
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          tcpSocket:
+            port: 8888
+          periodSeconds: 5
+        extraEnv:
+          - name: "NB_PREFIX"
+            value: |-
+              {{ httpPathPrefix "jupyterlab" }}
+          - name: "JUPYTERHUB_SERVICE_PREFIX"
+            value: |-
+              {{ httpPathPrefix "jupyterlab" }}
+          - name: "LD_LIBRARY_PATH"
+            value: "/usr/local/nvidia/lib64"
+          - name: "PATH"
+            value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          - name: "REGISTRY"
+            value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+          - name: "GCS_BUCKET"
+            value: "${GCS_BUCKET}"
+          - name: "WORKSPACE_NAME"
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
+          # Optional shared API key for jupyter-ai (gemini/* models).
+          # If the 'gemini-api-key' Secret exists in a namespace, all 'jupyterlab'
+          # Workspaces in that namespace will receive this environment variable.
+          - name: "GEMINI_API_KEY"
+            valueFrom:
+              secretKeyRef:
+                name: "gemini-api-key"
+                key: "GEMINI_API_KEY"
+                optional: true
+        extraVolumeMounts:
+          - name: "dshm"
+            mountPath: "/dev/shm"
     options:
       imageConfig:
         spawner:

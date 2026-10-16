@@ -297,7 +297,8 @@ To prevent idle workspaces from running indefinitely and driving up cloud spend,
 activityRules:
   - config:
       secondsSinceActive: 14400 # auto pauses the notebook after 4h of inactivity
-    match: {}
+      minRunningSeconds: 3600  # ensures the workspace runs for at least 1h after startup/resume before auto-pausing
+    match: []
     effect:
       pauseWorkspace: true
 ```
@@ -309,11 +310,17 @@ activityRules:
    activityProbe:
      minProbeIntervalSeconds: 100
      probeIntervalSeconds: 300
-     jupyter:
-       lastActivity: true
-       portId: "jupyterlab"
+     podExec:
+       timeoutSeconds: 60
+       script: |-
+         #!/usr/bin/env python3
+         import os, shutil, urllib.request
+         prefix = os.environ.get("NB_PREFIX", "").rstrip("/")
+         url = f"http://127.0.0.1:8888{prefix}/api/status"
+         with urllib.request.urlopen(url, timeout=10) as resp, open(os.environ["OUTPUT_JSON_PATH"], "wb") as out:
+             shutil.copyfileobj(resp, out)
    ```
-   The Kubeflow Workspaces controller periodically queries the workspace's Jupyter REST API for kernel executions, open WebSocket connections, and user interactions.
+   The Kubeflow Workspaces controller periodically executes the probe script in the workspace pod to query the local Jupyter REST API (`/api/status`) for the `last_activity` timestamp across kernel executions, open WebSocket connections, and user interactions.
 2. **Inactivity evaluation**: When a running workspace has seen no activity for longer than `secondsSinceActive` (here: `14400` seconds / 4 hours), the controller triggers the rule's effect.
 3. **Stateful pause on idle**: Because this is a resumable workspace, the `pauseWorkspace: true` effect triggers GKE Pod Snapshots to checkpoint container memory to Cloud Storage and terminate the pod. GKE node autoscaling can then scale down the underlying nodes to 0, completely stopping compute billing.
 4. **Instant resumption**: Unlike traditional notebook culling where users lose in-memory variables and loaded model weights, users can click **Resume** / **Start** in the UI at any time and resume with bit-identical state in seconds.
@@ -327,18 +334,20 @@ activityRules:
   # Rule 1: Auto-pause GPU workspaces after 1 hour of inactivity
   - config:
       secondsSinceActive: 3600
+      minRunningSeconds: 3600
     match:
-      matchPodConfig:
-        selector:
-          matchLabels:
-            accelerator: gpu
+      - matchPodConfig:
+          selector:
+            matchLabels:
+              accelerator: gpu
     effect:
       pauseWorkspace: true
 
   # Rule 2: Catch-all — auto-pause CPU and other workspaces after 4 hours
   - config:
       secondsSinceActive: 14400
-    match: {}
+      minRunningSeconds: 3600
+    match: []
     effect:
       pauseWorkspace: true
 ```

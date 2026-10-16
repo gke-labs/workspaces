@@ -440,8 +440,8 @@ The `WorkspaceKind` manifests ([`workspacekinds/jupyterlab.yaml`](../images/work
 
 ```bash
 kubectl get workspacekind jupyterlab -o json | jq '
-  .spec.podTemplate.extraVolumes = (
-    (.spec.podTemplate.extraVolumes // [])
+  .spec.podTemplate.podSpec.extraVolumes = (
+    (.spec.podTemplate.podSpec.extraVolumes // [])
     | map(select(.name != "shared-rwx"))
     + [{
         "name": "shared-rwx",
@@ -450,8 +450,8 @@ kubectl get workspacekind jupyterlab -o json | jq '
         }
       }]
   ) |
-  .spec.podTemplate.extraVolumeMounts = (
-    (.spec.podTemplate.extraVolumeMounts // [])
+  .spec.podTemplate.podSpec.mainContainer.extraVolumeMounts = (
+    (.spec.podTemplate.podSpec.mainContainer.extraVolumeMounts // [])
     | map(select(.name != "shared-rwx"))
     + [
         {

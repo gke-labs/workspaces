@@ -185,7 +185,7 @@ spec:
     serviceAccount:
       clusterRoles:
         - name: "kubeflow-edit"
-    volumeMounts:
+    volumeMountPaths:
       home: "/home/jovyan"
     ports:
       - id: "codeserver"
@@ -194,39 +194,41 @@ spec:
         httpProxy:
           removePathPrefix: true
           requestHeaders: {}
-    extraEnv:
-      - name: "LD_LIBRARY_PATH"
-        value: "/usr/local/nvidia/lib64"
-      - name: "PATH"
-        value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    podSpec:
+      securityContext:
+        fsGroup: 100
+        seccompProfile:
+          type: RuntimeDefault
+      extraVolumes:
+        - name: "dshm"
+          emptyDir:
+            medium: "Memory"
+      mainContainer:
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+              - ALL
+          runAsNonRoot: true
+          seccompProfile:
+            type: RuntimeDefault
+        extraEnv:
+          - name: "LD_LIBRARY_PATH"
+            value: "/usr/local/nvidia/lib64"
+          - name: "PATH"
+            value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-      - name: "REGISTRY"
-        value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-      - name: "GCS_BUCKET"
-        value: "${GCS_BUCKET}"
-      - name: "WORKSPACE_NAME"
-        valueFrom:
-          fieldRef:
-            fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
-    extraVolumeMounts:
-      - name: "dshm"
-        mountPath: "/dev/shm"
-    extraVolumes:
-      - name: "dshm"
-        emptyDir:
-          medium: "Memory"
-    securityContext:
-      fsGroup: 100
-      seccompProfile:
-        type: RuntimeDefault
-    containerSecurityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop:
-          - ALL
-      runAsNonRoot: true
-      seccompProfile:
-        type: RuntimeDefault
+          - name: "REGISTRY"
+            value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+          - name: "GCS_BUCKET"
+            value: "${GCS_BUCKET}"
+          - name: "WORKSPACE_NAME"
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
+        extraVolumeMounts:
+          - name: "dshm"
+            mountPath: "/dev/shm"
     options:
       imageConfig:
         spawner:
