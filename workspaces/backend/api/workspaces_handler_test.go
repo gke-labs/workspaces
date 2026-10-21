@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	"github.com/kubeflow/notebooks/workspaces/backend/api/constants"
 	commonModels "github.com/kubeflow/notebooks/workspaces/backend/internal/models/common"
@@ -43,12 +44,12 @@ import (
 var _ = Describe("Workspaces Handler", func() {
 
 	//
-	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a home PVC that does not have `notebooks.kubeflow.org/can-mount=true` label
+	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a home PVC that does not have `workspaces.kubeflow.org/can-mount=true` label
 	//
-	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a dataVolume PVC that does not have `notebooks.kubeflow.org/can-mount=true` label
+	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a dataVolume PVC that does not have `workspaces.kubeflow.org/can-mount=true` label
 	//       the test should include multiple dataVolumes, some of which are mountable and some of which are not.
 	//
-	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a SECRET that does not have `notebooks.kubeflow.org/can-mount=true` label
+	// TODO: add a test which fails when CREATING/UPDATING a Workspace with a SECRET that does not have `workspaces.kubeflow.org/can-mount=true` label
 	//       the test should include multiple secrets, some of which are mountable and some of which are not.
 	//
 
@@ -2021,6 +2022,81 @@ var _ = Describe("Workspaces Handler", func() {
 			workspace := &kubefloworgv1beta1.Workspace{}
 			err = k8sClient.Get(ctx, workspaceKey, workspace)
 			Expect(apierrors.IsNotFound(err)).To(BeTrue())
+		})
+
+		It("should return 422 when creating a Workspace in a non-existent namespace", func() {
+			missingNamespace := "non-existent-namespace"
+
+			By("defining a WorkspaceCreate model")
+			workspaceCreate := &models.WorkspaceCreate{
+				Name:   "workspace-missing-namespace",
+				Kind:   workspaceKindName,
+				Paused: false,
+				PodTemplate: models.PodTemplateMutate{
+					PodMetadata: models.PodMetadataMutate{
+						Labels:      map[string]string{},
+						Annotations: map[string]string{},
+					},
+					Volumes: models.PodVolumesMutate{
+						Data: []models.PodVolumeMount{},
+					},
+					Options: models.PodTemplateOptionsMutate{
+						ImageConfig: "jupyterlab_scipy_180",
+						PodConfig:   "tiny_cpu",
+					},
+				},
+			}
+			bodyEnvelope := WorkspaceCreateEnvelope{Data: workspaceCreate}
+
+			By("marshaling the WorkspaceCreate model to JSON")
+			bodyEnvelopeJSON, err := json.Marshal(bodyEnvelope)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("creating an HTTP request to create the Workspace")
+			path := strings.Replace(constants.WorkspacesByNamespacePath, ":"+constants.NamespacePathParam, missingNamespace, 1)
+			req, err := http.NewRequest(http.MethodPost, path, strings.NewReader(string(bodyEnvelopeJSON)))
+			Expect(err).NotTo(HaveOccurred())
+			req.Header.Set("Content-Type", constants.MediaTypeJson)
+
+			By("setting the auth headers")
+			req.Header.Set(userIdHeader, adminUser)
+
+			By("executing CreateWorkspaceHandler")
+			rr := httptest.NewRecorder()
+			ps := httprouter.Params{
+				httprouter.Param{
+					Key:   constants.NamespacePathParam,
+					Value: missingNamespace,
+				},
+			}
+			a.CreateWorkspaceHandler(rr, req, ps)
+			rs := rr.Result()
+			defer rs.Body.Close()
+
+			By("verifying the HTTP response status code")
+			Expect(rs.StatusCode).To(Equal(http.StatusUnprocessableEntity), descUnexpectedHTTPStatus, rr.Body.String())
+
+			By("decoding the error response")
+			var response ErrorEnvelope
+			err = json.Unmarshal(rr.Body.Bytes(), &response)
+			Expect(err).NotTo(HaveOccurred())
+
+			By("verifying the validation error points at the namespace path parameter")
+			expectedErr := field.Invalid(
+				field.NewPath(constants.NamespacePathParam),
+				missingNamespace,
+				fmt.Sprintf("namespace %q not found", missingNamespace),
+			)
+			Expect(response.Error.Cause.ValidationErrors).To(BeComparableTo(
+				[]ValidationError{
+					{
+						Origin:  OriginInternal,
+						Type:    field.ErrorTypeInvalid,
+						Field:   constants.NamespacePathParam,
+						Message: expectedErr.ErrorBody(),
+					},
+				},
+			))
 		})
 
 		It("should update a Workspace successfully", func() {
