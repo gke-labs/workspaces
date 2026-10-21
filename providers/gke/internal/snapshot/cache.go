@@ -54,11 +54,11 @@ func (c *Controller) getResource(ctx context.Context, gvr schema.GroupVersionRes
 	return client.Get(ctx, name, metav1.GetOptions{})
 }
 
-// listPodMigrations returns all PodMigration objects in namespace, serving from the
-// informer cache when warm and falling back to a live List otherwise.
-func (c *Controller) listPodMigrations(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
-	if c.podMigrationReady.Load() && c.podMigrationLister != nil {
-		objects, err := c.podMigrationLister.ByNamespace(namespace).List(labels.Everything())
+// listNamespaceResources returns all objects of gvr in namespace, serving from
+// lister when non-nil and falling back to a live List otherwise.
+func (c *Controller) listNamespaceResources(ctx context.Context, gvr schema.GroupVersionResource, lister cache.GenericLister, namespace string) ([]*unstructured.Unstructured, error) {
+	if lister != nil {
+		objects, err := lister.ByNamespace(namespace).List(labels.Everything())
 		if err != nil {
 			return nil, err
 		}
@@ -70,7 +70,7 @@ func (c *Controller) listPodMigrations(ctx context.Context, namespace string) ([
 		}
 		return items, nil
 	}
-	list, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	list, err := c.dynamic.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -81,31 +81,34 @@ func (c *Controller) listPodMigrations(ctx context.Context, namespace string) ([
 	return items, nil
 }
 
+// listPodMigrations returns all PodMigration objects in namespace, preferring the
+// informer cache.
+func (c *Controller) listPodMigrations(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
+	var lister cache.GenericLister
+	if c.podMigrationReady.Load() {
+		lister = c.podMigrationLister
+	}
+	return c.listNamespaceResources(ctx, podMigrationGVR, lister, namespace)
+}
+
+// listPodMigrationJobs returns all PodMigrationJob objects in namespace, preferring
+// the informer cache.
+func (c *Controller) listPodMigrationJobs(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
+	var lister cache.GenericLister
+	if c.podMigrationReady.Load() {
+		lister = c.podMigrationJobLister
+	}
+	return c.listNamespaceResources(ctx, podMigrationJobGVR, lister, namespace)
+}
+
 // listWorkspacesInNamespace returns all Workspaces in namespace, preferring the
 // informer cache.
 func (c *Controller) listWorkspacesInNamespace(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
-	if c.cachesReady.Load() && c.workspaceLister != nil {
-		objects, err := c.workspaceLister.ByNamespace(namespace).List(labels.Everything())
-		if err != nil {
-			return nil, err
-		}
-		items := make([]*unstructured.Unstructured, 0, len(objects))
-		for _, object := range objects {
-			if item := asUnstructured(object); item != nil {
-				items = append(items, item)
-			}
-		}
-		return items, nil
+	var lister cache.GenericLister
+	if c.cachesReady.Load() {
+		lister = c.workspaceLister
 	}
-	list, err := c.dynamic.Resource(workspaceGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
-	items := make([]*unstructured.Unstructured, 0, len(list.Items))
-	for i := range list.Items {
-		items = append(items, &list.Items[i])
-	}
-	return items, nil
+	return c.listNamespaceResources(ctx, workspaceGVR, lister, namespace)
 }
 
 // getWorkspace returns a Workspace, preferring the informer cache.

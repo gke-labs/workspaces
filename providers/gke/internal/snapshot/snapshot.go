@@ -164,6 +164,11 @@ var (
 		Version:  "v1alpha1",
 		Resource: "podmigrations",
 	}
+	podMigrationJobGVR = schema.GroupVersionResource{
+		Group:    "podmigration.gke.io",
+		Version:  "v1alpha1",
+		Resource: "podmigrationjobs",
+	}
 )
 
 type jsonPatchOp struct {
@@ -259,8 +264,9 @@ type Controller struct {
 	policyLister        cache.GenericLister
 	triggerLister       cache.GenericLister
 	snapshotLister      cache.GenericLister
-	storageConfigLister cache.GenericLister
-	podMigrationLister  cache.GenericLister
+	storageConfigLister   cache.GenericLister
+	podMigrationLister    cache.GenericLister
+	podMigrationJobLister cache.GenericLister
 
 	cachesReady       atomic.Bool
 	snapshotReady     atomic.Bool
@@ -424,8 +430,8 @@ func (c *Controller) waitForPodSnapshotAPI(ctx context.Context) error {
 	}
 }
 
-// hasPodMigrationAPI reports whether the optional podmigration.gke.io/v1alpha1 CRD
-// is currently served by the API server.
+// hasPodMigrationAPI reports whether the optional podmigration.gke.io/v1alpha1 CRDs
+// are currently served by the API server.
 func (c *Controller) hasPodMigrationAPI() bool {
 	if c.discovery == nil {
 		return false
@@ -434,12 +440,11 @@ func (c *Controller) hasPodMigrationAPI() bool {
 	if err != nil || resources == nil {
 		return false
 	}
+	found := map[string]bool{}
 	for _, resource := range resources.APIResources {
-		if resource.Name == podMigrationGVR.Resource {
-			return true
-		}
+		found[resource.Name] = true
 	}
-	return false
+	return found[podMigrationGVR.Resource] && found[podMigrationJobGVR.Resource]
 }
 
 // waitForPodMigrationAPI blocks until the optional podmigration.gke.io/v1alpha1 CRD

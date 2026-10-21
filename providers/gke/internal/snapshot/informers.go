@@ -80,7 +80,9 @@ func (c *Controller) Run(ctx context.Context) error {
 		return err
 	}
 	if _, err := kindInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(object any) { c.enqueueWorkspacesForKind(nil, object) },
 		UpdateFunc: func(old, current any) { c.enqueueWorkspacesForKind(old, current) },
+		DeleteFunc: func(object any) { c.enqueueWorkspacesForKind(object, nil) },
 	}); err != nil {
 		return err
 	}
@@ -108,8 +110,7 @@ func (c *Controller) Run(ctx context.Context) error {
 	) {
 		return fmt.Errorf("failed to sync Workspace caches")
 	}
-	c.cachesReady.Store(true)
-	logf("reconciler", "Workspace, WorkspaceKind, Pod and ConfigMap caches are warm; admission webhooks are serving from cache")
+	logf("reconciler", "Workspace, WorkspaceKind, Pod and ConfigMap caches are warm")
 
 	if err := c.waitForPodSnapshotAPI(ctx); err != nil {
 		return err
@@ -170,8 +171,9 @@ func (c *Controller) Run(ctx context.Context) error {
 	logf("reconciler", "GKE PodSnapshot caches are warm")
 
 	// Start the optional PodMigration informer synchronously if the CRD is already
-	// installed so steady-state reconciles are cache-backed from the first item, or
-	// watch for the CRD in the background if it is installed later.
+	// installed so steady-state reconciles and admission checks are cache-backed
+	// before /readyz turns green, or watch for the CRD in the background if it is
+	// installed later.
 	if c.hasPodMigrationAPI() {
 		if err := c.startPodMigrationInformer(ctx); err != nil {
 			return err
@@ -188,6 +190,9 @@ func (c *Controller) Run(ctx context.Context) error {
 		}()
 	}
 
+	c.cachesReady.Store(true)
+	logf("reconciler", "all required caches are warm; admission webhooks are serving from cache")
+
 	// Every replica serves admission requests, but only the leader writes, so the
 	// deployment can be scaled for webhook availability without duplicating work.
 	return c.runElected(ctx, c.startWorkers)
@@ -196,20 +201,30 @@ func (c *Controller) Run(ctx context.Context) error {
 func (c *Controller) startPodMigrationInformer(ctx context.Context) error {
 	migrationFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.dynamic, c.resync, metav1.NamespaceAll, nil)
 	migrationInformer := migrationFactory.ForResource(podMigrationGVR)
-	if _, err := migrationInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(object any) { c.enqueueNamespace(object) },
-		UpdateFunc: func(_, object any) { c.enqueueNamespace(object) },
-		DeleteFunc: func(object any) { c.enqueueNamespace(object) },
-	}); err != nil {
-		return err
+	jobInformer := migrationFactory.ForResource(podMigrationJobGVR)
+	for _, informer := range []cache.SharedIndexInformer{
+		migrationInformer.Informer(),
+		jobInformer.Informer(),
+	} {
+		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    func(object any) { c.enqueueNamespace(object) },
+			UpdateFunc: func(_, object any) { c.enqueueNamespace(object) },
+			DeleteFunc: func(object any) { c.enqueueNamespace(object) },
+		}); err != nil {
+			return err
+		}
 	}
 	migrationFactory.Start(ctx.Done())
-	if !cache.WaitForCacheSync(ctx.Done(), migrationInformer.Informer().HasSynced) {
-		return fmt.Errorf("failed to sync PodMigration cache")
+	if !cache.WaitForCacheSync(ctx.Done(),
+		migrationInformer.Informer().HasSynced,
+		jobInformer.Informer().HasSynced,
+	) {
+		return fmt.Errorf("failed to sync PodMigration caches")
 	}
 	c.podMigrationLister = migrationInformer.Lister()
+	c.podMigrationJobLister = jobInformer.Lister()
 	c.podMigrationReady.Store(true)
-	logf("reconciler", "PodMigration cache is warm")
+	logf("reconciler", "PodMigration caches are warm")
 	return nil
 }
 
@@ -374,14 +389,22 @@ func (c *Controller) enqueueWorkspacesIn(namespace string, match func(*unstructu
 	}
 }
 
-// enqueueWorkspacesForKind wakes up the Workspaces of a WorkspaceKind whose
-// PodSnapshot annotations changed.
+// enqueueWorkspacesForKind wakes up the Workspaces of a WorkspaceKind when it is
+// created, deleted, or has its PodSnapshot/PodMigration annotations changed.
 func (c *Controller) enqueueWorkspacesForKind(old, current any) {
-	previous, updated := asUnstructured(old), asUnstructured(current)
-	if previous == nil || updated == nil {
+	if c.workspaceLister == nil {
 		return
 	}
-	if previous.GetAnnotations()[AnnotationEnabled] == updated.GetAnnotations()[AnnotationEnabled] &&
+	previous, updated := asUnstructured(old), asUnstructured(current)
+	target := updated
+	if target == nil {
+		target = previous
+	}
+	if target == nil {
+		return
+	}
+	if previous != nil && updated != nil &&
+		previous.GetAnnotations()[AnnotationEnabled] == updated.GetAnnotations()[AnnotationEnabled] &&
 		previous.GetAnnotations()[AnnotationStorageConfig] == updated.GetAnnotations()[AnnotationStorageConfig] &&
 		previous.GetAnnotations()[AnnotationPodMigrationEnabled] == updated.GetAnnotations()[AnnotationPodMigrationEnabled] {
 		return
@@ -395,10 +418,11 @@ func (c *Controller) enqueueWorkspacesForKind(old, current any) {
 		if workspace == nil {
 			continue
 		}
-		if kind, _, _ := unstructured.NestedString(workspace.Object, "spec", "kind"); kind != updated.GetName() {
+		if kind, _, _ := unstructured.NestedString(workspace.Object, "spec", "kind"); kind != target.GetName() {
 			continue
 		}
 		c.enqueueWorkspace(workspace.GetNamespace(), workspace.GetName())
+		c.enqueueNamespace(workspace)
 	}
 }
 
