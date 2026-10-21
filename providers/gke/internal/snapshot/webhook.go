@@ -213,16 +213,24 @@ func (c *Controller) mutateWorkspace(ctx context.Context, request *admissionv1.A
 			return allow()
 		}
 		pod := c.findWorkspacePod(ctx, namespace, name)
-		if pod == nil || pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
-			logf("webhook", "Workspace %s/%s has no running Pod; allowing spec.paused=true immediately", namespace, name)
-			return allow()
+		podRunning := pod != nil && pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil
+		if !podRunning {
+			activeJob, jobSnapshotName, err := c.activeWorkspacePodMigrationJob(ctx, &updated, pod)
+			if err == nil && activeJob == nil && jobSnapshotName == "" {
+				logf("webhook", "Workspace %s/%s has no running Pod; allowing spec.paused=true immediately", namespace, name)
+				return allow()
+			}
 		}
 
-		logf("webhook", "Intercepting pause on Workspace %s/%s (pod %s): holding spec.paused=false while GKE takes a PodSnapshot", namespace, name, pod.Name)
-		// Drop the Pod out of the Service EndpointSlice now so the browser session is
-		// cut immediately rather than one watch round-trip later.
-		if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
-			logf("webhook", "Warning: failed to update Pod readinessGate on %s/%s: %v", namespace, pod.Name, err)
+		if podRunning {
+			logf("webhook", "Intercepting pause on Workspace %s/%s (pod %s): holding spec.paused=false while GKE takes a PodSnapshot", namespace, name, pod.Name)
+			// Drop the Pod out of the Service EndpointSlice now so the browser session is
+			// cut immediately rather than one watch round-trip later.
+			if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
+				logf("webhook", "Warning: failed to update Pod readinessGate on %s/%s: %v", namespace, pod.Name, err)
+			}
+		} else {
+			logf("webhook", "Intercepting pause on Workspace %s/%s with active PodMigrationJob: holding spec.paused=false to adopt migration snapshot", namespace, name)
 		}
 
 		annotations[AnnotationCheckpointState] = CheckpointStateCheckpointing
@@ -356,6 +364,19 @@ func (c *Controller) mutatePod(ctx context.Context, request *admissionv1.Admissi
 		}
 	}
 
+	if c.migrationEnabled(ctx, workspace) &&
+		(c.discovery == nil || c.podMigrationReady.Load()) &&
+		!c.hasLegacyWorkspacePolicy(ctx, namespace, workspaceName) &&
+		!c.hasTerminatingPodMigration(ctx, namespace) &&
+		pod.Labels[AnnotationPodMigrationEnabled] != "true" {
+		labels := pod.Labels
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[AnnotationPodMigrationEnabled] = "true"
+		patches = append(patches, jsonPatchOp{Op: "add", Path: "/metadata/labels", Value: labels})
+	}
+
 	if lastCheckpoint := workspace.GetAnnotations()[AnnotationLastCheckpointName]; lastCheckpoint != "" {
 		annotations := pod.Annotations
 		if annotations == nil {
@@ -368,4 +389,22 @@ func (c *Controller) mutatePod(ctx context.Context, request *admissionv1.Admissi
 		logf("webhook", "Configured Pod %s/%s for GKE PodSnapshot (runtimeClassName=%s, IPC config, readinessGate)", namespace, pod.Name, DefaultGKERuntimeClass)
 	}
 	return allowWithPatch(patches)
+}
+
+func (c *Controller) hasLegacyWorkspacePolicy(ctx context.Context, namespace, workspaceName string) bool {
+	_, err := c.getResource(ctx, podSnapshotPolicyGVR, c.policyLister, namespace, policyNameFor(workspaceName))
+	return err == nil
+}
+
+func (c *Controller) hasTerminatingPodMigration(ctx context.Context, namespace string) bool {
+	migrations, err := c.listPodMigrations(ctx, namespace)
+	if err != nil {
+		return false
+	}
+	for _, item := range migrations {
+		if item.GetDeletionTimestamp() != nil {
+			return true
+		}
+	}
+	return false
 }
