@@ -58,7 +58,7 @@ kubectl --context="${CONTEXT}" delete deployment fashion-mnist-inference -n "${T
 kubectl --context="${CONTEXT}" delete service fashion-mnist-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 
 # 2. Remove Kubeflow Spark Operator and Trainer
-if [[ -d "${DIST_DIR}" ]]; then
+if [[ -d "${DIST_DIR}/applications" ]]; then
   echo "Removing Kubeflow Spark Operator and Kubeflow Trainer..."
   kubectl --context="${CONTEXT}" delete -k "${DIST_DIR}/applications/spark/spark-operator/overlays/kubeflow" --ignore-not-found || true
   kubectl --context="${CONTEXT}" delete -k "${DIST_DIR}/applications/trainer/overlays" --ignore-not-found || true

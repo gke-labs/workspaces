@@ -31,7 +31,7 @@ It covers both the **Platform Administrator Setup** (one-time cluster configurat
   ┌─────────────────────────────────────────────────────────────────┐
   │       Kubeflow Notebook v2 Pod (Tiny CPU: 0.1 CPU, 128Mi)       │
   │     Interactive Development, Notebook UI, Pure Python Code      │
-  │         ServiceAccount: ws-<workspace-name> (ray-edit)          │
+  │       ServiceAccount: ws-<workspace-name>-<hash> (ray-edit)     │
   └───────────────┬─────────────────────────────────┬───────────────┘
                   │ 1. Launch / List / Delete       │ 2. Submit Tasks / Jobs
                   ▼ (KubeRay Python Client SDK)     ▼ (Ray Client :10001 / Jobs API :8265)
@@ -127,7 +127,7 @@ gcloud container node-pools create ray-worker-pool \
 
 ### Step 3: Configure RBAC for Workspace Pods
 
-In Kubeflow Notebooks v2, each `Workspace` pod runs under a dedicated `ServiceAccount` named `ws-<workspace-name>`.
+In Kubeflow Notebooks v2, each `Workspace` pod runs under a dedicated `ServiceAccount` generated as `ws-<workspace-name>-<hash>` (labeled with `workspaces.kubeflow.org/workspace-name=<workspace-name>`).
 
 #### 3.1 Apply the `ray-edit` ClusterRole
 ```bash
@@ -161,8 +161,12 @@ kubectl patch workspacekind jupyterlab --type='merge' -p='{
 export TENANT_NAMESPACE="kubeflow-user"  # or your user tenant namespace
 export WORKSPACE_NAME="my-notebook"
 
+SA_NAME=$(kubectl get sa -n "${TENANT_NAMESPACE}" \
+  -l "workspaces.kubeflow.org/workspace-name=${WORKSPACE_NAME}" \
+  -o jsonpath='{.items[0].metadata.name}')
+
 kubectl auth can-i create rayclusters.ray.io \
-  --as="system:serviceaccount:${TENANT_NAMESPACE}:ws-${WORKSPACE_NAME}" \
+  --as="system:serviceaccount:${TENANT_NAMESPACE}:${SA_NAME}" \
   -n "${TENANT_NAMESPACE}"
 # Expected output: yes
 ```

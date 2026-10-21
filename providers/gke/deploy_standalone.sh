@@ -345,7 +345,7 @@ ensure_certificate() {
   if gcloud certificate-manager certificates describe "${cert_name}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
     local existing_domains
     existing_domains=$(gcloud certificate-manager certificates describe "${cert_name}" \
-      --project="${PROJECT_ID}" --format='value(domains)' 2>/dev/null || true)
+      --project="${PROJECT_ID}" --format='value(managed.domains,sanDnsnames)' 2>/dev/null || true)
     if [[ "${existing_domains}" == *"${target_domain}"* ]]; then
       echo "Certificate '${cert_name}' covers '${target_domain}'."
       eval "${out_var}=\"${cert_name}\""
@@ -358,7 +358,7 @@ ensure_certificate() {
   local alt_cert
   alt_cert=$(gcloud certificate-manager certificates list --project="${PROJECT_ID}" \
     --format='json' 2>/dev/null | jq -r --arg domain "${target_domain}" \
-    '.[] | select(any(.domains[]?; . == $domain)) | .name' | awk -F'/' '{print $NF}' | head -n1 || true)
+    '.[] | select(any((.managed.domains[]?, .sanDnsnames[]?); . == $domain)) | .name' | awk -F'/' '{print $NF}' | head -n1 || true)
   if [[ -n "${alt_cert}" ]]; then
     echo "Found existing certificate '${alt_cert}' covering '${target_domain}'."
     eval "${out_var}=\"${alt_cert}\""
@@ -605,7 +605,8 @@ if [[ "${INSTALL_TRAINER}" == "true" || "${INSTALL_SPARK_OPERATOR}" == "true" ]]
   echo "=================================================================="
   echo "Step 7: Deploying Kubeflow Trainer (v2) & Spark Operator..."
   echo "=================================================================="
-  if [[ ! -d "${DIST_DIR}" ]]; then
+  if [[ ! -d "${DIST_DIR}/applications" ]]; then
+    rm -rf "${DIST_DIR}"
     git clone https://github.com/kubeflow/community-distribution.git "${DIST_DIR}"
   fi
 
