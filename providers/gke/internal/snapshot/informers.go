@@ -71,8 +71,11 @@ func (c *Controller) Run(ctx context.Context) error {
 
 	if _, err := workspaceInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    func(object any) { c.enqueueWorkspaceObject(object) },
-		UpdateFunc: func(_, object any) { c.enqueueWorkspaceObject(object) },
-		DeleteFunc: func(object any) { c.enqueueWorkspaceObject(object) },
+		UpdateFunc: func(old, object any) { c.enqueueWorkspaceUpdate(old, object) },
+		DeleteFunc: func(object any) {
+			c.enqueueWorkspaceObject(object)
+			c.enqueueNamespace(object)
+		},
 	}); err != nil {
 		return err
 	}
@@ -146,6 +149,13 @@ func (c *Controller) Run(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
+	if _, err := storageConfigInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(_ any) { c.enqueueAllWorkspaces() },
+		UpdateFunc: func(_, _ any) { c.enqueueAllWorkspaces() },
+		DeleteFunc: func(_ any) { c.enqueueAllWorkspaces() },
+	}); err != nil {
+		return err
+	}
 
 	snapshotFactory.Start(ctx.Done())
 	if !cache.WaitForCacheSync(ctx.Done(),
@@ -159,9 +169,61 @@ func (c *Controller) Run(ctx context.Context) error {
 	c.snapshotReady.Store(true)
 	logf("reconciler", "GKE PodSnapshot caches are warm")
 
+	// Start the optional PodMigration informer synchronously if the CRD is already
+	// installed so steady-state reconciles are cache-backed from the first item, or
+	// watch for the CRD in the background if it is installed later.
+	if c.hasPodMigrationAPI() {
+		if err := c.startPodMigrationInformer(ctx); err != nil {
+			return err
+		}
+	} else {
+		go func() {
+			if c.waitForPodMigrationAPI(ctx) {
+				if err := c.startPodMigrationInformer(ctx); err != nil {
+					logf("reconciler", "Warning: failed to start PodMigration informer: %v", err)
+					return
+				}
+				c.enqueueAllWorkspaces()
+			}
+		}()
+	}
+
 	// Every replica serves admission requests, but only the leader writes, so the
 	// deployment can be scaled for webhook availability without duplicating work.
 	return c.runElected(ctx, c.startWorkers)
+}
+
+func (c *Controller) startPodMigrationInformer(ctx context.Context) error {
+	migrationFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(c.dynamic, c.resync, metav1.NamespaceAll, nil)
+	migrationInformer := migrationFactory.ForResource(podMigrationGVR)
+	if _, err := migrationInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    func(object any) { c.enqueueNamespace(object) },
+		UpdateFunc: func(_, object any) { c.enqueueNamespace(object) },
+		DeleteFunc: func(object any) { c.enqueueNamespace(object) },
+	}); err != nil {
+		return err
+	}
+	migrationFactory.Start(ctx.Done())
+	if !cache.WaitForCacheSync(ctx.Done(), migrationInformer.Informer().HasSynced) {
+		return fmt.Errorf("failed to sync PodMigration cache")
+	}
+	c.podMigrationLister = migrationInformer.Lister()
+	c.podMigrationReady.Store(true)
+	logf("reconciler", "PodMigration cache is warm")
+	return nil
+}
+
+func (c *Controller) enqueueAllWorkspaces() {
+	if c.workspaceLister == nil {
+		return
+	}
+	objects, err := c.workspaceLister.List(labels.Everything())
+	if err != nil {
+		return
+	}
+	for _, object := range objects {
+		c.enqueueWorkspaceObject(object)
+	}
 }
 
 func (c *Controller) startWorkers(ctx context.Context) {
@@ -213,6 +275,19 @@ func (c *Controller) enqueueWorkspaceObject(object any) {
 		return
 	}
 	c.enqueueWorkspace(workspace.GetNamespace(), workspace.GetName())
+}
+
+func (c *Controller) enqueueWorkspaceUpdate(old, current any) {
+	c.enqueueWorkspaceObject(current)
+	previous, updated := asUnstructured(old), asUnstructured(current)
+	if previous == nil || updated == nil {
+		return
+	}
+	if previous.GetAnnotations()[AnnotationEnabled] != updated.GetAnnotations()[AnnotationEnabled] ||
+		previous.GetAnnotations()[AnnotationStorageConfig] != updated.GetAnnotations()[AnnotationStorageConfig] ||
+		previous.GetAnnotations()[AnnotationPodMigrationEnabled] != updated.GetAnnotations()[AnnotationPodMigrationEnabled] {
+		c.enqueueNamespace(updated)
+	}
 }
 
 func (c *Controller) enqueuePod(object any) {
@@ -307,7 +382,8 @@ func (c *Controller) enqueueWorkspacesForKind(old, current any) {
 		return
 	}
 	if previous.GetAnnotations()[AnnotationEnabled] == updated.GetAnnotations()[AnnotationEnabled] &&
-		previous.GetAnnotations()[AnnotationStorageConfig] == updated.GetAnnotations()[AnnotationStorageConfig] {
+		previous.GetAnnotations()[AnnotationStorageConfig] == updated.GetAnnotations()[AnnotationStorageConfig] &&
+		previous.GetAnnotations()[AnnotationPodMigrationEnabled] == updated.GetAnnotations()[AnnotationPodMigrationEnabled] {
 		return
 	}
 	objects, err := c.workspaceLister.List(labels.Everything())

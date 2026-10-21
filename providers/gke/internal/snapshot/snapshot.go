@@ -61,6 +61,7 @@ const (
 	AnnotationCheckpointState     = "snapshot.workspaces.gke.io/checkpoint-state"
 	AnnotationCheckpointStartedAt = "snapshot.workspaces.gke.io/checkpoint-started-at"
 	AnnotationLastCheckpointName  = "snapshot.workspaces.gke.io/last-checkpoint-name"
+	AnnotationPodMigrationEnabled = "pod-migration.gke.io/enabled"
 
 	CheckpointStateCheckpointing = "Checkpointing"
 	CheckpointStateReady         = "Ready"
@@ -83,6 +84,7 @@ const (
 	LabelSnapshotTriggeredBy = "gke-pod-snapshot-triggered-by"
 
 	DefaultStorageConfigName = "kubeflow-pod-snapshot-storage-config"
+	DefaultPodMigrationName  = "kubeflow-pod-migration"
 	IPCConfigMapName         = "jupyter-ipc-config"
 	IPCConfigMapKey          = "jupyter_server_config.py"
 	IPCConfigMapMountPath    = "/etc/jupyter/jupyter_server_config.py"
@@ -111,8 +113,9 @@ const (
 	defaultLeaseNamespace = "kubeflow-workspaces"
 	defaultLeaseName      = "gke-workspace-snapshot-addon"
 
-	podsnapshotGroupVersion = "podsnapshot.gke.io/v1"
-	podWorkspaceIndex       = "workspace"
+	podsnapshotGroupVersion  = "podsnapshot.gke.io/v1"
+	podmigrationGroupVersion = "podmigration.gke.io/v1alpha1"
+	podWorkspaceIndex        = "workspace"
 )
 
 const jupyterIPCServerConfig = `import asyncio
@@ -155,6 +158,11 @@ var (
 		Group:    "podsnapshot.gke.io",
 		Version:  "v1",
 		Resource: "podsnapshots",
+	}
+	podMigrationGVR = schema.GroupVersionResource{
+		Group:    "podmigration.gke.io",
+		Version:  "v1alpha1",
+		Resource: "podmigrations",
 	}
 )
 
@@ -252,9 +260,11 @@ type Controller struct {
 	triggerLister       cache.GenericLister
 	snapshotLister      cache.GenericLister
 	storageConfigLister cache.GenericLister
+	podMigrationLister  cache.GenericLister
 
-	cachesReady   atomic.Bool
-	snapshotReady atomic.Bool
+	cachesReady       atomic.Bool
+	snapshotReady     atomic.Bool
+	podMigrationReady atomic.Bool
 }
 
 // NewController builds the addon controller from a REST config.
@@ -409,6 +419,39 @@ func (c *Controller) waitForPodSnapshotAPI(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(10 * time.Second):
+		}
+	}
+}
+
+// hasPodMigrationAPI reports whether the optional podmigration.gke.io/v1alpha1 CRD
+// is currently served by the API server.
+func (c *Controller) hasPodMigrationAPI() bool {
+	if c.discovery == nil {
+		return false
+	}
+	resources, err := c.discovery.ServerResourcesForGroupVersion(podmigrationGroupVersion)
+	if err != nil || resources == nil {
+		return false
+	}
+	for _, resource := range resources.APIResources {
+		if resource.Name == podMigrationGVR.Resource {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForPodMigrationAPI blocks until the optional podmigration.gke.io/v1alpha1 CRD
+// becomes available or ctx is cancelled.
+func (c *Controller) waitForPodMigrationAPI(ctx context.Context) bool {
+	for {
+		if c.hasPodMigrationAPI() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
 		case <-time.After(10 * time.Second):
 		}
 	}

@@ -23,6 +23,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
 )
@@ -51,6 +52,60 @@ func (c *Controller) getResource(ctx context.Context, gvr schema.GroupVersionRes
 		return client.Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	}
 	return client.Get(ctx, name, metav1.GetOptions{})
+}
+
+// listPodMigrations returns all PodMigration objects in namespace, serving from the
+// informer cache when warm and falling back to a live List otherwise.
+func (c *Controller) listPodMigrations(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
+	if c.podMigrationReady.Load() && c.podMigrationLister != nil {
+		objects, err := c.podMigrationLister.ByNamespace(namespace).List(labels.Everything())
+		if err != nil {
+			return nil, err
+		}
+		items := make([]*unstructured.Unstructured, 0, len(objects))
+		for _, object := range objects {
+			if item := asUnstructured(object); item != nil {
+				items = append(items, item)
+			}
+		}
+		return items, nil
+	}
+	list, err := c.dynamic.Resource(podMigrationGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*unstructured.Unstructured, 0, len(list.Items))
+	for i := range list.Items {
+		items = append(items, &list.Items[i])
+	}
+	return items, nil
+}
+
+// listWorkspacesInNamespace returns all Workspaces in namespace, preferring the
+// informer cache.
+func (c *Controller) listWorkspacesInNamespace(ctx context.Context, namespace string) ([]*unstructured.Unstructured, error) {
+	if c.cachesReady.Load() && c.workspaceLister != nil {
+		objects, err := c.workspaceLister.ByNamespace(namespace).List(labels.Everything())
+		if err != nil {
+			return nil, err
+		}
+		items := make([]*unstructured.Unstructured, 0, len(objects))
+		for _, object := range objects {
+			if item := asUnstructured(object); item != nil {
+				items = append(items, item)
+			}
+		}
+		return items, nil
+	}
+	list, err := c.dynamic.Resource(workspaceGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*unstructured.Unstructured, 0, len(list.Items))
+	for i := range list.Items {
+		items = append(items, &list.Items[i])
+	}
+	return items, nil
 }
 
 // getWorkspace returns a Workspace, preferring the informer cache.
@@ -151,7 +206,8 @@ func (c *Controller) snapshotEnabled(ctx context.Context, workspace *unstructure
 	if value, ok := annotations[AnnotationStorageConfig]; ok && value != "" {
 		storageConfig = value
 	}
-	optedIn := strings.EqualFold(annotations[AnnotationEnabled], "true")
+	optedIn := strings.EqualFold(annotations[AnnotationEnabled], "true") ||
+		strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "true")
 
 	// An explicit opt-out needs no further lookups.
 	if value, ok := annotations[AnnotationEnabled]; ok && strings.EqualFold(value, "false") {
@@ -175,13 +231,45 @@ func (c *Controller) snapshotEnabled(ctx context.Context, workspace *unstructure
 		return false, storageConfig
 	}
 
-	if optedIn {
-		return true, storageConfig
-	}
-
 	kindAnnotations := kind.GetAnnotations()
 	if value, ok := kindAnnotations[AnnotationStorageConfig]; ok && value != "" && annotations[AnnotationStorageConfig] == "" {
 		storageConfig = value
 	}
-	return strings.EqualFold(kindAnnotations[AnnotationEnabled], "true"), storageConfig
+	if optedIn {
+		return true, storageConfig
+	}
+
+	kindSnapshotEnabled := strings.EqualFold(kindAnnotations[AnnotationEnabled], "true")
+	kindMigrationEnabled := strings.EqualFold(kindAnnotations[AnnotationPodMigrationEnabled], "true") &&
+		!strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "false")
+	return kindSnapshotEnabled || kindMigrationEnabled, storageConfig
+}
+
+// migrationEnabled reports whether live Pod Migration opt-in (pod-migration.gke.io/enabled)
+// is enabled for a Workspace, checking explicit Workspace opt-out, TPU hardware exclusion,
+// Workspace annotation, and fallback to the parent WorkspaceKind annotation.
+func (c *Controller) migrationEnabled(ctx context.Context, workspace *unstructured.Unstructured) bool {
+	annotations := workspace.GetAnnotations()
+	if strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "false") ||
+		strings.EqualFold(annotations[AnnotationEnabled], "false") {
+		return false
+	}
+	optedIn := strings.EqualFold(annotations[AnnotationPodMigrationEnabled], "true")
+
+	kindName, _, _ := unstructured.NestedString(workspace.Object, "spec", "kind")
+	if kindName == "" {
+		return false
+	}
+	kind, err := c.getWorkspaceKind(ctx, kindName)
+	if err != nil {
+		return optedIn
+	}
+	podConfig, _, _ := unstructured.NestedString(workspace.Object, "spec", "podTemplate", "options", "podConfig")
+	if podConfigRequestsTPU(kind, podConfig) {
+		return false
+	}
+	if optedIn {
+		return true
+	}
+	return strings.EqualFold(kind.GetAnnotations()[AnnotationPodMigrationEnabled], "true")
 }

@@ -30,10 +30,11 @@ rules:
   - apiGroups: [kubeflow.org]
     resources: [workspaces]
     verbs: [get, list, watch, patch, update]
-  # Workspace Pods are watched to publish the readinessGate condition.
+  # Workspace Pods are watched to publish the readinessGate condition and patched
+  # when live Pod Migration is dynamically enabled or disabled on a running Pod.
   - apiGroups: [""]
     resources: [pods]
-    verbs: [get, list, watch]
+    verbs: [get, list, watch, patch]
   - apiGroups: [""]
     resources: [pods/status]
     verbs: [get, patch, update]
@@ -53,6 +54,11 @@ rules:
   - apiGroups: [podsnapshot.gke.io]
     resources: [podsnapshots]
     verbs: [get, list, watch, delete, deletecollection]
+  # When a Workspace opts into live Pod Migration (pod-migration.gke.io/enabled: "true"),
+  # the addon ensures a singleton PodMigration CR exists in the tenant namespace.
+  - apiGroups: [podmigration.gke.io]
+    resources: [podmigrations]
+    verbs: [get, list, watch, create, update, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
