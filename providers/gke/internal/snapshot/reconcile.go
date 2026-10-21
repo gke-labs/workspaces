@@ -576,7 +576,7 @@ func (c *Controller) ensureStorageConfigAndPolicy(ctx context.Context, workspace
 	return nil
 }
 
-// setPodActiveCondition publishes the podsnapshot.gke.kubeflow.org/active readiness
+// setPodActiveCondition publishes the snapshot.workspaces.gke.io/active readiness
 // gate. The desired state is compared against the cached Pod first so the steady
 // state issues no writes at all.
 func (c *Controller) setPodActiveCondition(ctx context.Context, cached *corev1.Pod, status corev1.ConditionStatus, reason, message string) error {

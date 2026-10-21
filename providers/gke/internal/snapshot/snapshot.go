@@ -56,11 +56,11 @@ import (
 )
 
 const (
-	AnnotationEnabled             = "podsnapshot.gke.kubeflow.org/enabled"
-	AnnotationStorageConfig       = "podsnapshot.gke.kubeflow.org/storage-config"
-	AnnotationCheckpointState     = "podsnapshot.gke.kubeflow.org/checkpoint-state"
-	AnnotationCheckpointStartedAt = "podsnapshot.gke.kubeflow.org/checkpoint-started-at"
-	AnnotationLastCheckpointName  = "podsnapshot.gke.kubeflow.org/last-checkpoint-name"
+	AnnotationEnabled             = "snapshot.workspaces.gke.io/enabled"
+	AnnotationStorageConfig       = "snapshot.workspaces.gke.io/storage-config"
+	AnnotationCheckpointState     = "snapshot.workspaces.gke.io/checkpoint-state"
+	AnnotationCheckpointStartedAt = "snapshot.workspaces.gke.io/checkpoint-started-at"
+	AnnotationLastCheckpointName  = "snapshot.workspaces.gke.io/last-checkpoint-name"
 
 	CheckpointStateCheckpointing = "Checkpointing"
 	CheckpointStateReady         = "Ready"
@@ -68,7 +68,7 @@ const (
 
 	GKERestoreAnnotation       = "podsnapshot.gke.io/ps-name"
 	DefaultGKERuntimeClass     = "gvisor"
-	ReadinessGateConditionType = corev1.PodConditionType("podsnapshot.gke.kubeflow.org/active")
+	ReadinessGateConditionType = corev1.PodConditionType("snapshot.workspaces.gke.io/active")
 
 	// ResourceTPU is the extended resource a Pod requests to get TPU chips. GKE
 	// checkpoints through gVisor, which cannot host TPU devices, so asking for this
@@ -86,7 +86,7 @@ const (
 	IPCConfigMapName         = "jupyter-ipc-config"
 	IPCConfigMapKey          = "jupyter_server_config.py"
 	IPCConfigMapMountPath    = "/etc/jupyter/jupyter_server_config.py"
-	WorkspaceLabel           = "notebooks.kubeflow.org/workspace-name"
+	WorkspaceLabel           = "workspaces.kubeflow.org/workspace-name"
 
 	// SocketSettleGracePeriod is the delay between flipping the readiness gate to
 	// False (which drops the Pod out of the Service EndpointSlice) and asking GKE

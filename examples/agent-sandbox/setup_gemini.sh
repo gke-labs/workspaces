@@ -86,7 +86,7 @@ else
   fi
 
   WORKSPACE_POD=$(kubectl -n "${TENANT_NAMESPACE}" get pods \
-    -l "notebooks.kubeflow.org/workspace-name=${WORKSPACE_NAME}" \
+    -l "workspaces.kubeflow.org/workspace-name=${WORKSPACE_NAME}" \
     --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
 

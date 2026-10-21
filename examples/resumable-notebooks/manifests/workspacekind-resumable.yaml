@@ -33,8 +33,8 @@ metadata:
   name: jupyterlab-resumable
   annotations:
     # enable pod snapshot and resume for all workspaces (all CPU and GPU podconfigs are resumable)
-    podsnapshot.gke.kubeflow.org/enabled: "true"
-    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+    snapshot.workspaces.gke.io/enabled: "true"
+    snapshot.workspaces.gke.io/storage-config: "kubeflow-pod-snapshot-storage-config"
 spec:
   spawner:
     displayName: "JupyterLab Notebook (Resumable)"
@@ -215,7 +215,7 @@ spec:
           - name: "WORKSPACE_NAME"
             valueFrom:
               fieldRef:
-                fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
+                fieldPath: metadata.labels['workspaces.kubeflow.org/workspace-name']
           - name: "GEMINI_API_KEY"
             valueFrom:
               secretKeyRef:

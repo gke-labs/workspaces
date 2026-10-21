@@ -7,7 +7,7 @@ Instead of Istio service mesh, ingress gateways, and sidecars, this standalone a
 - **Google Certificate Manager**: Automated public TLS certificates using Load Balancer Authorization.
 - **Identity-Aware Proxy (IAP)**: Google authentication and identity assertion at the edge.
 - **GKE Access Proxy (`gke-access-proxy`)**: Validates signed IAP JWT assertions, enforces per-request Kubernetes `SubjectAccessReview` RBAC checks, routes HTTP and WebSocket connections to workspaces, and supports optional Kubernetes-minted connection tokens for the VS Code Jupyter extension.
-- **Kubernetes NetworkPolicy**: Strictly protects Workspace pods (`gke-tenant-ingress`) so **only `gke-access-proxy` and `workspaces-controller` can reach Workspace pods** (no direct pod-to-pod access to notebooks), while a separate scoped policy (`gke-tenant-workloads-ingress` excluding `notebooks.kubeflow.org/workspace-name`) allows non-workspace workload pods in `${TENANT_NAMESPACE}` (Spark driver/executors, multi-host TPU `TrainJob` hosts, and inference pods) to communicate within `${TENANT_NAMESPACE}`.
+- **Kubernetes NetworkPolicy**: Strictly protects Workspace pods (`gke-tenant-ingress`) so **only `gke-access-proxy` and `workspaces-controller` can reach Workspace pods** (no direct pod-to-pod access to notebooks), while a separate scoped policy (`gke-tenant-workloads-ingress` excluding `workspaces.kubeflow.org/workspace-name`) allows non-workspace workload pods in `${TENANT_NAMESPACE}` (Spark driver/executors, multi-host TPU `TrainJob` hosts, and inference pods) to communicate within `${TENANT_NAMESPACE}`.
 
 ---
 
@@ -852,6 +852,9 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: workspace-home-pvc
+  labels:
+    workspaces.kubeflow.org/can-mount: "true"
+    workspaces.kubeflow.org/can-update: "true"
 spec:
   accessModes: ["ReadWriteOnce"]
   storageClassName: notebooks-gke-rwo
@@ -920,7 +923,7 @@ Two complete verification examples and the `jupyterlab-resumable` manifest are p
 > [!IMPORTANT]
 > **Keep the snapshot bucket separate from any workload data bucket**: container memory dumps may include in-memory tokens or environment state, and they have different lifecycle and retention requirements than shared datasets and training outputs. `deploy_standalone.sh` therefore provisions one dedicated bucket, `SNAPSHOT_GCS_BUCKET` (default `${PROJECT_ID}-${TENANT_NAMESPACE}-snapshots-bucket`), and configures a 14-day lifecycle `Delete` rule on it. If you also give the tenant a bucket for datasets and model artifacts, create and manage it separately — the deployment script does not create one.
 
-This feature is implemented by the standalone `gke-workspace-snapshot-addon` Deployment (separate from `gke-access-proxy`, so a snapshot control-plane failure never affects notebook traffic) via two Kubernetes Mutating Admission Webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`podsnapshot.gke.kubeflow.org/active`), and a background snapshot reconciler—requiring **zero changes** to upstream Kubeflow `Workspace` / `WorkspaceKind` CRDs, `workspaces-controller`, Backend API, or React Frontend.
+This feature is implemented by the standalone `gke-workspace-snapshot-addon` Deployment (separate from `gke-access-proxy`, so a snapshot control-plane failure never affects notebook traffic) via two Kubernetes Mutating Admission Webhooks (`POST /mutate-workspace` and `POST /mutate-pod`), a custom Pod `readinessGate` (`snapshot.workspaces.gke.io/active`), and a background snapshot reconciler—requiring **zero changes** to upstream Kubeflow `Workspace` / `WorkspaceKind` CRDs, `workspaces-controller`, Backend API, or React Frontend.
 
 ### Step 7.1: Configure `SNAPSHOT_GCS_BUCKET`, IAM (Workload Identity + GKE Service Agent), & Lifecycle Rule
 
@@ -995,7 +998,7 @@ If using a custom snapshot bucket (e.g. `export SNAPSHOT_GCS_BUCKET="my-custom-s
      Then point your `Workspace` (or custom `WorkspaceKind`) to it:
      ```bash
      kubectl --context="${CONTEXT}" -n "${TENANT_NAMESPACE}" patch workspace <workspace-name> \
-       --type merge -p '{"metadata":{"annotations":{"podsnapshot.gke.kubeflow.org/enabled":"true","podsnapshot.gke.kubeflow.org/storage-config":"my-team-storage-config"}}}'
+       --type merge -p '{"metadata":{"annotations":{"snapshot.workspaces.gke.io/enabled":"true","snapshot.workspaces.gke.io/storage-config":"my-team-storage-config"}}}'
      ```
      The snapshot reconciler dynamically binds the workspace's `PodSnapshotPolicy` to `my-team-storage-config`. No controller restart or reconfiguration is needed.
 
@@ -1030,7 +1033,7 @@ GKE Pod Snapshots use a **cluster-scoped** `PodSnapshotStorageConfig` and a **na
         bucket: "${SNAPSHOT_GCS_BUCKET}"
         path: "kubeflow-notebooks"
   ```
-- **`PodSnapshotPolicy` (`ws-<workspace-name>-policy`)**: Namespace-scoped resource in `${TENANT_NAMESPACE}` targeting the Workspace's Pods via label selector `notebooks.kubeflow.org/workspace-name: <workspace-name>` with `triggerConfig: {type: manual, postCheckpoint: stop}` and `retentionConfig: {lastAccessTimeout: "7d"}`.
+- **`PodSnapshotPolicy` (`ws-<workspace-name>-policy`)**: Namespace-scoped resource in `${TENANT_NAMESPACE}` targeting the Workspace's Pods via label selector `workspaces.kubeflow.org/workspace-name: <workspace-name>` with `triggerConfig: {type: manual, postCheckpoint: stop}` and `retentionConfig: {lastAccessTimeout: "7d"}`.
 
 **How Stale Snapshot Data Is Cleaned Up Automatically (4 Layers)**:
 1. **On Resume**: Immediately after a Pod restores from `PodSnapshot/<uuid>`, `gke-workspace-snapshot-addon` deletes the consumed `PodSnapshot` CR, which triggers `podsnapshot.gke.io/podsnapshot-finalizer` (`service-${PROJECT_NUMBER}@container-engine-robot.iam.gserviceaccount.com`) to delete the GCS folder (`checkpoint.img`, `pages.img`, `pages_meta.img`).
@@ -1046,7 +1049,7 @@ kubectl --context="${CONTEXT}" get podsnapshotpolicies -n "${TENANT_NAMESPACE}"
 
 ### Step 7.3: Configure `WorkspaceKind` (or Per-Workspace Annotations)
 
-To enable stateful snapshots for all Workspaces of a given kind, annotate the `WorkspaceKind` with `podsnapshot.gke.kubeflow.org/enabled: "true"` and `podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"`.
+To enable stateful snapshots for all Workspaces of a given kind, annotate the `WorkspaceKind` with `snapshot.workspaces.gke.io/enabled: "true"` and `snapshot.workspaces.gke.io/storage-config: "kubeflow-pod-snapshot-storage-config"`.
 
 Of the `WorkspaceKind` manifests shipped in this repo, only [`../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml`](../../examples/resumable-notebooks/manifests/workspacekind-resumable.yaml) (`jupyterlab-resumable`) carries these annotations out of the box. The upstream sample `jupyterlab` kind and the custom kinds in [`../../images/workspacekinds/`](../../images/workspacekinds/) do **not**; add the annotations yourself if you want snapshotting on those:
 
@@ -1057,17 +1060,17 @@ kind: WorkspaceKind
 metadata:
   name: jupyterlab
   annotations:
-    podsnapshot.gke.kubeflow.org/enabled: "true"
-    podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+    snapshot.workspaces.gke.io/enabled: "true"
+    snapshot.workspaces.gke.io/storage-config: "kubeflow-pod-snapshot-storage-config"
 ```
 
-*(You can also enable or disable snapshotting for an individual `Workspace` by setting `podsnapshot.gke.kubeflow.org/enabled: "true"` or `"false"` in `Workspace.metadata.annotations`, or direct it to a custom bucket configuration via `podsnapshot.gke.kubeflow.org/storage-config: "<custom-storage-config-name>"`, both of which take precedence over the `WorkspaceKind` annotations).*
+*(You can also enable or disable snapshotting for an individual `Workspace` by setting `snapshot.workspaces.gke.io/enabled: "true"` or `"false"` in `Workspace.metadata.annotations`, or direct it to a custom bucket configuration via `snapshot.workspaces.gke.io/storage-config: "<custom-storage-config-name>"`, both of which take precedence over the `WorkspaceKind` annotations).*
 
 When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod` webhook automatically:
 1. Sets `spec.runtimeClassName: gvisor` so the Pod schedules onto a gVisor Sandbox node pool (`--sandbox type=gvisor`).
-2. Injects `spec.readinessGates: [{conditionType: "podsnapshot.gke.kubeflow.org/active"}]`.
+2. Injects `spec.readinessGates: [{conditionType: "snapshot.workspaces.gke.io/active"}]`.
 3. Ensures `ConfigMap/jupyter-ipc-config` exists in `${TENANT_NAMESPACE}` and mounts it at `/etc/jupyter/jupyter_server_config.py`, configuring JupyterLab to use `selectors.PollSelector()` and Unix domain socket kernel transport (`c.KernelManager.transport = 'ipc'`) for gVisor checkpoint/restore compatibility.
-4. If the `Workspace` has a recorded snapshot (`podsnapshot.gke.kubeflow.org/last-checkpoint-name`), injects `podsnapshot.gke.io/ps-name: <snapshot-name>` onto the `Pod` so GKE restores the container from GCS.
+4. If the `Workspace` has a recorded snapshot (`snapshot.workspaces.gke.io/last-checkpoint-name`), injects `podsnapshot.gke.io/ps-name: <snapshot-name>` onto the `Pod` so GKE restores the container from GCS.
 
 ### Step 7.4: Pausing (Checkpointing) & Resuming (Restoring) a Workspace
 
@@ -1080,14 +1083,14 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
      ```
    - **Automatic Inactivity Culling (`activityRules`)**: A `WorkspaceKind` can define `activityRules` to automatically pause idle workspaces after a configured duration of inactivity (e.g. 4 hours) to eliminate idle compute spend. See [Automatic Inactivity Pausing (activityRules)](../../examples/resumable-notebooks/README.md#automatic-inactivity-pausing-activityrules).
    - **What happens automatically**:
-     - `POST /mutate-workspace` intercepts the update, keeps `spec.paused: false` temporarily, sets `podsnapshot.gke.kubeflow.org/checkpoint-state: "Checkpointing"`, and immediately flips the Pod's `podsnapshot.gke.kubeflow.org/active` readiness gate and `PodReady` condition to `False` (`READINESS GATES: 0/1`).
+     - `POST /mutate-workspace` intercepts the update, keeps `spec.paused: false` temporarily, sets `snapshot.workspaces.gke.io/checkpoint-state: "Checkpointing"`, and immediately flips the Pod's `snapshot.workspaces.gke.io/active` readiness gate and `PodReady` condition to `False` (`READINESS GATES: 0/1`).
      - Flipping `PodReady` to `False` causes `workspaces-controller` to immediately transition `Workspace.status.state` out of `Running`, which disables the **Connect** button in the UI, hides the **Stop** action, blocks premature **Start** requests, removes the Pod from Service endpoints, and drains open WebSockets.
-     - After the 3-second socket settle window, `gke-workspace-snapshot-addon` creates `PodSnapshotManualTrigger/ws-<workspace-name>-trigger`, waits for GKE to finish uploading the `PodSnapshot` to `gs://${SNAPSHOT_GCS_BUCKET}`, records `podsnapshot.gke.kubeflow.org/last-checkpoint-name: <snapshot-uuid>`, and patches `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`.
+     - After the 3-second socket settle window, `gke-workspace-snapshot-addon` creates `PodSnapshotManualTrigger/ws-<workspace-name>-trigger`, waits for GKE to finish uploading the `PodSnapshot` to `gs://${SNAPSHOT_GCS_BUCKET}`, records `snapshot.workspaces.gke.io/last-checkpoint-name: <snapshot-uuid>`, and patches `spec.paused: true` (`STATE: Paused`), scaling the Pod down to `0`.
 
 2. **Monitor Checkpoint Progress**:
    ```bash
    kubectl --context="${CONTEXT}" get workspace <workspace-name> -n "${TENANT_NAMESPACE}" \
-     -o jsonpath='{"paused="}{.spec.paused}{" state="}{.status.state}{" checkpoint-state="}{.metadata.annotations.podsnapshot\.gke\.kubeflow\.org/checkpoint-state}{" last-checkpoint="}{.metadata.annotations.podsnapshot\.gke\.kubeflow\.org/last-checkpoint-name}{"\n"}'
+     -o jsonpath='{"paused="}{.spec.paused}{" state="}{.status.state}{" checkpoint-state="}{.metadata.annotations.snapshot\.workspaces\.gke\.io/checkpoint-state}{" last-checkpoint="}{.metadata.annotations.snapshot\.workspaces\.gke\.io/last-checkpoint-name}{"\n"}'
    kubectl --context="${CONTEXT}" get podsnapshotmanualtriggers,podsnapshots -n "${TENANT_NAMESPACE}"
    ```
 
@@ -1102,7 +1105,7 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
      - `workspaces-controller` scales the `StatefulSet` back to `1`.
      - `POST /mutate-pod` injects `podsnapshot.gke.io/ps-name: <snapshot-uuid>` onto the new Pod.
      - Kubelet restores the container memory and live Jupyter kernels from GCS (`Normal GKEPodSnapshotting: Successfully restored the pod from PodSnapshot ...`).
-     - Once restored, `gke-workspace-snapshot-addon` sets `podsnapshot.gke.kubeflow.org/active = True` (`READINESS GATES: 1/1`), transitions the Workspace back to **Running**, clears the checkpoint annotations, and deletes the consumed `PodSnapshot` and `PodSnapshotManualTrigger` resources.
+     - Once restored, `gke-workspace-snapshot-addon` sets `snapshot.workspaces.gke.io/active = True` (`READINESS GATES: 1/1`), transitions the Workspace back to **Running**, clears the checkpoint annotations, and deletes the consumed `PodSnapshot` and `PodSnapshotManualTrigger` resources.
 
 ### Step 7.5: Hardware & Workspace Support for Pause & Resume
 
@@ -1360,7 +1363,7 @@ DELETE_SNAPSHOT_BUCKET=true DELETE_EDGE_RESOURCES=true ./providers/gke/cleanup_s
 | `gke-access-proxy` CrashLoopBackOff during Step 5.1 | Expected fail-closed bootstrap behavior before `IAP_AUDIENCE` is configured in Step 5.2. |
 | Webhook admission times out | Verify `CONTROL_PLANE_CIDR` and Konnectivity-agent TCP 9443 allowance in the isolation plan; certificate readiness alone does not prove connectivity. |
 | No namespace appears in the Workspaces UI | The verified email needs `list workspaces` in `${TENANT_NAMESPACE}`; IAP access alone does not grant Kubernetes RBAC. |
-| Storage classes are disabled | Use the dedicated StorageClass (`notebooks-gke-rwo`) labeled with `notebooks.kubeflow.org/can-use=true`. |
+| Storage classes are disabled | Use the dedicated StorageClass (`notebooks-gke-rwo`) labeled with `workspaces.kubeflow.org/can-use=true`. |
 | Notebook remains `Pending` | Check node resources, image pull permissions, PVC provisioning, quota, Pod Security, and pod events. |
 | Start dialog suggests a redirect to `undefined` | Known UI issue; plain Start retains current options; do not accept an undefined update. |
 | Browser tab takes too long to restore after restart | Check pod readiness and file APIs; foreground layout restoration has not been fully validated. |

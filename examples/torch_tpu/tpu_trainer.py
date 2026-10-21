@@ -112,7 +112,7 @@ def resolve_shared_pvc_subpath(
             core_v1, _ = _init_k8s_clients()
             pod = core_v1.read_namespaced_pod(name=pod_name, namespace=namespace)
             ws_name = (pod.metadata.labels or {}).get(
-                "notebooks.kubeflow.org/workspace-name",
+                "workspaces.kubeflow.org/workspace-name",
                 os.environ.get("WORKSPACE_NAME", ""),
             )
             extra_vars = {"WORKSPACE_NAME": ws_name} if ws_name else {}

@@ -245,8 +245,8 @@ on first run into `~/.cache/huggingface` on the home PVC.
 is the WorkspaceKind that carries the two annotations that switch snapshotting on:
 
 ```yaml
-podsnapshot.gke.kubeflow.org/enabled: "true"
-podsnapshot.gke.kubeflow.org/storage-config: "kubeflow-pod-snapshot-storage-config"
+snapshot.workspaces.gke.io/enabled: "true"
+snapshot.workspaces.gke.io/storage-config: "kubeflow-pod-snapshot-storage-config"
 ```
 
 It contains three placeholders you must replace. Run this from the repository
@@ -360,7 +360,7 @@ The verification workflow is self-contained within each notebook. Upload the fil
 to your workspace and follow the instructions inside the notebook:
 
 1. **CPU Example**:
-   - In Kubeflow Workspaces, create or open a **CPU workspace** using `jupyterlab-resumable` (or any workspace annotated with `podsnapshot.gke.kubeflow.org/enabled: "true"`), pod config `small_cpu` or `medium_cpu`.
+   - In Kubeflow Workspaces, create or open a **CPU workspace** using `jupyterlab-resumable` (or any workspace annotated with `snapshot.workspaces.gke.io/enabled: "true"`), pod config `small_cpu` or `medium_cpu`.
    - Upload [`cpu_checkpoint_restore_example.ipynb`](cpu_checkpoint_restore_example.ipynb) using the upload button in the JupyterLab file browser.
    - Run **Steps 1 & 2** in the notebook to set up the in-memory state and ticker thread.
    - Pause the workspace using the **Stop** / **Pause** button in the Kubeflow Workspaces UI.
@@ -407,7 +407,7 @@ kubectl -n kubeflow-workspaces logs -l app=gke-workspace-snapshot-addon -f
 kubectl -n "${TENANT_NAMESPACE}" get podsnapshots,podsnapshotpolicies
 
 # Confirm gVisor was injected into your workspace pod:
-kubectl -n "${TENANT_NAMESPACE}" get pod -l notebooks.kubeflow.org/workspace-name \
+kubectl -n "${TENANT_NAMESPACE}" get pod -l workspaces.kubeflow.org/workspace-name \
   -o jsonpath='{.items[*].spec.runtimeClassName}{"\n"}'
 # gvisor
 ```
@@ -496,7 +496,7 @@ kubectl get podsnapshotstorageconfigs
 
 ### Step 3: Direct Workspaces to Use the Custom Storage Config
 
-To route a workspace's snapshots to `my-team-storage-config`, set the `podsnapshot.gke.kubeflow.org/storage-config` annotation.
+To route a workspace's snapshots to `my-team-storage-config`, set the `snapshot.workspaces.gke.io/storage-config` annotation.
 
 #### On an Individual Workspace
 Annotate the `Workspace` resource:
@@ -508,8 +508,8 @@ metadata:
   name: my-workspace
   namespace: kubeflow-user
   annotations:
-    podsnapshot.gke.kubeflow.org/enabled: "true"
-    podsnapshot.gke.kubeflow.org/storage-config: "my-team-storage-config"
+    snapshot.workspaces.gke.io/enabled: "true"
+    snapshot.workspaces.gke.io/storage-config: "my-team-storage-config"
 spec:
   ...
 ```
@@ -520,8 +520,8 @@ Or patch an existing workspace from the CLI:
 kubectl -n kubeflow-user patch workspace my-workspace --type=merge -p '{
   "metadata": {
     "annotations": {
-      "podsnapshot.gke.kubeflow.org/enabled": "true",
-      "podsnapshot.gke.kubeflow.org/storage-config": "my-team-storage-config"
+      "snapshot.workspaces.gke.io/enabled": "true",
+      "snapshot.workspaces.gke.io/storage-config": "my-team-storage-config"
     }
   }
 }'
@@ -536,8 +536,8 @@ kind: WorkspaceKind
 metadata:
   name: jupyterlab-resumable
   annotations:
-    podsnapshot.gke.kubeflow.org/enabled: "true"
-    podsnapshot.gke.kubeflow.org/storage-config: "my-team-storage-config"
+    snapshot.workspaces.gke.io/enabled: "true"
+    snapshot.workspaces.gke.io/storage-config: "my-team-storage-config"
 ```
 
 All workspaces spawned from this kind will automatically store their snapshots in `gs://my-team-snapshots/kubeflow-notebooks/`.
@@ -545,7 +545,7 @@ All workspaces spawned from this kind will automatically store their snapshots i
 ### How the Controller Handles Custom Storage Configs
 
 When a workspace pauses, `gke-workspace-snapshot-addon`:
-1. Reads the `podsnapshot.gke.kubeflow.org/storage-config` annotation (falling back to the `WorkspaceKind` annotation, and then to `kubeflow-pod-snapshot-storage-config`).
+1. Reads the `snapshot.workspaces.gke.io/storage-config` annotation (falling back to the `WorkspaceKind` annotation, and then to `kubeflow-pod-snapshot-storage-config`).
 2. Creates the per-workspace `PodSnapshotPolicy` with `spec.storageConfigName: "my-team-storage-config"`.
 3. GKE attaches the snapshot trigger to the policy, streaming the pod's checkpoint directly to `gs://my-team-snapshots/`.
 
@@ -576,7 +576,7 @@ If cluster administrators want to change the fallback default bucket used by `gk
 | :--- | :--- | :--- |
 | Workspace shows **`Error`** (not `Pending`) within a minute of creation, with `stateMessage: Workspace Pod is unschedulable: 0/N nodes are available…` | **Usually normal.** No GPU node exists yet, so the scheduler reports the pod unschedulable and the controller surfaces that as `Error` — *while* GKE provisions one in the background. A cold T4 Spot node typically takes 5–10 minutes. | Confirm a node really is coming: `kubectl describe pod <pod> -n "${TENANT_NAMESPACE}"` and look for a `TriggeredScaleUp` event (e.g. `nap-n1-standard-16-spot-gpu1-… 0->1`). If you see `TriggeredScaleUp`, just wait — the state flips to `Running` on its own. Only if there is **no** `TriggeredScaleUp`, or you see `FailedScaleUp`, is something actually wrong: see the next row. |
 | Workspace Pod stuck `Pending` for >10 min (GPU) | The `gpu-t4-spot` ComputeClass is missing, you have no T4 Spot quota in the region, or Spot T4 is stocked out (`FailedScaleUp ... GCE out of resources`; wait for capacity). | `kubectl apply -f ../compute-classes/gpu-compute-class.yaml`; check quota per [`../compute-classes/README.md`](../compute-classes/README.md). `kubectl describe pod <pod>` shows the real reason under `Events`. |
-| Pod starts, but `runtimeClassName` is empty | The `gke-workspace-snapshot-addon` mutating webhook did not fire. | Check the addon is running (`kubectl -n kubeflow-workspaces get deploy gke-workspace-snapshot-addon`) and that the WorkspaceKind or Workspace carries `podsnapshot.gke.kubeflow.org/enabled: "true"`. |
+| Pod starts, but `runtimeClassName` is empty | The `gke-workspace-snapshot-addon` mutating webhook did not fire. | Check the addon is running (`kubectl -n kubeflow-workspaces get deploy gke-workspace-snapshot-addon`) and that the WorkspaceKind or Workspace carries `snapshot.workspaces.gke.io/enabled: "true"`. |
 | Workspace fails with `InvalidImageName` | The `<YOUR_CPU_IMAGE>` / `<YOUR_GPU_IMAGE>` placeholders were never substituted. | Re-apply the WorkspaceKind through the `sed` pipeline above. |
 | Pause hangs, or the workspace comes back with a fresh PID | The checkpoint failed and GKE fell back to a cold start. | `kubectl -n kubeflow-workspaces logs -l app=gke-workspace-snapshot-addon` and `kubectl -n "${TENANT_NAMESPACE}" describe podsnapshot <name>`. |
 | Snapshot errors with a Cloud Storage `403` | Workload Identity or the GKE service agent binding is missing on the snapshot bucket. | Re-run the IAM bindings from [Step 1](#step-1-prepare-the-custom-gcs-bucket--iam-permissions), including the `service-<PROJECT_NUMBER>@container-engine-robot.iam.gserviceaccount.com` grant. |

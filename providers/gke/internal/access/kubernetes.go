@@ -37,7 +37,7 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-const workspaceLabel = "notebooks.kubeflow.org/workspace-name"
+const workspaceLabel = "workspaces.kubeflow.org/workspace-name"
 
 var workspaceResource = schema.GroupVersionResource{Group: "kubeflow.org", Version: "v1beta1", Resource: "workspaces"}
 var kindResource = schema.GroupVersionResource{Group: "kubeflow.org", Version: "v1beta1", Resource: "workspacekinds"}
@@ -280,7 +280,7 @@ func (access *KubernetesAccess) resolveUncached(ctx context.Context, identity Id
 	if workspace.GetUID() == "" || workspace.GetDeletionTimestamp() != nil {
 		return Target{}, fmt.Errorf("workspace not available")
 	}
-	if workspace.GetAnnotations()["podsnapshot.gke.kubeflow.org/checkpoint-state"] == "Checkpointing" {
+	if workspace.GetAnnotations()["snapshot.workspaces.gke.io/checkpoint-state"] == "Checkpointing" {
 		return Target{}, fmt.Errorf("workspace pausing (taking pod snapshot)")
 	}
 	var spec struct {

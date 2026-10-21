@@ -225,7 +225,7 @@ spec:
           - name: "WORKSPACE_NAME"
             valueFrom:
               fieldRef:
-                fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
+                fieldPath: metadata.labels['workspaces.kubeflow.org/workspace-name']
         extraVolumeMounts:
           - name: "dshm"
             mountPath: "/dev/shm"

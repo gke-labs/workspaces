@@ -259,7 +259,7 @@ spec:
           - name: "WORKSPACE_NAME"
             valueFrom:
               fieldRef:
-                fieldPath: metadata.labels['notebooks.kubeflow.org/workspace-name']
+                fieldPath: metadata.labels['workspaces.kubeflow.org/workspace-name']
           # Optional shared API key for jupyter-ai (gemini/* models).
           # If the 'gemini-api-key' Secret exists in a namespace, all 'jupyterlab'
           # Workspaces in that namespace will receive this environment variable.

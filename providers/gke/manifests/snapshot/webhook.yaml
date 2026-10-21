@@ -47,7 +47,7 @@ metadata:
 webhooks:
   # failurePolicy is Ignore on both hooks: if the addon is unavailable, Workspaces
   # must keep starting and stopping (statelessly) rather than becoming unusable.
-  - name: mutate-workspace.podsnapshot.gke.kubeflow.org
+  - name: mutate-workspace.snapshot.workspaces.gke.io
     admissionReviewVersions: ["v1"]
     sideEffects: NoneOnDryRun
     failurePolicy: Ignore
@@ -64,7 +64,7 @@ webhooks:
         apiVersions: ["v1beta1"]
         operations: ["UPDATE"]
         resources: ["workspaces"]
-  - name: mutate-pod.podsnapshot.gke.kubeflow.org
+  - name: mutate-pod.snapshot.workspaces.gke.io
     admissionReviewVersions: ["v1"]
     sideEffects: NoneOnDryRun
     failurePolicy: Ignore
@@ -74,7 +74,7 @@ webhooks:
     # is filtered out by the API server before the webhook is called.
     objectSelector:
       matchExpressions:
-        - key: notebooks.kubeflow.org/workspace-name
+        - key: workspaces.kubeflow.org/workspace-name
           operator: Exists
     clientConfig:
       service:

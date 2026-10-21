@@ -175,7 +175,7 @@ Confirm from your terminal:
 
 ```bash
 kubectl get workspaces -n "${TENANT_NAMESPACE}"
-kubectl get pods -n "${TENANT_NAMESPACE}" -l notebooks.kubeflow.org/workspace-name=tpu-workspace
+kubectl get pods -n "${TENANT_NAMESPACE}" -l workspaces.kubeflow.org/workspace-name=tpu-workspace
 ```
 
 ---

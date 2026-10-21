@@ -42,7 +42,7 @@ This repository provides a **standalone deployment of Kubeflow Workspaces** with
 
 > [!NOTE]
 > **Terminology: Workspaces and Notebooks**
-> In this repository and throughout Kubeflow, the terms **workspaces** and **notebooks** are often used interchangeably (reflecting the evolution from "Kubeflow Notebooks" to "Kubeflow Workspaces / Notebooks v2"). You will encounter "notebooks" in legacy defaults, Go package paths, resource names, and Kubernetes label keys (such as `notebooks.kubeflow.org/workspace-name`).
+> In this repository and throughout Kubeflow, the terms **workspaces** and **notebooks** are often used interchangeably (reflecting the evolution from "Kubeflow Notebooks" to "Kubeflow Workspaces / Notebooks v2"). You will encounter "notebooks" in legacy defaults, Go package paths, and resource names.
 >
 > Importantly, **Workspaces is not limited to Jupyter notebooks** — it is a general-purpose, containerized interactive environment supporting diverse IDEs and runtimes including browser-based VS Code (`codeserver`), desktop VS Code connecting to remote kernels, AI agent sandboxes, and distributed compute (Spark Operator, Kubeflow Trainer v2) across CPU, GPU, and TPU environments.
 

@@ -12,7 +12,7 @@ This document describes a zero-intrusion architecture for enabling stateful **Pa
    - No changes to the Kubeflow Notebooks Backend or Frontend UI code.
 2. **Immediate UI & Network Lockout During Checkpointing (Option 1 — Pod `readinessGate`)**:
    - While GKE is dumping container memory to GCS (`spec.paused` is still `false` so the `StatefulSet` keeps the Pod alive), the user must not think the pause failed or continue interacting with the notebook.
-   - By injecting a custom Kubernetes `readinessGate` (`podsnapshot.gke.kubeflow.org/active`) onto the Workspace Pod and flipping its condition to `False` the moment Pause is requested:
+   - By injecting a custom Kubernetes `readinessGate` (`snapshot.workspaces.gke.io/active`) onto the Workspace Pod and flipping its condition to `False` the moment Pause is requested:
      1. **Immediate UI Feedback**: Kubernetes immediately marks `PodReady = False`. The unmodified [`WorkspaceReconciler`](../../workspaces/controller/internal/controller/workspace_controller.go) only sets `workspace.status.state = Running` when `podPhase == PodRunning && podReady == true`. Flipping `PodReady` to `False` immediately transitions `workspace.status.state` out of `Running` (to `Unknown`), which **automatically disables the `Connect` button** in [`WorkspaceConnectAction.tsx`](../../workspaces/frontend/src/app/pages/Workspaces/WorkspaceConnectAction.tsx) and **hides the `Stop` action** in [`Workspaces.tsx`](../../workspaces/frontend/src/app/pages/Workspaces/Workspaces.tsx).
      2. **Immediate Network Lockout & Socket Drain**: Because `PodReady` becomes `False`, the Kubernetes EndpointSlice controller immediately removes the Pod from the Workspace `Service` endpoints. Even if the user already has an open JupyterLab browser tab, active WebSocket/HTTP connections are immediately cut off, preventing memory mutations during the checkpoint and giving the OS a clean window to close sockets (automatically addressing [Note 2: Socket Settle Grace Period](https://github.com/siyuanfoundation/kubeflow-notebooks/blob/gke-ps-1/gke/pod_snapshot_design.md#note-2-socket-settle-grace-period)).
 3. **Eliminating `StatefulSet` Template Drift (Solving Challenges 1, 2, and 4)**:
@@ -45,7 +45,7 @@ Splitting them also means a snapshot rollout, crash loop or CPU spike never rest
 
 The reconciler is **level triggered and event driven**. It never polls:
 
-- **Watches, not lists.** One shared informer per resource type covers the whole cluster. Pods are watched with the label selector `notebooks.kubeflow.org/workspace-name` and the IPC `ConfigMap` with the field selector `metadata.name=jupyter-ipc-config`, so the caches only ever hold objects the addon actually owns.
+- **Watches, not lists.** One shared informer per resource type covers the whole cluster. Pods are watched with the label selector `workspaces.kubeflow.org/workspace-name` and the IPC `ConfigMap` with the field selector `metadata.name=jupyter-ipc-config`, so the caches only ever hold objects the addon actually owns.
 - **A rate limited work queue keyed by `Workspace`.** Events from any watched object are mapped back to their `Workspace` (Pods by label index, GKE resources by `ownerReference`) and coalesced into one queue item, so a burst of events costs one reconcile. Failures are retried with exponential backoff instead of a fixed loop.
 - **Cache-backed reads.** A steady-state reconcile of a healthy Workspace issues **zero API calls**: every read is served by an informer cache and writes only happen when the observed state differs from the desired state.
 - **Delayed requeue instead of sleeping.** The socket settle grace period is implemented as `AddAfter(remaining)` on the queue, so a pausing Workspace occupies no worker while it waits.
@@ -88,15 +88,15 @@ This is not a rare fluke: pausing a `Workspace` removes its pod, which is freque
 #### Workspace Annotations (`Workspace.metadata.annotations`)
 | Annotation Key | Set By | Values / Description |
 | :--- | :--- | :--- |
-| `podsnapshot.gke.kubeflow.org/enabled` | User / Admin (or `WorkspaceKind` annotation) | `"true"` to enable stateful GKE PodSnapshot pause/resume for this Workspace. |
-| `podsnapshot.gke.kubeflow.org/storage-config` | User / Admin | Name of the `PodSnapshotStorageConfig` (defaults to `"kubeflow-pod-snapshot-storage-config"`). |
-| `podsnapshot.gke.kubeflow.org/checkpoint-state` | Webhook & Addon Reconciler | `"Checkpointing"` while snapshot is in progress; `"Ready"` when snapshot is saved and ready for Pod scale-down; removed after restore. |
-| `podsnapshot.gke.kubeflow.org/last-checkpoint-name` | Addon Reconciler | Name of the GKE `PodSnapshot` CR generated during pause. Consumed by the `Pod` webhook on resume and cleared after restore. |
+| `snapshot.workspaces.gke.io/enabled` | User / Admin (or `WorkspaceKind` annotation) | `"true"` to enable stateful GKE PodSnapshot pause/resume for this Workspace. |
+| `snapshot.workspaces.gke.io/storage-config` | User / Admin | Name of the `PodSnapshotStorageConfig` (defaults to `"kubeflow-pod-snapshot-storage-config"`). |
+| `snapshot.workspaces.gke.io/checkpoint-state` | Webhook & Addon Reconciler | `"Checkpointing"` while snapshot is in progress; `"Ready"` when snapshot is saved and ready for Pod scale-down; removed after restore. |
+| `snapshot.workspaces.gke.io/last-checkpoint-name` | Addon Reconciler | Name of the GKE `PodSnapshot` CR generated during pause. Consumed by the `Pod` webhook on resume and cleared after restore. |
 
 #### Pod ReadinessGate (`Pod.spec.readinessGates` & `Pod.status.conditions`)
 | Condition Type | Managed By | Behavior |
 | :--- | :--- | :--- |
-| `podsnapshot.gke.kubeflow.org/active` | Pod Webhook & Addon Reconciler | Set to `True` when the Workspace Pod is running normally or finishes restoring. Flipped to `False` the instant a user triggers Pause (`checkpoint-state: "Checkpointing"`), forcing `PodReady = False`. |
+| `snapshot.workspaces.gke.io/active` | Pod Webhook & Addon Reconciler | Set to `True` when the Workspace Pod is running normally or finishes restoring. Flipped to `False` the instant a user triggers Pause (`checkpoint-state: "Checkpointing"`), forcing `PodReady = False`. |
 
 ---
 
@@ -114,15 +114,15 @@ sequenceDiagram
     Note over User, GKE: --- 1. INITIAL POD CREATION ---
     Upstream->>UI: StatefulSet creates Pod {sts}-0
     UI->>WH: Intercept Pod CREATE
-    WH->>UI: Inject runtimeClassName="gvisor", jupyter-ipc-config Volume,<br/>and readinessGate "podsnapshot.gke.kubeflow.org/active"
-    Addon->>UI: Patch Pod status condition "podsnapshot.gke.kubeflow.org/active" = True
+    WH->>UI: Inject runtimeClassName="gvisor", jupyter-ipc-config Volume,<br/>and readinessGate "snapshot.workspaces.gke.io/active"
+    Addon->>UI: Patch Pod status condition "snapshot.workspaces.gke.io/active" = True
     Upstream->>UI: PodReady=True -> Workspace status.state = "Running" (Connect enabled)
 
     Note over User, GKE: --- 2. PAUSE FLOW (CHECKPOINTING) ---
     User->>UI: Click "Stop" (PATCH Workspace spec.paused = true)
     UI->>WH: Intercept Workspace UPDATE (spec.paused: false -> true)
     WH->>UI: See checkpoint-state != "Ready":<br/>Rewrite spec.paused = false,<br/>Set annotation checkpoint-state = "Checkpointing"
-    WH->>UI: Patch Pod {sts}-0 status condition<br/>"podsnapshot.gke.kubeflow.org/active" = False
+    WH->>UI: Patch Pod {sts}-0 status condition<br/>"snapshot.workspaces.gke.io/active" = False
     Note over UI, Upstream: PodReady immediately becomes False!<br/>1. K8s Service drops Pod endpoint (open Jupyter tabs disconnected)<br/>2. Upstream controller sets Workspace status.state = "Unknown"<br/>3. Frontend automatically disables "Connect" & hides "Stop"
     UI-->>Addon: Watch event: Workspace has checkpoint-state = "Checkpointing"
     Addon->>GKE: Ensure PodSnapshotPolicy & create PodSnapshotManualTrigger for {sts}-0
@@ -142,7 +142,7 @@ sequenceDiagram
     WH->>UI: Read Workspace annotation last-checkpoint-name:<br/>1. Inject podsnapshot.gke.io/ps-name = "<snapshot-name>" on Pod<br/>2. Inject runtimeClassName="gvisor", IPC ConfigMap, readinessGate
     UI->>GKE: Create Pod {sts}-0 with ps-name annotation (Restores state from GCS)
     GKE-->>Addon: Container running & restored
-    Addon->>UI: Patch Pod status condition "podsnapshot.gke.kubeflow.org/active" = True
+    Addon->>UI: Patch Pod status condition "snapshot.workspaces.gke.io/active" = True
     Addon->>GKE: Delete PodSnapshot & PodSnapshotManualTrigger CRs
     Addon->>UI: Clear Workspace annotations (last-checkpoint-name, checkpoint-state)
     Upstream->>UI: PodReady=True -> Workspace status.state = "Running" (Connect re-enabled)
@@ -156,26 +156,26 @@ sequenceDiagram
 Triggered when a `kubeflow.org/v1beta1` `Workspace` is updated:
 
 1. **Check Enablement**:
-   - Inspect `workspace.metadata.annotations["podsnapshot.gke.kubeflow.org/enabled"]`. If not `"true"` (and not enabled on its `WorkspaceKind`), allow request unmodified.
+   - Inspect `workspace.metadata.annotations["snapshot.workspaces.gke.io/enabled"]`. If not `"true"` (and not enabled on its `WorkspaceKind`), allow request unmodified.
 2. **Intercept Pause Request (`old.spec.paused == false` -> `new.spec.paused == true`)**:
-   - If `new.metadata.annotations["podsnapshot.gke.kubeflow.org/checkpoint-state"] != "Ready"`:
+   - If `new.metadata.annotations["snapshot.workspaces.gke.io/checkpoint-state"] != "Ready"`:
      - **Prevent Premature Scale-Down**: Mutate `new.spec.paused = false` so the upstream `WorkspaceReconciler` keeps `StatefulSet.spec.replicas = 1`.
-     - **Mark Checkpointing**: Set `new.metadata.annotations["podsnapshot.gke.kubeflow.org/checkpoint-state"] = "Checkpointing"`.
-     - **Lock Out UI & Network Immediately**: Patch the active Workspace Pod (`{sts}-0`) `/status` subresource to set condition `podsnapshot.gke.kubeflow.org/active = False` (with reason `"CheckpointingInProgress"`).
-   - If `new.metadata.annotations["podsnapshot.gke.kubeflow.org/checkpoint-state"] == "Ready"`:
+     - **Mark Checkpointing**: Set `new.metadata.annotations["snapshot.workspaces.gke.io/checkpoint-state"] = "Checkpointing"`.
+     - **Lock Out UI & Network Immediately**: Patch the active Workspace Pod (`{sts}-0`) `/status` subresource to set condition `snapshot.workspaces.gke.io/active = False` (with reason `"CheckpointingInProgress"`).
+   - If `new.metadata.annotations["snapshot.workspaces.gke.io/checkpoint-state"] == "Ready"`:
      - Allow `new.spec.paused = true` without modification.
 
 ### 4.2. `Pod` Mutating Webhook (`CREATE`)
-Triggered when a `v1/Pod` with label `notebooks.kubeflow.org/workspace-name: <ws-name>` is created:
+Triggered when a `v1/Pod` with label `workspaces.kubeflow.org/workspace-name: <ws-name>` is created:
 
 1. **Fetch Owning `Workspace`**:
-   - Look up `Workspace` `<ws-name>` in `pod.namespace`. If `podsnapshot.gke.kubeflow.org/enabled != "true"`, allow unmodified.
+   - Look up `Workspace` `<ws-name>` in `pod.namespace`. If `snapshot.workspaces.gke.io/enabled != "true"`, allow unmodified.
 2. **Inject GKE gVisor & Jupyter IPC Runtime Configuration**:
    - Set `pod.spec.runtimeClassName = "gvisor"`.
    - Ensure the `jupyter-ipc-config` `ConfigMap` exists in `pod.namespace` (containing `c.KernelManager.transport = 'ipc'` and the `PollSelector` asyncio event loop policy) and inject its Volume and VolumeMount into the notebook container.
-   - Append `PodReadinessGate{ConditionType: "podsnapshot.gke.kubeflow.org/active"}` to `pod.spec.readinessGates`.
+   - Append `PodReadinessGate{ConditionType: "snapshot.workspaces.gke.io/active"}` to `pod.spec.readinessGates`.
 3. **Inject Restore Annotation (If Resuming from Snapshot)**:
-   - Read `snapshotName := workspace.metadata.annotations["podsnapshot.gke.kubeflow.org/last-checkpoint-name"]`.
+   - Read `snapshotName := workspace.metadata.annotations["snapshot.workspaces.gke.io/last-checkpoint-name"]`.
    - If `snapshotName != ""`:
      - Set `pod.metadata.annotations["podsnapshot.gke.io/ps-name"] = snapshotName`.
 
@@ -183,11 +183,11 @@ Triggered when a `v1/Pod` with label `notebooks.kubeflow.org/workspace-name: <ws
 Runs inside the same manager deployment as the webhooks:
 
 1. **When Pod is Running & Not Checkpointing (`checkpoint-state != "Checkpointing"`)**:
-   - Once the container status in `{sts}-0` is `Running` and `Ready`, patch `pod.status.conditions` to set `podsnapshot.gke.kubeflow.org/active = True`.
-   - If `workspace.annotations["podsnapshot.gke.kubeflow.org/last-checkpoint-name"] != ""`:
+   - Once the container status in `{sts}-0` is `Running` and `Ready`, patch `pod.status.conditions` to set `snapshot.workspaces.gke.io/active = True`.
+   - If `workspace.annotations["snapshot.workspaces.gke.io/last-checkpoint-name"] != ""`:
      - The restore has completed. Delete the `PodSnapshot` and `PodSnapshotManualTrigger` CRs, and remove `last-checkpoint-name` and `checkpoint-state` from `workspace.metadata.annotations`.
 2. **When Pause is Triggered (`checkpoint-state == "Checkpointing"`)**:
-   - Ensure `pod.status.conditions["podsnapshot.gke.kubeflow.org/active"]` is `False` (forcing `PodReady = False` and `workspace.status.state = Unknown`).
+   - Ensure `pod.status.conditions["snapshot.workspaces.gke.io/active"]` is `False` (forcing `PodReady = False` and `workspace.status.state = Unknown`).
    - Wait a brief settle delay (e.g., 2–3 seconds after `PodReady = False`) so Kubernetes EndpointSlice removal finishes draining any open client WebSockets.
    - Reconcile the namespace-scoped `PodSnapshotPolicy` (`ws-<name>-policy`) and create the `PodSnapshotManualTrigger` (`ws-<name>-trigger`) targeting `{sts}-0`.
    - Watch/poll the generated `PodSnapshot` CR until its `Ready` condition is `True`.
@@ -195,8 +195,8 @@ Runs inside the same manager deployment as the webhooks:
      ```yaml
      metadata:
        annotations:
-         podsnapshot.gke.kubeflow.org/last-checkpoint-name: "<snapshot-name>"
-         podsnapshot.gke.kubeflow.org/checkpoint-state: "Ready"
+         snapshot.workspaces.gke.io/last-checkpoint-name: "<snapshot-name>"
+         snapshot.workspaces.gke.io/checkpoint-state: "Ready"
      spec:
        paused: true
      ```

@@ -142,10 +142,10 @@ kind: StorageClass
 metadata:
   name: notebooks-gke-rwo
   labels:
-    notebooks.kubeflow.org/can-use: "true"
+    workspaces.kubeflow.org/can-use: "true"
   annotations:
-    notebooks.kubeflow.org/display-name: "Standard RWO (Persistent Disk)"
-    notebooks.kubeflow.org/description: "Compute Engine persistent disk storage on GKE."
+    workspaces.kubeflow.org/display-name: "Standard RWO (Persistent Disk)"
+    workspaces.kubeflow.org/description: "Compute Engine persistent disk storage on GKE."
 provisioner: pd.csi.storage.gke.io
 parameters:
   type: pd-balanced
@@ -156,7 +156,7 @@ volumeBindingMode: WaitForFirstConsumer
 # Allow non-workspace workload pods in team-a (Spark driver/executors, multi-host TPU
 # TrainJobs, and inference deployments) to accept connections from pods in team-a
 # (such as the Workspace pod or peer worker pods), while strictly excluding Workspace pods
-# (notebooks.kubeflow.org/workspace-name) so Workspace pods remain reachable ONLY via gke-access-proxy.
+# (workspaces.kubeflow.org/workspace-name) so Workspace pods remain reachable ONLY via gke-access-proxy.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -165,7 +165,7 @@ metadata:
 spec:
   podSelector:
     matchExpressions:
-      - key: notebooks.kubeflow.org/workspace-name
+      - key: workspaces.kubeflow.org/workspace-name
         operator: DoesNotExist
   policyTypes: [Ingress]
   ingress:
