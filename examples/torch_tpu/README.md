@@ -121,7 +121,7 @@ Build and push the image if you haven't already:
 ```bash
 export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 
-./images/build.sh --jupyterlab --tpu --torch-tpu --registry-path "${REGISTRY}"
+./images/build.sh --jupyterlab --tpu --registry-path "${REGISTRY}"
 ```
 
 Then register the image options in the `jupyterlab` WorkspaceKind:
@@ -384,7 +384,7 @@ When your repository exceeds the **1 MiB Kubernetes `ConfigMap` limit** (or incl
 | Workspace pod stuck in `Pending` for 10+ minutes with quota events | No TPU v5e Spot quota available in the region. | Check quota with `gcloud compute regions describe "${REGION}" --format="value(quotas)" \| tr ',' '\n' \| grep -i podslice`. Request `PREEMPTIBLE_TPU_LITE_PODSLICE_V5` quota in the Cloud Console. |
 | `RuntimeError: Expected one of cpu, cuda... at start of device string: tpu` | `torch_tpu` is not imported, or the workspace is running on a CPU pod config without attached TPU devices. | Ensure `import torch_tpu` runs before `torch.device("tpu")`, and verify the Workspace pod config is set to **`TPU v5 1x1`** or **`TPU v5 2x2`**. |
 | `[TorchTPU] Failed to acquire a TPU device node... already opened by another process` | 1. Another active notebook kernel (e.g. `torch_tpu_training.ipynb`) holds exclusive TPU access.<br>2. Orphaned worker processes from a previous run are lingering.<br>3. In `torch_tpu_distributed.ipynb`, the orchestrator kernel itself initialized `torch.device("tpu")`. | 1. In `torch_tpu_training.ipynb`, run Section 7 or restart the kernel (**Kernel** -> **Restart Kernel**).<br>2. Run `python3 tpu_lock.py --clear` or `fuser -k -9 /dev/vfio/*` to kill orphaned processes.<br>3. Restart the orchestrator notebook kernel before running `torchrun`. |
-| `ModuleNotFoundError: No module named 'torch_tpu'` | `torch_tpu` is not installed on the base image. | Use the custom TPU image (`images/build.sh --jupyterlab --tpu --torch-tpu`) or install via pip in Step 0. |
+| `ModuleNotFoundError: No module named 'torch_tpu'` | `torch_tpu` is not installed on the base image. | Use the custom TPU image (`images/build.sh --jupyterlab --tpu`) or install via `pip install torch_tpu==0.2.0 --extra-index-url https://download.pytorch.org/whl/cpu`. |
 | DDP job hangs during execution with `tpu_dist` | Process divergence: one rank evaluated `.item()` or branched conditionally while other ranks proceeded to a collective call. | Follow the Golden Rules: ensure all ranks run identical training steps and synchronize simultaneously. |
 | VS Code reports `unable to get issuer certificate` | Node.js on macOS does not trust the system keychain by default. | In VS Code `settings.json`, set `"http.systemCertificatesNode": true` and reload the window. |
 | VS Code reports `Failed to connect to Jupyter server` or `401 Unauthorized` | The connection token has expired or is invalid. | Generate a fresh token at `https://${WORKSPACES_HOST}/workspaces/connections` and reconnect. |
