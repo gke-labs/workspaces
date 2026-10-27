@@ -68,7 +68,7 @@ webhooks:
     admissionReviewVersions: ["v1"]
     sideEffects: NoneOnDryRun
     failurePolicy: Ignore
-    reinvocationPolicy: Never
+    reinvocationPolicy: IfNeeded
     timeoutSeconds: 10
     # Only Workspace Pods reach the addon; every other Pod creation in the cluster
     # is filtered out by the API server before the webhook is called.
