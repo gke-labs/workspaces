@@ -62,6 +62,7 @@ const (
 	AnnotationCheckpointStartedAt = "snapshot.workspaces.gke.io/checkpoint-started-at"
 	AnnotationLastCheckpointName  = "snapshot.workspaces.gke.io/last-checkpoint-name"
 	AnnotationPodMigrationEnabled = "pod-migration.gke.io/enabled"
+	LabelPodMigrationFenced       = "pod-migration.gke.io/fenced"
 
 	CheckpointStateCheckpointing = "Checkpointing"
 	CheckpointStateReady         = "Ready"

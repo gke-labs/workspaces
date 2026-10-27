@@ -17,6 +17,7 @@ package snapshot
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -1276,7 +1277,7 @@ func TestAnnotationOptOutPrecedenceBetweenSnapshotAndMigration(t *testing.T) {
 	})
 }
 
-func TestReconcileCheckpointingCoexistsWithActivePodMigrationJob(t *testing.T) {
+func TestMutualExclusionBetweenWorkspacePauseAndPodMigration(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Namespace: testNamespace, Name: "ws-mig"}
 
@@ -1292,13 +1293,197 @@ func TestReconcileCheckpointingCoexistsWithActivePodMigrationJob(t *testing.T) {
 		},
 	}}
 
-	t.Run("Case A and B: adopts Ready snapshot from active PodMigrationJob after Pod eviction and retires the PodMigrationJob", func(t *testing.T) {
+	t.Run("mutateWorkspace rejects Pause with 422 Invalid when an active PodMigrationJob exists", func(t *testing.T) {
+		oldWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		newWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, true)
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		pod.Labels[AnnotationPodMigrationEnabled] = "true"
+		activeJob := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podmigrationGroupVersion,
+			"kind":       "PodMigrationJob",
+			"metadata":   map[string]any{"name": "pmj-ws-mig-snapshotting", "namespace": testNamespace},
+			"spec": map[string]any{
+				"podRef":       map[string]any{"name": "ws-mig-0"},
+				"targetPodUID": "12345678-1111-2222-3333-444444444444",
+			},
+			"status": map[string]any{
+				"phase": "Snapshotting",
+			},
+		}}
+		controller, _, _ := newTestController(t, oldWS, pod, readyPM, activeJob)
+		oldRaw, _ := json.Marshal(oldWS)
+		newRaw, _ := json.Marshal(newWS)
+		response := controller.mutateWorkspace(ctx, &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			Namespace: testNamespace,
+			OldObject: runtime.RawExtension{Raw: oldRaw},
+			Object:    runtime.RawExtension{Raw: newRaw},
+		})
+		if response.Allowed {
+			t.Fatal("expected mutateWorkspace to reject Pause while an active PodMigrationJob exists")
+		}
+		if response.Result == nil || response.Result.Reason != metav1.StatusReasonInvalid || response.Result.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 StatusReasonInvalid, got %+v", response.Result)
+		}
+	})
+
+	t.Run("mutateWorkspace rejects Pause with 422 Invalid when Pod is fenced for migration", func(t *testing.T) {
+		oldWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		newWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, true)
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionFalse, corev1.ConditionTrue)
+		pod.Labels[AnnotationPodMigrationEnabled] = "true"
+		pod.Labels[LabelPodMigrationFenced] = "true"
+
+		controller, _, _ := newTestController(t, oldWS, pod, readyPM)
+		oldRaw, _ := json.Marshal(oldWS)
+		newRaw, _ := json.Marshal(newWS)
+		response := controller.mutateWorkspace(ctx, &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			Namespace: testNamespace,
+			OldObject: runtime.RawExtension{Raw: oldRaw},
+			Object:    runtime.RawExtension{Raw: newRaw},
+		})
+		if response.Allowed {
+			t.Fatal("expected mutateWorkspace to reject Pause while Pod has pod-migration.gke.io/fenced=true")
+		}
+		if response.Result == nil || response.Result.Reason != metav1.StatusReasonInvalid || response.Result.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422 StatusReasonInvalid, got %+v", response.Result)
+		}
+	})
+
+	t.Run("mutateWorkspace allows Pause and holds for checkpointing when PodMigrationJob is already terminal", func(t *testing.T) {
+		oldWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		newWS := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, true)
+		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		pod.Labels[AnnotationPodMigrationEnabled] = "true"
+		succeededJob := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podmigrationGroupVersion,
+			"kind":       "PodMigrationJob",
+			"metadata":   map[string]any{"name": "pmj-ws-mig-done", "namespace": testNamespace},
+			"spec": map[string]any{
+				"podRef":       map[string]any{"name": "ws-mig-0"},
+				"targetPodUID": "12345678-1111-2222-3333-444444444444",
+			},
+			"status": map[string]any{
+				"phase": "Succeeded",
+			},
+		}}
+		controller, _, _ := newTestController(t, oldWS, pod, readyPM, succeededJob)
+		oldRaw, _ := json.Marshal(oldWS)
+		newRaw, _ := json.Marshal(newWS)
+		response := controller.mutateWorkspace(ctx, &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Update,
+			Namespace: testNamespace,
+			OldObject: runtime.RawExtension{Raw: oldRaw},
+			Object:    runtime.RawExtension{Raw: newRaw},
+		})
+		if !response.Allowed || len(response.Patch) == 0 {
+			t.Fatalf("expected mutateWorkspace to allow and hold spec.paused=false for checkpointing once PodMigrationJob is Succeeded, got allowed=%v patch=%s", response.Allowed, response.Patch)
+		}
+	})
+
+	t.Run("reconcileCheckpointing waits for existing trigger snapshot Stage 2 GCS upload even after Pod stops running", func(t *testing.T) {
 		ws := workspace("ws-mig", map[string]any{
 			AnnotationEnabled:             "true",
 			AnnotationPodMigrationEnabled: "true",
 			AnnotationCheckpointState:     CheckpointStateCheckpointing,
 			AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z",
 		}, false)
+		// Simulate postCheckpoint: stop having terminated the container so podRunning(pod) is false.
+		stoppedPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ws-mig-0",
+				Namespace: testNamespace,
+				Labels:    map[string]string{WorkspaceLabel: "ws-mig", AnnotationPodMigrationEnabled: "true"},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+		}
+		existingTrigger := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podsnapshotGroupVersion,
+			"kind":       "PodSnapshotManualTrigger",
+			"metadata": map[string]any{
+				"name":        triggerNameFor("ws-mig"),
+				"namespace":   testNamespace,
+				"annotations": map[string]any{AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z"},
+			},
+			"status": map[string]any{
+				"snapshotCreated": map[string]any{"name": "ps-uploading"},
+			},
+		}}
+		uploadingSnap := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": podsnapshotGroupVersion,
+			"kind":       "PodSnapshot",
+			"metadata": map[string]any{
+				"name":      "ps-uploading",
+				"namespace": testNamespace,
+				"labels":    map[string]any{LabelSnapshotTriggeredBy: triggerNameFor("ws-mig")},
+			},
+			"status": map[string]any{
+				"conditions": []any{map[string]any{"type": "Triggered", "status": "True"}},
+			},
+		}}
+		controller, _, dynamicClient := newTestController(t, ws, stoppedPod, readyPM, existingTrigger, uploadingSnap)
+		controller.settle = 0
+
+		// Step 1: while Stage 2 GCS upload is still in progress (Ready!=True), Workspace must NOT cold-pause.
+		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+		updatedWS, err := dynamicClient.Resource(workspaceGVR).Namespace(testNamespace).Get(ctx, "ws-mig", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("failed to get Workspace: %v", err)
+		}
+		if paused, _, _ := unstructured.NestedBool(updatedWS.Object, "spec", "paused"); paused {
+			t.Fatal("must not cold-pause Workspace while trigger's PodSnapshot is still uploading to GCS")
+		}
+
+		// Step 2: once PodSnapshot reaches Ready=True, Workspace completes checkpointed pause with AnnotationLastCheckpointName.
+		_ = unstructured.SetNestedSlice(uploadingSnap.Object, []any{
+			map[string]any{"type": "Ready", "status": "True"},
+		}, "status", "conditions")
+		if _, err := dynamicClient.Resource(podSnapshotGVR).Namespace(testNamespace).Update(ctx, uploadingSnap, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("failed to update PodSnapshot: %v", err)
+		}
+		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
+		}
+		updatedWS, err = dynamicClient.Resource(workspaceGVR).Namespace(testNamespace).Get(ctx, "ws-mig", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("failed to get Workspace: %v", err)
+		}
+		if paused, _, _ := unstructured.NestedBool(updatedWS.Object, "spec", "paused"); !paused {
+			t.Fatal("expected Workspace to complete pause once PodSnapshot Ready=True")
+		}
+		if got := updatedWS.GetAnnotations()[AnnotationLastCheckpointName]; got != "ps-uploading" {
+			t.Fatalf("expected AnnotationLastCheckpointName=%q, got %q", "ps-uploading", got)
+		}
+	})
+
+	t.Run("reconcileActive retires consumed psmt-* PodSnapshot after migration completes and keeps it while PodMigrationJob is active", func(t *testing.T) {
+		ws := workspace("ws-mig", map[string]any{
+			AnnotationEnabled:             "true",
+			AnnotationPodMigrationEnabled: "true",
+		}, false)
+		pod := runningPod("ws-ws-mig-abcde-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
+		pod.Labels[AnnotationPodMigrationEnabled] = "true"
 		migrationSnap := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": podsnapshotGroupVersion,
 			"kind":       "PodSnapshot",
@@ -1325,154 +1510,45 @@ func TestReconcileCheckpointingCoexistsWithActivePodMigrationJob(t *testing.T) {
 			},
 		}}
 
-		// Note: no Pod is present because PodMigrationJob already evicted the origin Pod.
-		controller, _, dynamicClient := newTestController(t, ws, readyPM, migrationSnap, activeJob)
-		controller.settle = 0
-
+		// While PodMigrationJob is still active, reconcileActive must not delete the psmt-* snapshot.
+		controller, _, dynamicClient := newTestController(t, ws, pod, readyPM, migrationSnap, activeJob)
 		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
 			t.Fatalf("reconcile failed: %v", err)
 		}
+		if _, err := dynamicClient.Resource(podSnapshotGVR).Namespace(testNamespace).Get(ctx, "ps-from-migration", metav1.GetOptions{}); err != nil {
+			t.Fatalf("expected psmt-* PodSnapshot to be retained while PodMigrationJob is active, got err=%v", err)
+		}
 
-		updatedWS, err := dynamicClient.Resource(workspaceGVR).Namespace(testNamespace).Get(ctx, "ws-mig", metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("failed to get Workspace: %v", err)
+		// Once PodMigrationJob reaches Succeeded, reconcileActive deletes the consumed psmt-* snapshot.
+		_ = unstructured.SetNestedField(activeJob.Object, "Succeeded", "status", "phase")
+		if _, err := dynamicClient.Resource(podMigrationJobGVR).Namespace(testNamespace).Update(ctx, activeJob, metav1.UpdateOptions{}); err != nil {
+			t.Fatalf("failed to update PodMigrationJob: %v", err)
 		}
-		paused, _, _ := unstructured.NestedBool(updatedWS.Object, "spec", "paused")
-		if !paused {
-			t.Fatal("expected Workspace to be paused after adopting migration snapshot")
+		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
+			t.Fatalf("reconcile failed: %v", err)
 		}
-		if got := updatedWS.GetAnnotations()[AnnotationLastCheckpointName]; got != "ps-from-migration" {
-			t.Fatalf("expected AnnotationLastCheckpointName=%q, got %q", "ps-from-migration", got)
-		}
-		if got := updatedWS.GetAnnotations()[AnnotationCheckpointState]; got != CheckpointStateReady {
-			t.Fatalf("expected AnnotationCheckpointState=%q, got %q", CheckpointStateReady, got)
-		}
-		assertDeleted(t, dynamicClient.Actions(), podMigrationJobGVR, true)
-
-		// Now simulate resuming the Workspace and its restored Pod becoming Ready:
-		// reconcileActive must retire the adopted psmt-* snapshot as well.
-		resumedWS := workspace("ws-mig", map[string]any{
-			AnnotationEnabled:             "true",
-			AnnotationPodMigrationEnabled: "true",
-			AnnotationCheckpointState:     CheckpointStateRestoring,
-			AnnotationLastCheckpointName:  "ps-from-migration",
-		}, false)
-		resumedPod := runningPod("ws-ws-mig-abcde-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
-		resumedPod.Labels[AnnotationPodMigrationEnabled] = "true"
-		controller2, _, dynamicClient2 := newTestController(t, resumedWS, resumedPod, readyPM, migrationSnap)
-		if _, err := controller2.reconcileWorkspace(ctx, key); err != nil {
-			t.Fatalf("resume reconcile failed: %v", err)
-		}
-		if _, err := dynamicClient2.Resource(podSnapshotGVR).Namespace(testNamespace).Get(ctx, "ps-from-migration", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-			t.Fatalf("expected adopted migration PodSnapshot to be deleted after resume, got err=%v", err)
+		if _, err := dynamicClient.Resource(podSnapshotGVR).Namespace(testNamespace).Get(ctx, "ps-from-migration", metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("expected consumed psmt-* PodSnapshot to be deleted after migration Succeeded, got err=%v", err)
 		}
 	})
 
-	t.Run("Case C: waits for in-flight PodMigrationJob instead of creating competing manual trigger", func(t *testing.T) {
+	t.Run("mutatePod injects pod-migration.gke.io/enabled on replacement Pod when PodMigration is terminating but Workspace has active PodMigrationJob", func(t *testing.T) {
 		ws := workspace("ws-mig", map[string]any{
 			AnnotationEnabled:             "true",
 			AnnotationPodMigrationEnabled: "true",
-			AnnotationCheckpointState:     CheckpointStateCheckpointing,
-			AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z",
 		}, false)
-		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
-		pod.Labels[AnnotationPodMigrationEnabled] = "true"
-		inFlightJob := &unstructured.Unstructured{Object: map[string]any{
+		terminatingPM := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": podmigrationGroupVersion,
-			"kind":       "PodMigrationJob",
-			"metadata":   map[string]any{"name": "pmj-ws-mig-inflight", "namespace": testNamespace},
-			"spec": map[string]any{
-				"podRef":       map[string]any{"name": "ws-mig-0"},
-				"targetPodUID": "uid-ws-mig-0",
-			},
-			"status": map[string]any{
-				"phase": "Snapshotting",
-			},
-		}}
-		controller, coreClient, dynamicClient := newTestController(t, ws, pod, readyPM, inFlightJob)
-		controller.settle = 0
-
-		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
-			t.Fatalf("reconcile failed: %v", err)
-		}
-		if _, err := dynamicClient.Resource(podSnapshotManualTriggerGVR).Namespace(testNamespace).
-			Get(ctx, triggerNameFor("ws-mig"), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
-			t.Fatalf("must not create competing ws-mig-trigger while PodMigrationJob is Snapshotting, got err=%v", err)
-		}
-		updatedPod, err := coreClient.CoreV1().Pods(testNamespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("failed to get Pod: %v", err)
-		}
-		if status, _ := podConditionStatus(updatedPod, ReadinessGateConditionType); status != corev1.ConditionFalse {
-			t.Fatalf("expected readinessGate to be flipped to False while waiting for PodMigrationJob, got %v", status)
-		}
-	})
-
-	t.Run("F1: does not adopt stale psmt-* PodSnapshot from earlier completed migration when new PodMigrationJob is Snapshotting", func(t *testing.T) {
-		ws := workspace("ws-mig", map[string]any{
-			AnnotationEnabled:             "true",
-			AnnotationPodMigrationEnabled: "true",
-			AnnotationCheckpointState:     CheckpointStateCheckpointing,
-			AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z",
-		}, false)
-		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
-		pod.Labels[AnnotationPodMigrationEnabled] = "true"
-		staleMigrationSnap := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": podsnapshotGroupVersion,
-			"kind":       "PodSnapshot",
+			"kind":       "PodMigration",
 			"metadata": map[string]any{
-				"name":      "ps-stale-old-migration",
-				"namespace": testNamespace,
-				"labels":    map[string]any{LabelSnapshotTriggeredBy: "psmt-ws-mig-0-olduid12"},
+				"name":              DefaultPodMigrationName,
+				"namespace":         testNamespace,
+				"deletionTimestamp": "2026-01-01T00:00:00Z",
 			},
-			"status": map[string]any{
-				"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-			},
-		}}
-		newJob := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": podmigrationGroupVersion,
-			"kind":       "PodMigrationJob",
-			"metadata":   map[string]any{"name": "pmj-ws-mig-new", "namespace": testNamespace},
 			"spec": map[string]any{
-				"podRef":       map[string]any{"name": "ws-mig-0"},
-				"targetPodUID": "newuid99-1111-2222-3333-444444444444",
-			},
-			"status": map[string]any{
-				"phase": "Snapshotting",
+				"storage": map[string]any{"location": "gs://test-bucket/kubeflow-notebooks"},
 			},
 		}}
-		controller, _, dynamicClient := newTestController(t, ws, pod, readyPM, staleMigrationSnap, newJob)
-		controller.settle = 0
-
-		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
-			t.Fatalf("reconcile failed: %v", err)
-		}
-		updatedWS, err := dynamicClient.Resource(workspaceGVR).Namespace(testNamespace).Get(ctx, "ws-mig", metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("failed to get Workspace: %v", err)
-		}
-		if paused, _, _ := unstructured.NestedBool(updatedWS.Object, "spec", "paused"); paused {
-			t.Fatal("must not adopt stale psmt-* PodSnapshot from an earlier migration")
-		}
-	})
-
-	t.Run("F2: mutateWorkspace holds pause when Pod is Pending/Restoring under active PodMigrationJob", func(t *testing.T) {
-		oldWS := workspace("ws-mig", map[string]any{
-			AnnotationEnabled:             "true",
-			AnnotationPodMigrationEnabled: "true",
-		}, false)
-		newWS := workspace("ws-mig", map[string]any{
-			AnnotationEnabled:             "true",
-			AnnotationPodMigrationEnabled: "true",
-		}, true)
-		pendingPod := &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "ws-mig-0",
-				Namespace: testNamespace,
-				Labels:    map[string]string{WorkspaceLabel: "ws-mig", AnnotationPodMigrationEnabled: "true"},
-			},
-			Status: corev1.PodStatus{Phase: corev1.PodPending},
-		}
 		activeJob := &unstructured.Unstructured{Object: map[string]any{
 			"apiVersion": podmigrationGroupVersion,
 			"kind":       "PodMigrationJob",
@@ -1482,85 +1558,40 @@ func TestReconcileCheckpointingCoexistsWithActivePodMigrationJob(t *testing.T) {
 				"targetPodUID": "12345678-1111-2222-3333-444444444444",
 			},
 			"status": map[string]any{
-				"phase":       "Restoring",
-				"snapshotRef": "ps-from-migration",
+				"phase": "Restoring",
 			},
 		}}
-		controller, _, _ := newTestController(t, oldWS, pendingPod, readyPM, activeJob)
-		oldRaw, _ := json.Marshal(oldWS)
-		newRaw, _ := json.Marshal(newWS)
-		response := controller.mutateWorkspace(ctx, &admissionv1.AdmissionRequest{
-			Operation: admissionv1.Update,
+		newPod := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ws-mig-0",
+				Namespace: testNamespace,
+				Labels:    map[string]string{WorkspaceLabel: "ws-mig"},
+			},
+		}
+
+		// With an active PodMigrationJob for ws-mig, the replacement Pod must receive pod-migration.gke.io/enabled=true
+		// so pod-migration's replacement webhook can inject the PodSnapshotRestoreClaim.
+		controller, _, _ := newTestController(t, ws, terminatingPM, activeJob)
+		rawPod, _ := json.Marshal(newPod)
+		resp := controller.mutatePod(ctx, &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
 			Namespace: testNamespace,
-			OldObject: runtime.RawExtension{Raw: oldRaw},
-			Object:    runtime.RawExtension{Raw: newRaw},
+			Object:    runtime.RawExtension{Raw: rawPod},
 		})
-		if !response.Allowed || len(response.Patch) == 0 {
-			t.Fatalf("expected mutateWorkspace to hold spec.paused=false while active PodMigrationJob is Restoring, got allowed=%v patch=%s", response.Allowed, response.Patch)
+		if !resp.Allowed || !strings.Contains(string(resp.Patch), AnnotationPodMigrationEnabled) {
+			t.Fatalf("expected mutatePod to inject pod-migration.gke.io/enabled when active PodMigrationJob exists during PodMigration deletion deferral, got patch=%s", resp.Patch)
 		}
-	})
 
-	t.Run("F3: existing ws-trigger completes even if a PodMigrationJob is created afterward", func(t *testing.T) {
-		ws := workspace("ws-mig", map[string]any{
-			AnnotationEnabled:             "true",
-			AnnotationPodMigrationEnabled: "true",
-			AnnotationCheckpointState:     CheckpointStateCheckpointing,
-			AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z",
-		}, false)
-		pod := runningPod("ws-mig-0", "ws-mig", corev1.ConditionTrue, corev1.ConditionTrue)
-		pod.Labels[AnnotationPodMigrationEnabled] = "true"
-		existingTrigger := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": podsnapshotGroupVersion,
-			"kind":       "PodSnapshotManualTrigger",
-			"metadata": map[string]any{
-				"name":        triggerNameFor("ws-mig"),
-				"namespace":   testNamespace,
-				"annotations": map[string]any{AnnotationCheckpointStartedAt: "2026-01-01T00:00:00Z"},
-			},
-			"status": map[string]any{
-				"snapshotCreated": map[string]any{"name": "ps-ws-trigger"},
-			},
-		}}
-		readySnap := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": podsnapshotGroupVersion,
-			"kind":       "PodSnapshot",
-			"metadata": map[string]any{
-				"name":      "ps-ws-trigger",
-				"namespace": testNamespace,
-				"labels":    map[string]any{LabelSnapshotTriggeredBy: triggerNameFor("ws-mig")},
-			},
-			"status": map[string]any{
-				"conditions": []any{map[string]any{"type": "Ready", "status": "True"}},
-			},
-		}}
-		lateJob := &unstructured.Unstructured{Object: map[string]any{
-			"apiVersion": podmigrationGroupVersion,
-			"kind":       "PodMigrationJob",
-			"metadata":   map[string]any{"name": "pmj-late", "namespace": testNamespace},
-			"spec": map[string]any{
-				"podRef": map[string]any{"name": "ws-mig-0"},
-			},
-			"status": map[string]any{
-				"phase": "Pending",
-			},
-		}}
-		controller, _, dynamicClient := newTestController(t, ws, pod, readyPM, existingTrigger, readySnap, lateJob)
-		controller.settle = 0
-
-		if _, err := controller.reconcileWorkspace(ctx, key); err != nil {
-			t.Fatalf("reconcile failed: %v", err)
+		// Without an active PodMigrationJob, a terminating PodMigration skips injecting pod-migration.gke.io/enabled.
+		controllerNoJob, _, _ := newTestController(t, ws, terminatingPM)
+		respNoJob := controllerNoJob.mutatePod(ctx, &admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Namespace: testNamespace,
+			Object:    runtime.RawExtension{Raw: rawPod},
+		})
+		if !respNoJob.Allowed || strings.Contains(string(respNoJob.Patch), AnnotationPodMigrationEnabled) {
+			t.Fatalf("expected mutatePod to skip pod-migration.gke.io/enabled when PodMigration is terminating and no active PodMigrationJob exists, got patch=%s", respNoJob.Patch)
 		}
-		updatedWS, err := dynamicClient.Resource(workspaceGVR).Namespace(testNamespace).Get(ctx, "ws-mig", metav1.GetOptions{})
-		if err != nil {
-			t.Fatalf("failed to get Workspace: %v", err)
-		}
-		if paused, _, _ := unstructured.NestedBool(updatedWS.Object, "spec", "paused"); !paused {
-			t.Fatal("expected Workspace to complete pause via existing ws-trigger")
-		}
-		if got := updatedWS.GetAnnotations()[AnnotationLastCheckpointName]; got != "ps-ws-trigger" {
-			t.Fatalf("expected AnnotationLastCheckpointName=%q, got %q", "ps-ws-trigger", got)
-		}
-		assertDeleted(t, dynamicClient.Actions(), podMigrationJobGVR, true)
 	})
 
 	t.Run("F4: workspaceMatchesPodName short-circuits on live Pod and guards against 45-char StatefulSet prefix collisions", func(t *testing.T) {

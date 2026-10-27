@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -148,6 +149,18 @@ func allow() *admissionv1.AdmissionResponse {
 	return &admissionv1.AdmissionResponse{Allowed: true}
 }
 
+func denyInvalid(message string) *admissionv1.AdmissionResponse {
+	return &admissionv1.AdmissionResponse{
+		Allowed: false,
+		Result: &metav1.Status{
+			Status:  metav1.StatusFailure,
+			Code:    http.StatusUnprocessableEntity,
+			Reason:  metav1.StatusReasonInvalid,
+			Message: message,
+		},
+	}
+}
+
 func allowWithPatch(patches []jsonPatchOp) *admissionv1.AdmissionResponse {
 	if len(patches) == 0 {
 		return allow()
@@ -213,24 +226,21 @@ func (c *Controller) mutateWorkspace(ctx context.Context, request *admissionv1.A
 			return allow()
 		}
 		pod := c.findWorkspacePod(ctx, namespace, name)
-		podRunning := pod != nil && pod.Status.Phase == corev1.PodRunning && pod.DeletionTimestamp == nil
-		if !podRunning {
-			activeJob, jobSnapshotName, err := c.activeWorkspacePodMigrationJob(ctx, &updated, pod)
-			if err == nil && activeJob == nil && jobSnapshotName == "" {
-				logf("webhook", "Workspace %s/%s has no running Pod; allowing spec.paused=true immediately", namespace, name)
-				return allow()
-			}
+		activeJob, err := c.activeWorkspacePodMigrationJob(ctx, &updated, pod)
+		if err == nil && (activeJob != nil || (pod != nil && pod.Labels[LabelPodMigrationFenced] == "true")) {
+			logf("webhook", "Rejecting pause on Workspace %s/%s: Pod migration is in progress", namespace, name)
+			return denyInvalid(fmt.Sprintf("cannot pause Workspace %s/%s while Pod migration is in progress", namespace, name))
+		}
+		if pod == nil || pod.Status.Phase != corev1.PodRunning || pod.DeletionTimestamp != nil {
+			logf("webhook", "Workspace %s/%s has no running Pod; allowing spec.paused=true immediately", namespace, name)
+			return allow()
 		}
 
-		if podRunning {
-			logf("webhook", "Intercepting pause on Workspace %s/%s (pod %s): holding spec.paused=false while GKE takes a PodSnapshot", namespace, name, pod.Name)
-			// Drop the Pod out of the Service EndpointSlice now so the browser session is
-			// cut immediately rather than one watch round-trip later.
-			if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
-				logf("webhook", "Warning: failed to update Pod readinessGate on %s/%s: %v", namespace, pod.Name, err)
-			}
-		} else {
-			logf("webhook", "Intercepting pause on Workspace %s/%s with active PodMigrationJob: holding spec.paused=false to adopt migration snapshot", namespace, name)
+		logf("webhook", "Intercepting pause on Workspace %s/%s (pod %s): holding spec.paused=false while GKE takes a PodSnapshot", namespace, name, pod.Name)
+		// Drop the Pod out of the Service EndpointSlice now so the browser session is
+		// cut immediately rather than one watch round-trip later.
+		if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
+			logf("webhook", "Warning: failed to update Pod readinessGate on %s/%s: %v", namespace, pod.Name, err)
 		}
 
 		annotations[AnnotationCheckpointState] = CheckpointStateCheckpointing
@@ -367,7 +377,7 @@ func (c *Controller) mutatePod(ctx context.Context, request *admissionv1.Admissi
 	if c.migrationEnabled(ctx, workspace) &&
 		(c.discovery == nil || c.podMigrationReady.Load()) &&
 		!c.hasLegacyWorkspacePolicy(ctx, namespace, workspaceName) &&
-		!c.hasTerminatingPodMigration(ctx, namespace) &&
+		!c.shouldSkipPodMigrationLabelOnCreate(ctx, workspace, &pod) &&
 		pod.Labels[AnnotationPodMigrationEnabled] != "true" {
 		labels := pod.Labels
 		if labels == nil {
@@ -396,15 +406,32 @@ func (c *Controller) hasLegacyWorkspacePolicy(ctx context.Context, namespace, wo
 	return err == nil
 }
 
-func (c *Controller) hasTerminatingPodMigration(ctx context.Context, namespace string) bool {
+// shouldSkipPodMigrationLabelOnCreate reports whether a PodMigration in the
+// namespace is terminating without any active Ready PodMigration or in-flight
+// PodMigrationJob for this Workspace. When an in-flight PodMigrationJob is
+// migrating this Workspace during PodMigration deletion deferral, the replacement
+// Pod must still receive pod-migration.gke.io/enabled="true" so mpodgate can
+// gate and restore it.
+func (c *Controller) shouldSkipPodMigrationLabelOnCreate(ctx context.Context, workspace *unstructured.Unstructured, pod *corev1.Pod) bool {
+	namespace := workspace.GetNamespace()
 	migrations, err := c.listPodMigrations(ctx, namespace)
 	if err != nil {
 		return false
 	}
+	hasTerminating := false
+	hasReadyLive := false
 	for _, item := range migrations {
 		if item.GetDeletionTimestamp() != nil {
-			return true
+			hasTerminating = true
+			continue
+		}
+		if conditionTrue(item, "Ready") {
+			hasReadyLive = true
 		}
 	}
-	return false
+	if !hasTerminating || hasReadyLive {
+		return false
+	}
+	activeJob, _ := c.activeWorkspacePodMigrationJob(ctx, workspace, pod)
+	return activeJob == nil
 }
