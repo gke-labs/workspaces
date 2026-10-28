@@ -196,6 +196,7 @@ export TAG="pilot-$(date -u +%Y%m%d%H%M%S)"
 export BUILD_IMAGES="true"                        # Build & push the five core platform images
 export INSTALL_TRAINER="true"
 export INSTALL_SPARK_OPERATOR="true"
+export INSTALL_POD_MIGRATION="false"              # Optional: Deploy GKE Pod Migration Controller
 export APPLY_SAMPLE_WORKSPACEKIND="true"
 export SAMPLE_WORKSPACEKINDS="${REPO_ROOT}/images/workspacekinds/jupyterlab.yaml ${REPO_ROOT}/images/workspacekinds/codeserver-python.yaml"
 export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket" # Injected into Workspace Pods as $GCS_BUCKET (not created by the script)
@@ -228,6 +229,9 @@ Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its 
 | `IAP_SECRET_NAME` | *(empty)* | Kubernetes Secret holding the OAuth client secret. Defaults to `iap-oauth` when `OAUTH_FILE` is set. |
 | `INSTALL_TRAINER` | `true` | Deploy Kubeflow Trainer (v2). |
 | `INSTALL_SPARK_OPERATOR` | `true` | Deploy Kubeflow Spark Operator. |
+| `INSTALL_POD_MIGRATION` | `false` | Optional: Deploy the GKE Pod Migration Controller ([`gke-labs/pod-migration`](https://github.com/gke-labs/pod-migration)) for zero-downtime live node drain and preemptible/spot eviction protection. |
+| `POD_MIGRATION_DIR` | `/tmp/gke-pod-migration` | Local clone of `gke-labs/pod-migration` when `INSTALL_POD_MIGRATION=true`. |
+| `POD_MIGRATION_IMAGE` | `${REGISTRY}/pod-migration-controller:${TAG}` | Destination image for `pod-migration-controller` when `INSTALL_POD_MIGRATION=true`. |
 | `BUILD_IMAGES` | `true` | Build & push the five core platform images (Section 3). |
 | `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the example `jupyterlab` and `codeserver` WorkspaceKinds (upstream base images) after tenant RBAC is applied. |
 | `SAMPLE_WORKSPACEKINDS` | `<repo-root>/images/workspacekinds/jupyterlab.yaml <repo-root>/images/workspacekinds/codeserver-python.yaml` | Space-separated WorkspaceKind templates rendered by [`scripts/render_workspacekinds.py`](scripts/render_workspacekinds.py) when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
@@ -1117,6 +1121,26 @@ When a Pod is created for a snapshot-enabled `Workspace`, the `POST /mutate-pod`
 > - **In-Browser VS Code (`codeserver`) & Other Workspaces (Stateless Pause & Resume)**: For the in-browser `codeserver` WorkspaceKind or other workspace kinds, pause and resume is stateless: pausing scales down the Pod to release compute resources, and resuming starts a fresh Pod. All files and custom Conda environments located on the persistent home volume (`/home/jovyan`) are preserved, but in-memory process execution state and live notebook variables are not saved across restarts. *(This is about VS Code running **in the cluster**. Desktop VS Code connecting to a remote kernel is [Section 8](#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint), a separate feature.)*
 > - **Not every process survives**: the checkpoint captures the container's init process tree, so notebook kernels and processes you started from a JupyterLab terminal come back. Processes you started with `kubectl exec ... &` are **not** restored — see [What survives a pause](../../examples/resumable-notebooks/README.md#what-survives-a-pause-and-what-does-not).
 > - For in-depth technical analysis, gVisor CRIU constraints, and pilot records, see [docs/gke-pilot-codelab.md](../../docs/gke-pilot-codelab.md).
+
+### Step 7.5b: Live Pod Migration Opt-In (`pod-migration.gke.io/enabled`)
+
+When the GKE Pod Migration Controller (`INSTALL_POD_MIGRATION=true` in `deploy_standalone.sh`) is installed on the cluster, a resumable `Workspace` (or `WorkspaceKind`) can opt into **both** UI/CLI Pause/Resume (`spec.paused: true/false`) **and** live node-drain migration (`kubectl drain` / `PodMigrationJob`) by adding the `pod-migration.gke.io/enabled: "true"` annotation:
+
+```yaml
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: my-notebook
+  namespace: team-a
+  annotations:
+    snapshot.workspaces.gke.io/enabled: "true"
+    pod-migration.gke.io/enabled: "true"
+```
+
+When `pod-migration.gke.io/enabled: "true"` is set:
+1. **Pod Admission**: `gke-workspace-snapshot-addon` (`POST /mutate-pod`) automatically injects the label `pod-migration.gke.io/enabled: "true"` onto the Workspace `Pod` at creation time (satisfying tenant `ValidatingAdmissionPolicy` rules that disallow user-supplied `podTemplate.podMetadata.labels`).
+2. **Single Namespace Policy Ownership & Storage Bridging**: `gke-workspace-snapshot-addon` reconciles a singleton `PodMigration` CR (`kubeflow-pod-migration`) in `${TENANT_NAMESPACE}` (bridging `snapshot.workspaces.gke.io/storage-config` into `PodMigration.spec.storage.location` or defaulting to `gs://${SNAPSHOT_GCS_BUCKET}/kubeflow-notebooks`) instead of creating a conflicting per-Workspace `PodSnapshotPolicy`. Both UI Pause/Resume and live node-drain migrations share the single `PodSnapshotPolicy` (`psp-kubeflow-pod-migration-manual`) managed by `pod-migration-controller`.
+3. **Mutual Exclusion & Consumed Migration Snapshot Cleanup**: While a live migration (`PodMigrationJob`) is active or the Pod is fenced (`pod-migration.gke.io/fenced: "true"`), the Workspace transitions to `"Mutating"` and UI Pause requests (`spec.paused: true`) are rejected with `409 Conflict`. Conversely, while UI Pause is checkpointing (`snapshot.workspaces.gke.io/active: False`), `pod-migration` skips starting a new `PodMigrationJob`. Once a migrated Pod restores and becomes `Ready=True`, consumed `psmt-*` migration `PodSnapshot`s are automatically garbage-collected.
 
 ### Step 7.6: Package Management & Persistence Across Restarts
 
