@@ -48,7 +48,7 @@ func (c *Controller) reconcileWorkspace(ctx context.Context, key types.Namespace
 		return 0, c.ensurePodMigrationLabel(ctx, workspace.GetNamespace(), workspace.GetName(), false)
 	}
 
-	namespace, name := workspace.GetNamespace(), workspace.GetName()
+	namespace := workspace.GetNamespace()
 	if err := c.ensureIPCConfigMap(ctx, namespace); err != nil {
 		return 0, fmt.Errorf("ensure ConfigMap %s/%s: %w", namespace, IPCConfigMapName, err)
 	}
@@ -65,11 +65,9 @@ func (c *Controller) reconcileWorkspace(ctx context.Context, key types.Namespace
 		return c.reconcileCheckpointing(ctx, workspace)
 	}
 	if paused {
-		// Paused with a saved checkpoint: retire any straggling PodMigrationJob for
-		// this Workspace (cache-backed no-op in steady state) and wait for resume.
-		return 0, c.retireWorkspacePodMigrationJobs(ctx, workspace, nil)
+		return 0, nil
 	}
-	return 0, c.reconcileActive(ctx, namespace, name, checkpointState, lastCheckpoint)
+	return 0, c.reconcileActive(ctx, workspace, checkpointState, lastCheckpoint)
 }
 
 // reconcileCheckpointing runs while the user asked for a pause and spec.paused is
@@ -79,64 +77,24 @@ func (c *Controller) reconcileCheckpointing(ctx context.Context, workspace *unst
 	annotations := workspace.GetAnnotations()
 
 	pod := c.findWorkspacePod(ctx, namespace, name)
-	activeJob, jobSnapshotName, err := c.activeWorkspacePodMigrationJob(ctx, workspace, pod)
-	if err != nil {
-		return 0, err
-	}
 	podRunning := pod != nil && pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning
-	if !podRunning && activeJob != nil && jobSnapshotName == "" {
-		// Close any watch-stream ordering gap where podInformer observed Pod eviction
-		// slightly before snapshotInformer/jobInformer observed the Ready snapshot.
-		jobSnapshotName, err = c.readyMigrationJobSnapshot(ctx, namespace, activeJob, true)
-		if err != nil {
-			return 0, err
+	if podRunning {
+		// Keep the Pod out of the Service EndpointSlice for the whole checkpoint.
+		if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
+			return 0, fmt.Errorf("flip readinessGate on %s/%s: %w", namespace, pod.Name, err)
 		}
-	}
-	if jobSnapshotName != "" {
-		logf("reconciler", "Adopting Ready PodSnapshot %s/%s from active PodMigrationJob %s; completing pause for Workspace %s",
-			namespace, jobSnapshotName, activeJob.GetName(), name)
-		if err := c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
-			AnnotationLastCheckpointName:  jobSnapshotName,
-			AnnotationCheckpointState:     CheckpointStateReady,
-			AnnotationCheckpointStartedAt: nil,
-		}); err != nil {
-			return 0, err
-		}
-		if err := c.dynamic.Resource(podSnapshotManualTriggerGVR).Namespace(namespace).Delete(ctx, triggerNameFor(name), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return 0, err
-		}
-		return 0, c.retireWorkspacePodMigrationJobs(ctx, workspace, pod)
-	}
-
-	if !podRunning {
-		// Any Ready snapshot from an active PodMigrationJob was already checked
-		// (including via live API reads above). With no running Pod left to
-		// checkpoint, complete the pause and retire any in-flight PodMigrationJob.
-		logf("reconciler", "Workspace %s/%s has no Pod to checkpoint; completing pause", namespace, name)
-		if err := c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
-			AnnotationCheckpointState:     CheckpointStateReady,
-			AnnotationCheckpointStartedAt: nil,
-		}); err != nil {
-			return 0, err
-		}
-		return 0, c.retireWorkspacePodMigrationJobs(ctx, workspace, pod)
-	}
-
-	// Keep the Pod out of the Service EndpointSlice for the whole checkpoint.
-	if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionFalse, "CheckpointingInProgress", "Pausing: taking GKE PodSnapshot"); err != nil {
-		return 0, fmt.Errorf("flip readinessGate on %s/%s: %w", namespace, pod.Name, err)
 	}
 
 	triggerName := triggerNameFor(name)
 	trigger, err := c.getResource(ctx, podSnapshotManualTriggerGVR, c.triggerLister, namespace, triggerName)
 	switch {
 	case apierrors.IsNotFound(err):
-		if activeJob != nil {
-			// An active PodMigrationJob is already checkpointing this Pod via its own
-			// PodSnapshotManualTrigger. Wait for its snapshot to become Ready rather than
-			// creating a second PodSnapshotManualTrigger against the same Pod.
-			logf("reconciler", "Workspace %s/%s has active PodMigrationJob %s; waiting for its PodSnapshot", namespace, name, activeJob.GetName())
-			return 0, nil
+		if !podRunning {
+			logf("reconciler", "Workspace %s/%s has no Pod to checkpoint; completing pause", namespace, name)
+			return 0, c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
+				AnnotationCheckpointState:     CheckpointStateReady,
+				AnnotationCheckpointStartedAt: nil,
+			})
 		}
 		startedAt, hasStart := parseCheckpointStart(annotations[AnnotationCheckpointStartedAt])
 		if hasStart {
@@ -163,6 +121,13 @@ func (c *Controller) reconcileCheckpointing(ctx context.Context, workspace *unst
 
 	snapshotName, _, _ := unstructured.NestedString(trigger.Object, "status", "snapshotCreated", "name")
 	if snapshotName == "" {
+		if !podRunning {
+			logf("reconciler", "Workspace %s/%s Pod stopped before trigger %s produced a PodSnapshot; completing pause", namespace, name, triggerName)
+			return 0, c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
+				AnnotationCheckpointState:     CheckpointStateReady,
+				AnnotationCheckpointStartedAt: nil,
+			})
+		}
 		// Waiting for the GKE controller; the trigger watch wakes us up.
 		return 0, nil
 	}
@@ -183,19 +148,17 @@ func (c *Controller) reconcileCheckpointing(ctx context.Context, workspace *unst
 	}
 
 	logf("reconciler", "PodSnapshot %s/%s is Ready; completing pause for Workspace %s", namespace, snapshotName, name)
-	if err := c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
+	return 0, c.patchWorkspacePauseAndAnnotations(ctx, namespace, name, true, map[string]any{
 		AnnotationLastCheckpointName:  snapshotName,
 		AnnotationCheckpointState:     CheckpointStateReady,
 		AnnotationCheckpointStartedAt: nil,
-	}); err != nil {
-		return 0, err
-	}
-	return 0, c.retireWorkspacePodMigrationJobs(ctx, workspace, pod)
+	})
 }
 
 // reconcileActive runs while the Workspace is meant to be serving. It publishes the
 // readiness gate and, once a restored Pod is Ready, retires the consumed snapshot.
-func (c *Controller) reconcileActive(ctx context.Context, namespace, name, checkpointState, lastCheckpoint string) error {
+func (c *Controller) reconcileActive(ctx context.Context, workspace *unstructured.Unstructured, checkpointState, lastCheckpoint string) error {
+	namespace, name := workspace.GetNamespace(), workspace.GetName()
 	pod := c.findWorkspacePod(ctx, namespace, name)
 	if pod == nil || pod.DeletionTimestamp != nil {
 		return nil
@@ -206,18 +169,26 @@ func (c *Controller) reconcileActive(ctx context.Context, namespace, name, check
 	if err := c.setPodActiveCondition(ctx, pod, corev1.ConditionTrue, "WorkspaceActive", "Workspace pod is active"); err != nil {
 		return fmt.Errorf("publish readinessGate on %s/%s: %w", namespace, pod.Name, err)
 	}
-	if lastCheckpoint == "" && checkpointState == "" {
-		return nil
-	}
 	if !isPodReady(pod) {
 		// The Pod becoming Ready produces another event; no polling required.
 		return nil
 	}
+	if lastCheckpoint == "" && checkpointState == "" {
+		// If a live migration completed while the Workspace was active, retire any
+		// consumed psmt-* PodSnapshots once no PodMigrationJob is active.
+		draining, err := c.drainingWorkspaceSnapshots(ctx, namespace, name)
+		if err != nil || len(draining) == 0 || allTerminating(draining) {
+			return err
+		}
+		activeJob, err := c.activeWorkspacePodMigrationJob(ctx, workspace, pod)
+		if err != nil || activeJob != nil {
+			return err
+		}
+		logf("reconciler", "Workspace %s/%s is active and Ready with no in-flight migration; retiring consumed PodSnapshots", namespace, name)
+		return c.deleteWorkspaceSnapshots(ctx, namespace, name)
+	}
 
 	logf("reconciler", "Workspace %s/%s restored and Ready; retiring PodSnapshot %q", namespace, name, lastCheckpoint)
-	// Delete by label rather than by name so a snapshot left behind by an interrupted
-	// earlier cycle is collected too, and also delete lastCheckpoint explicitly in
-	// case it was adopted from a PodMigrationJob trigger (psmt-*).
 	if err := c.deleteWorkspaceSnapshots(ctx, namespace, name); err != nil {
 		return err
 	}
@@ -378,158 +349,19 @@ func isTerminalPodMigrationJobPhase(phase string) bool {
 	}
 }
 
-// migrationTriggerNameForJob returns the deterministic PodSnapshotManualTrigger
-// name ("psmt-<podRef.name>-<shortUID>") created by pod-migration-controller for
-// job, or "" if the job does not carry spec.targetPodUID.
-func migrationTriggerNameForJob(job *unstructured.Unstructured) string {
-	if job == nil {
-		return ""
-	}
-	podName, _, _ := unstructured.NestedString(job.Object, "spec", "podRef", "name")
-	targetUID, _, _ := unstructured.NestedString(job.Object, "spec", "targetPodUID")
-	if podName == "" || targetUID == "" {
-		return ""
-	}
-	shortUID := targetUID
-	if len(shortUID) > 8 {
-		shortUID = shortUID[:8]
-	}
-	return fmt.Sprintf("psmt-%s-%s", podName, shortUID)
-}
-
-// readyMigrationJobSnapshot returns the Ready PodSnapshot produced for job (if
-// any), checking both job.status.snapshotRef and the job's deterministic
-// psmt-<podName>-<shortUID> trigger so a stale PodSnapshot from an earlier
-// migration of the same Workspace is never mistaken for the active job's snapshot.
-func (c *Controller) readyMigrationJobSnapshot(ctx context.Context, namespace string, job *unstructured.Unstructured, live bool) (string, error) {
-	if job == nil {
-		return "", nil
-	}
-	snapshotName, _, _ := unstructured.NestedString(job.Object, "status", "snapshotRef")
-	triggerName := migrationTriggerNameForJob(job)
-	if snapshotName == "" && triggerName != "" {
-		trigger, err := c.getResource(ctx, podSnapshotManualTriggerGVR, c.triggerLister, namespace, triggerName)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return "", err
-		}
-		if trigger != nil {
-			snapshotName, _, _ = unstructured.NestedString(trigger.Object, "status", "snapshotCreated", "name")
-		}
-		if snapshotName == "" && live {
-			liveTrigger, err := c.dynamic.Resource(podSnapshotManualTriggerGVR).Namespace(namespace).Get(ctx, triggerName, metav1.GetOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
-				return "", err
-			}
-			if liveTrigger != nil {
-				snapshotName, _, _ = unstructured.NestedString(liveTrigger.Object, "status", "snapshotCreated", "name")
-			}
-		}
-	}
-	if snapshotName != "" {
-		snapshot, err := c.getResource(ctx, podSnapshotGVR, c.snapshotLister, namespace, snapshotName)
-		if err != nil && !apierrors.IsNotFound(err) {
-			return "", err
-		}
-		if snapshot != nil && snapshot.GetDeletionTimestamp() == nil && conditionTrue(snapshot, "Ready") {
-			return snapshotName, nil
-		}
-		if live {
-			liveSnapshot, err := c.dynamic.Resource(podSnapshotGVR).Namespace(namespace).Get(ctx, snapshotName, metav1.GetOptions{})
-			if err != nil && !apierrors.IsNotFound(err) {
-				return "", err
-			}
-			if liveSnapshot != nil && liveSnapshot.GetDeletionTimestamp() == nil && conditionTrue(liveSnapshot, "Ready") {
-				return snapshotName, nil
-			}
-		}
-	}
-	if triggerName == "" {
-		return "", nil
-	}
-	snapshots, err := c.listNamespaceResources(ctx, podSnapshotGVR, c.snapshotLister, namespace)
-	if err != nil {
-		return "", err
-	}
-	for _, snapshot := range snapshots {
-		if snapshot.GetDeletionTimestamp() == nil &&
-			snapshot.GetLabels()[LabelSnapshotTriggeredBy] == triggerName &&
-			conditionTrue(snapshot, "Ready") {
-			return snapshot.GetName(), nil
-		}
-	}
-	if live && c.snapshotLister != nil {
-		list, err := c.dynamic.Resource(podSnapshotGVR).Namespace(namespace).List(ctx, metav1.ListOptions{
-			LabelSelector: fmt.Sprintf("%s=%s", LabelSnapshotTriggeredBy, triggerName),
-		})
-		if err != nil && !apierrors.IsNotFound(err) {
-			return "", err
-		}
-		if list != nil {
-			for i := range list.Items {
-				snapshot := &list.Items[i]
-				if snapshot.GetDeletionTimestamp() == nil && conditionTrue(snapshot, "Ready") {
-					return snapshot.GetName(), nil
-				}
-			}
-		}
-	}
-	return "", nil
-}
-
 // activeWorkspacePodMigrationJob returns any active (non-terminal, non-deleting)
-// PodMigrationJob targeting workspace's Pod, along with the name of its PodSnapshot
-// if that snapshot has already reached Ready=True.
-func (c *Controller) activeWorkspacePodMigrationJob(ctx context.Context, workspace *unstructured.Unstructured, pod *corev1.Pod) (*unstructured.Unstructured, string, error) {
+// PodMigrationJob targeting workspace's Pod.
+func (c *Controller) activeWorkspacePodMigrationJob(ctx context.Context, workspace *unstructured.Unstructured, pod *corev1.Pod) (*unstructured.Unstructured, error) {
 	if c.discovery != nil && !c.podMigrationReady.Load() {
-		return nil, "", nil
+		return nil, nil
 	}
 	namespace := workspace.GetNamespace()
 	jobs, err := c.listPodMigrationJobs(ctx, namespace)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return nil, "", nil
+			return nil, nil
 		}
-		return nil, "", err
-	}
-	var activeJob *unstructured.Unstructured
-	for _, job := range jobs {
-		if job.GetDeletionTimestamp() != nil {
-			continue
-		}
-		phase, _, _ := unstructured.NestedString(job.Object, "status", "phase")
-		if isTerminalPodMigrationJobPhase(phase) {
-			continue
-		}
-		podRefName, _, _ := unstructured.NestedString(job.Object, "spec", "podRef", "name")
-		if !c.workspaceMatchesPodName(ctx, workspace, pod, podRefName) {
-			continue
-		}
-		activeJob = job
-		snapshotName, err := c.readyMigrationJobSnapshot(ctx, namespace, job, false)
-		if err != nil {
-			return nil, "", err
-		}
-		if snapshotName != "" {
-			return job, snapshotName, nil
-		}
-	}
-	return activeJob, "", nil
-}
-
-// retireWorkspacePodMigrationJobs deletes any non-terminal PodMigrationJobs for
-// workspace when a stateful pause completes, so an in-flight migration job does
-// not remain in Restoring and intercept the Pod when the Workspace is resumed.
-func (c *Controller) retireWorkspacePodMigrationJobs(ctx context.Context, workspace *unstructured.Unstructured, pod *corev1.Pod) error {
-	if c.discovery != nil && !c.podMigrationReady.Load() {
-		return nil
-	}
-	namespace := workspace.GetNamespace()
-	jobs, err := c.listPodMigrationJobs(ctx, namespace)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		return err
+		return nil, err
 	}
 	for _, job := range jobs {
 		if job.GetDeletionTimestamp() != nil {
@@ -543,13 +375,9 @@ func (c *Controller) retireWorkspacePodMigrationJobs(ctx context.Context, worksp
 		if !c.workspaceMatchesPodName(ctx, workspace, pod, podRefName) {
 			continue
 		}
-		logf("reconciler", "Retiring active PodMigrationJob %s/%s on pause completion for Workspace %s",
-			namespace, job.GetName(), workspace.GetName())
-		if err := c.dynamic.Resource(podMigrationJobGVR).Namespace(namespace).Delete(ctx, job.GetName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
+		return job, nil
 	}
-	return nil
+	return nil, nil
 }
 
 func parseCheckpointStart(value string) (time.Time, bool) {
