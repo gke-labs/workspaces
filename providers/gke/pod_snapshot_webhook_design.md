@@ -111,6 +111,10 @@ When `pod-migration.gke.io/enabled: "true"` is set on a `Workspace` or on its `W
    - Any legacy `ws-<name>-policy` is retired once no unconsumed checkpoints depend on it and the `PodMigration` CR is `Ready=True`, and only after `ws-<name>-policy` is gone does the reconciler patch `pod-migration.gke.io/enabled: "true"` onto an already-running Workspace Pod so it never matches two policies simultaneously.
 3. **Bridging `snapshot.workspaces.gke.io/storage-config`**:
    - If the `Workspace` or `WorkspaceKind` sets `snapshot.workspaces.gke.io/storage-config: <name>`, `ensurePodMigration` reads that cluster-scoped `PodSnapshotStorageConfig`, extracts `spec.snapshotStorageConfig.gcs.{bucket,path}`, and sets `PodMigration.spec.storage.location` (`gs://<bucket>/<path>`), falling back to `gs://<default-bucket>/kubeflow-notebooks` when unset.
+4. **Mutual Exclusion with UI Pause & Consumed Snapshot Cleanup**:
+   - **Pause Rejection During Migration**: While a live migration (`PodMigrationJob`) is in progress or the Workspace Pod is fenced (`pod-migration.gke.io/fenced: "true"`), `mutateWorkspace` rejects UI/CLI pause requests (`spec.paused: true`) with HTTP 422 / 409 Conflict, preventing concurrent checkpoint collisions.
+   - **Migration Suppression During UI Checkpointing**: While a Workspace is actively checkpointing for pause (`checkpoint-state: "Checkpointing"`), the addon sets `snapshot.workspaces.gke.io/active: False`. The `pod-migration` controller detects this gate and skips starting a new `PodMigrationJob` for the Pod.
+   - **Automatic Cleanup of Consumed Migration Snapshots**: Once a migrated Pod restores and transitions to `Ready=True`, `reconcileActive` automatically removes consumed `psmt-*` migration `PodSnapshot` CRs as soon as no `PodMigrationJob` is active, preventing orphaned snapshot resources in the tenant namespace.
 
 ---
 

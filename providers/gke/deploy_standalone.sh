@@ -62,6 +62,10 @@ export IAP_SECRET_NAME="${IAP_SECRET_NAME:-}"
 # Optional: Deploy Kubeflow Trainer (v2) and Kubeflow Spark Operator
 export INSTALL_TRAINER="${INSTALL_TRAINER:-true}"
 export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
+# Optional: Deploy GKE Pod Migration Controller (gke-labs/pod-migration)
+export INSTALL_POD_MIGRATION="${INSTALL_POD_MIGRATION:-false}"
+export POD_MIGRATION_DIR="${POD_MIGRATION_DIR:-/tmp/gke-pod-migration}"
+export POD_MIGRATION_IMAGE="${POD_MIGRATION_IMAGE:-}"
 
 # Optional: Build standalone core images (access-proxy, snapshot-addon, frontend, controller, backend).
 # Custom workspace images (JupyterLab / VS Code / Spark) are NOT built here; see ../../images/build.sh.
@@ -151,6 +155,7 @@ echo "  SNAPSHOT_GCS_BUCKET: ${SNAPSHOT_GCS_BUCKET}"
 echo "  BUILD_IMAGES:        ${BUILD_IMAGES}"
 echo "  INSTALL_TRAINER:     ${INSTALL_TRAINER}"
 echo "  INSTALL_SPARK:       ${INSTALL_SPARK_OPERATOR}"
+echo "  INSTALL_MIGRATION:   ${INSTALL_POD_MIGRATION}"
 echo "  SAMPLE_WORKSPACEKIND:${APPLY_SAMPLE_WORKSPACEKIND}"
 echo "=================================================================="
 
@@ -654,6 +659,31 @@ if [[ "${INSTALL_TRAINER}" == "true" || "${INSTALL_SPARK_OPERATOR}" == "true" ]]
     kubectl --context="${CONTEXT}" rollout status deployment/spark-operator-controller -n kubeflow --timeout=180s
     kubectl --context="${CONTEXT}" rollout status deployment/spark-operator-webhook -n kubeflow --timeout=180s
   fi
+fi
+
+# ==============================================================================
+# Step 7b: Optional GKE Pod Migration Controller (gke-labs/pod-migration)
+# ==============================================================================
+if [[ "${INSTALL_POD_MIGRATION}" == "true" ]]; then
+  echo "=================================================================="
+  echo "Step 7b: Deploying GKE Pod Migration Controller..."
+  echo "=================================================================="
+  if [[ ! -d "${POD_MIGRATION_DIR}" ]]; then
+    git clone https://github.com/gke-labs/pod-migration.git "${POD_MIGRATION_DIR}"
+  fi
+  if [[ -z "${POD_MIGRATION_IMAGE}" ]]; then
+    POD_MIGRATION_IMAGE="${REGISTRY}/pod-migration-controller:${TAG}"
+    if [[ "${BUILD_IMAGES}" == "true" ]]; then
+      docker build --platform=linux/amd64 -t "${POD_MIGRATION_IMAGE}" "${POD_MIGRATION_DIR}/controller"
+      docker push "${POD_MIGRATION_IMAGE}"
+    fi
+  fi
+  sed -E "s|image: .*CONTROLLER_IMAGE.*|image: ${POD_MIGRATION_IMAGE}|g" \
+    "${POD_MIGRATION_DIR}/controller/deploy.yaml" | kubectl --context="${CONTEXT}" apply -f -
+  kubectl --context="${CONTEXT}" wait --for=condition=Established \
+    crd/podmigrations.podmigration.gke.io crd/podmigrationjobs.podmigration.gke.io --timeout=60s
+  kubectl --context="${CONTEXT}" -n pod-migration-system rollout status \
+    deployment/pod-migration-controller --timeout=180s
 fi
 
 # ==============================================================================

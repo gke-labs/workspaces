@@ -44,8 +44,10 @@ kubectl --context="${CONTEXT}" -n kubeflow-workspaces delete certificate gke-sna
 kubectl --context="${CONTEXT}" -n kubeflow-workspaces delete secret gke-snapshot-webhook-cert --ignore-not-found || true
 
 # 1. Remove tenant workloads and GKE Pod Snapshot resources
-echo "Deleting tenant workspaces, podsnapshots, trainjobs, sparkapplications, and deployments in ${TENANT_NAMESPACE}..."
+echo "Deleting tenant workspaces, podmigrations, podsnapshots, trainjobs, sparkapplications, and deployments in ${TENANT_NAMESPACE}..."
 kubectl --context="${CONTEXT}" delete workspaces --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podmigrationjobs.podmigration.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete podmigrations.podmigration.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete podsnapshotmanualtriggers.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete podsnapshots.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete podsnapshotpolicies.podsnapshot.gke.io --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
@@ -57,11 +59,15 @@ kubectl --context="${CONTEXT}" delete sparkapplications --all -n "${TENANT_NAMES
 kubectl --context="${CONTEXT}" delete deployment fashion-mnist-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete service fashion-mnist-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 
-# 2. Remove Kubeflow Spark Operator and Trainer
+# 2. Remove Kubeflow Spark Operator, Trainer, and optional Pod Migration Controller
 if [[ -d "${DIST_DIR}/applications" ]]; then
   echo "Removing Kubeflow Spark Operator and Kubeflow Trainer..."
   kubectl --context="${CONTEXT}" delete -k "${DIST_DIR}/applications/spark/spark-operator/overlays/kubeflow" --ignore-not-found || true
   kubectl --context="${CONTEXT}" delete -k "${DIST_DIR}/applications/trainer/overlays" --ignore-not-found || true
+fi
+if [[ -d "${POD_MIGRATION_DIR:-/tmp/gke-pod-migration}" ]]; then
+  echo "Removing GKE Pod Migration Controller..."
+  kubectl --context="${CONTEXT}" delete -f "${POD_MIGRATION_DIR:-/tmp/gke-pod-migration}/controller/deploy.yaml" --ignore-not-found || true
 fi
 
 # 3. Remove WorkspaceKinds and example ComputeClasses
