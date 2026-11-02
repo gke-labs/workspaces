@@ -31,6 +31,7 @@ interface WorkspaceFormPropertiesSelectionProps {
   isResourceNameEditing: boolean;
   onStartResourceNameEdit: () => void;
   onResourceNameChange: (value: string) => void;
+  workspaceName?: string;
 }
 
 const WorkspaceFormPropertiesSelection: React.FunctionComponent<
@@ -47,9 +48,12 @@ const WorkspaceFormPropertiesSelection: React.FunctionComponent<
   isResourceNameEditing,
   onStartResourceNameEdit,
   onResourceNameChange,
+  workspaceName,
 }) => {
-  const [isDataVolumesExpanded, setIsDataVolumesExpanded] = useState(false);
-  const [isSecretsExpanded, setIsSecretsExpanded] = useState(false);
+  const [isDataVolumesExpanded, setIsDataVolumesExpanded] = useState(
+    selectedProperties.volumes.length > 0,
+  );
+  const [isSecretsExpanded, setIsSecretsExpanded] = useState(selectedProperties.secrets.length > 0);
 
   const homeVolumeArray: WorkspacesPodVolumeMountValue[] = useMemo(
     () =>
@@ -219,6 +223,7 @@ const WorkspaceFormPropertiesSelection: React.FunctionComponent<
                 isHomeVolume
                 fixedMountPath={homeVolumeMountPath}
                 excludedPvcNames={dataPvcNames}
+                currentWorkspaceName={workspaceName}
               />
             </FormGroup>
             {!selectedProperties.homeVolume && (
@@ -237,6 +242,7 @@ const WorkspaceFormPropertiesSelection: React.FunctionComponent<
             toggleText="Data Volumes"
             onToggle={() => setIsDataVolumesExpanded((prev) => !prev)}
             isExpanded={isDataVolumesExpanded}
+            data-testid="workspace-data-volume-expandable-section"
           >
             {dataVolumesInfo}
             {isDataVolumesExpanded && (
@@ -249,6 +255,7 @@ const WorkspaceFormPropertiesSelection: React.FunctionComponent<
                   setVolumes={(volumes) => onSelect({ ...selectedProperties, volumes })}
                   namespace={namespace}
                   excludedPvcNames={homePvcNames}
+                  currentWorkspaceName={workspaceName}
                 />
               </FormGroup>
             )}

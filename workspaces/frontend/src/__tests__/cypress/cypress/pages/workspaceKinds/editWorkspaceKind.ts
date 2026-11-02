@@ -438,6 +438,75 @@ class EditWorkspaceKind {
     return cy.findByTestId('pod-config-modal');
   }
 
+  expandResources() {
+    cy.findByTestId('pod-config-resources')
+      .findByRole('button', { name: /Resources/ })
+      .click();
+  }
+
+  toggleResource(field: 'cpu-request' | 'cpu-limit' | 'memory-request' | 'memory-limit') {
+    cy.findByTestId(`${field}-checkbox`).click();
+  }
+
+  assertResourceToggle(field: string, checked: boolean) {
+    cy.findByTestId(`${field}-checkbox`).should(checked ? 'be.checked' : 'not.be.checked');
+  }
+
+  setResourceValue(label: string, value: string) {
+    cy.findByTestId(`${label}-input`).findByLabelText(label).clear();
+    if (value) {
+      cy.findByTestId(`${label}-input`).findByLabelText(label).type(value);
+    }
+  }
+
+  assertResourceValue(label: string, value: string) {
+    cy.findByTestId(`${label}-input`).findByLabelText(label).should('have.value', value);
+  }
+
+  addCustomResource() {
+    cy.findByTestId('add-custom-resource').click();
+  }
+
+  setCustomResourceName(name: string) {
+    cy.findByTestId('custom-resource-type').clear();
+    if (name) {
+      cy.findByTestId('custom-resource-type').type(name);
+    }
+  }
+
+  addGpuResource() {
+    this.addCustomResource();
+    this.setCustomResourceName('nvidia.com/gpu');
+  }
+
+  assertCustomRequestVisible() {
+    cy.findByTestId('Custom resource request-input').scrollIntoView();
+    cy.findByTestId('Custom resource request-input').should('be.visible');
+  }
+
+  assertCustomLimitOnly() {
+    cy.findByTestId('Custom resource request-input').should('not.exist');
+    cy.findByTestId('custom-resource-limit-checkbox').should('not.exist');
+    cy.findByTestId('custom-resource-mode').should('not.exist');
+    this.findPodConfigModal().should(
+      'contain.text',
+      'Extended resources and huge pages use the limit as the request.',
+    );
+  }
+
+  assertGpuLimitOnly() {
+    this.assertCustomLimitOnly();
+    this.findPodConfigModal().should('not.contain.text', 'request must equal');
+  }
+
+  assertResourceError(message: string) {
+    this.findPodConfigModal().should('contain.text', message);
+  }
+
+  assertPodConfigSaveEnabled(enabled: boolean) {
+    this.findPodConfigModalSubmitButton().should(enabled ? 'not.be.disabled' : 'be.disabled');
+  }
+
   findPodConfigModalTitle() {
     return cy.findByTestId('pod-config-modal-title');
   }
@@ -926,6 +995,83 @@ class EditWorkspaceKind {
 
   assertTolerationSecondsCell(index: number, value: string) {
     cy.findByTestId(`toleration-seconds-cell-${index}`).should('have.text', value);
+  }
+
+  // Activity Probe
+  toggleActivityProbe() {
+    cy.findByTestId('workspace-kind-pod-template-activity-probe-switch').click({ force: true });
+  }
+
+  assertActivityProbeEnabled(enabled: boolean) {
+    cy.findByTestId('workspace-kind-pod-template-activity-probe-switch').should(
+      enabled ? 'be.checked' : 'not.be.checked',
+    );
+  }
+
+  findProbeTimingInput(label: string) {
+    return cy.findByTestId('workspace-kind-activity-probe-timing').findByLabelText(label);
+  }
+
+  setProbeTiming({ label, value }: { label: string; value: number }) {
+    this.findProbeTimingInput(label).clear().type(String(value));
+  }
+
+  assertProbeTiming({ label, value }: { label: string; value: number }) {
+    this.findProbeTimingInput(label).should('have.value', String(value));
+  }
+
+  findProbeScriptInput() {
+    return cy.findByTestId('workspace-kind-activity-probe-script-editor').findByRole('textbox');
+  }
+
+  setProbeScript(script: string) {
+    this.findProbeScriptInput().type(
+      Cypress.platform === 'darwin' ? '{meta+a}{backspace}' : '{ctrl+a}{backspace}',
+      { force: true },
+    );
+    if (script) {
+      this.findProbeScriptInput().type(script, { parseSpecialCharSequences: false, force: true });
+    }
+  }
+
+  assertProbeScriptContains(text: string) {
+    cy.findByTestId('workspace-kind-activity-probe-script-editor').should(($editor) => {
+      expect($editor.text().replace(/\u00a0/g, ' ')).to.contain(text);
+    });
+  }
+
+  assertProbeDependencyError(visible: boolean) {
+    cy.findByTestId('activity-probe-dependency-error').should(visible ? 'be.visible' : 'not.exist');
+  }
+
+  assertProbeSettingsGrouped() {
+    cy.findByTestId('workspace-kind-activity-probe-settings').within(() => {
+      cy.findByTestId('workspace-kind-activity-probe-timing').scrollIntoView();
+      cy.findByTestId('workspace-kind-activity-probe-timing').should('be.visible');
+      cy.findByTestId('workspace-kind-activity-probe-script-editor').scrollIntoView();
+      cy.findByTestId('workspace-kind-activity-probe-script-editor').should('be.visible');
+      cy.findByText('Timing', { exact: true }).should('not.exist');
+      cy.findByText('Script', { exact: true }).should('not.exist');
+    });
+  }
+
+  assertProbeTimingLayout(stacked: boolean) {
+    this.findProbeTimingInput('probe interval input').then(($interval) => {
+      const first = $interval[0].getBoundingClientRect();
+      this.findProbeTimingInput('minimum probe interval input').then(($minimum) => {
+        const second = $minimum[0].getBoundingClientRect();
+        this.findProbeTimingInput('probe script timeout input').should(($timeout) => {
+          const third = $timeout[0].getBoundingClientRect();
+          if (stacked) {
+            expect(second.top).to.be.greaterThan(first.bottom);
+            expect(third.top).to.be.greaterThan(second.bottom);
+          } else {
+            expect(Math.abs(first.top - second.top)).to.be.lessThan(2);
+            expect(Math.abs(first.top - third.top)).to.be.lessThan(2);
+          }
+        });
+      });
+    });
   }
 
   // Activity Rules

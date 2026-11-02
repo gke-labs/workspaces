@@ -9,9 +9,11 @@ import { InfoCircleIcon } from '@patternfly/react-icons/dist/esm/icons/info-circ
 import { CubeIcon } from '@patternfly/react-icons/dist/esm/icons/cube-icon';
 import { TypeaheadSelectOption } from '@patternfly/react-templates';
 import {
+  PvcsPodInfo,
   PvcsPVCListItem,
   StorageclassesStorageClassListItem,
   V1PersistentVolumeAccessMode,
+  V1PodPhase,
 } from '~/generated/data-contracts';
 import { LabelGroupWithTooltip } from '~/app/components/LabelGroupWithTooltip';
 
@@ -140,28 +142,105 @@ export const getUnmountableTooltip = (pvc: PvcsPVCListItem): string | null => {
   return null;
 };
 
+// The Kubernetes PVC API can retain references to Pods in terminal phases (Succeeded, Failed)
+// even after they have released the volume mount. Only active Pods block RWOP reuse.
+// Unknown phases are treated conservatively as active to avoid masking real conflicts.
+const isActivePod = (pod: PvcsPodInfo): boolean =>
+  pod.phase !== V1PodPhase.PodSucceeded && pod.phase !== V1PodPhase.PodFailed;
+
+// Returns the first conflicting workspace or active Pod that is not the current workspace's own Pod,
+// or null when there is no conflict.
+const findOtherMountConflict = (
+  pvc: PvcsPVCListItem,
+  currentWorkspaceName?: string,
+): { otherWorkspaceName: string | undefined; otherPodName: string | undefined } | null => {
+  const ownPodName = pvc.workspaces.find((ws) => ws.name === currentWorkspaceName)?.podTemplatePod
+    ?.name;
+  const otherWorkspace = pvc.workspaces.find((ws) => ws.name !== currentWorkspaceName);
+  const otherPod = pvc.pods.find((pod) => pod.name !== ownPodName && isActivePod(pod));
+  if (!otherWorkspace && !otherPod) {
+    return null;
+  }
+  return { otherWorkspaceName: otherWorkspace?.name, otherPodName: otherPod?.name };
+};
+
+export const hasOtherMountConflict = (
+  pvc: PvcsPVCListItem,
+  currentWorkspaceName?: string,
+): boolean => findOtherMountConflict(pvc, currentWorkspaceName) !== null;
+
+export const isPVCMountBlocked = (pvc: PvcsPVCListItem, currentWorkspaceName?: string): boolean => {
+  if (!pvc.pvcSpec.accessModes.includes(V1PersistentVolumeAccessMode.ReadWriteOncePod)) {
+    return false;
+  }
+  return findOtherMountConflict(pvc, currentWorkspaceName) !== null;
+};
+
+export const getBlockedMountTooltip = (
+  pvc: PvcsPVCListItem,
+  currentWorkspaceName?: string,
+): string | null => {
+  if (!pvc.pvcSpec.accessModes.includes(V1PersistentVolumeAccessMode.ReadWriteOncePod)) {
+    return null;
+  }
+  const conflict = findOtherMountConflict(pvc, currentWorkspaceName);
+  if (!conflict) {
+    return null;
+  }
+  if (conflict.otherWorkspaceName) {
+    return `This volume uses ReadWriteOncePod access and is already mounted by workspace "${conflict.otherWorkspaceName}".`;
+  }
+  if (conflict.otherPodName) {
+    return `This volume uses ReadWriteOncePod access and is already mounted by pod "${conflict.otherPodName}".`;
+  }
+  return 'This volume uses ReadWriteOncePod access and is already mounted by another pod or workspace.';
+};
+
+/**
+ * Returns a warning message when a ReadWriteOnce PVC is in use by another workspace or active Pod.
+ * RWO is node-scoped: multiple Pods on the same node may share it, but Pods on different
+ * nodes cannot mount it read-write simultaneously. The PVC is not blocked — it remains
+ * selectable — but users should be aware of this constraint.
+ * Terminal Pods (Succeeded, Failed) do not trigger the warning.
+ */
+export const getRWOInUseWarning = (
+  pvc: PvcsPVCListItem,
+  currentWorkspaceName?: string,
+): string | null => {
+  if (!pvc.pvcSpec.accessModes.includes(V1PersistentVolumeAccessMode.ReadWriteOnce)) {
+    return null;
+  }
+  if (!findOtherMountConflict(pvc, currentWorkspaceName)) {
+    return null;
+  }
+  return 'ReadWriteOnce (RWO) volumes support read-write access from one node at a time. Multiple Pods on that node can share this volume. Using it from workspaces scheduled on different nodes may cause mount failures.';
+};
+
 export const buildPVCOptionDescription = (
   pvc: PvcsPVCListItem,
   excludedPvcNames?: Set<string>,
+  currentWorkspaceName?: string,
 ): React.ReactNode => {
   const isExcluded = excludedPvcNames?.has(pvc.name) ?? false;
+  const isBlocked = isPVCMountBlocked(pvc, currentWorkspaceName);
+  const isDimmed = !pvc.canMount || isExcluded || isBlocked;
   return (
-    <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }}>
+    <Flex
+      justifyContent={{ default: 'justifyContentSpaceBetween' }}
+      data-testid={`pvc-option-${pvc.name}`}
+    >
       <FlexItem>
         <Stack style={{ width: '100%' }}>
           <StackItem>
             <LabelGroup numLabels={5}>
-              <Label
-                isCompact
-                className={!pvc.canMount || isExcluded ? 'pf-m-disabled' : undefined}
-              >
+              <Label isCompact className={isDimmed ? 'pf-m-disabled' : undefined}>
                 {pvc.pvcSpec.requests.storage}
               </Label>
               {pvc.pvcSpec.accessModes.map((mode) => (
                 <Label
                   key={mode}
                   isCompact
-                  className={!pvc.canMount || isExcluded ? 'pf-m-disabled' : undefined}
+                  className={isDimmed ? 'pf-m-disabled' : undefined}
                   color="blue"
                 >
                   {mode}
@@ -191,7 +270,7 @@ export const buildPVCOptionDescription = (
                     icon={<CubeIcon color="teal" />}
                     isCompact
                     color="teal"
-                    className={!pvc.canMount || isExcluded ? 'pf-m-disabled' : undefined}
+                    className={isDimmed ? 'pf-m-disabled' : undefined}
                   />
                 </FlexItem>
               </Flex>
@@ -224,6 +303,7 @@ export const buildPVCSelectOptions = (
   storageClasses: StorageclassesStorageClassListItem[],
   excludedPvcNames?: Set<string>,
   selectedPvcName?: string,
+  currentWorkspaceName?: string,
 ): TypeaheadSelectOption[] => {
   const scMap = new Map(storageClasses.map((s) => [s.name, s]));
   const grouped = new Map<
@@ -255,22 +335,38 @@ export const buildPVCSelectOptions = (
     });
 
     const sorted = [...pvcs].sort((a, b) => {
-      const aDisabled = !a.canMount || (excludedPvcNames?.has(a.name) ?? false);
-      const bDisabled = !b.canMount || (excludedPvcNames?.has(b.name) ?? false);
+      const aDisabled =
+        !a.canMount ||
+        (excludedPvcNames?.has(a.name) ?? false) ||
+        isPVCMountBlocked(a, currentWorkspaceName);
+      const bDisabled =
+        !b.canMount ||
+        (excludedPvcNames?.has(b.name) ?? false) ||
+        isPVCMountBlocked(b, currentWorkspaceName);
       return Number(aDisabled) - Number(bDisabled);
     });
 
     for (const pvc of sorted) {
-      const isDisabled = !pvc.canMount || (excludedPvcNames?.has(pvc.name) ?? false);
-      const tooltip = getUnmountableTooltip(pvc);
+      const isExcluded = excludedPvcNames?.has(pvc.name) ?? false;
+      const isDisabled =
+        !pvc.canMount || isExcluded || isPVCMountBlocked(pvc, currentWorkspaceName);
+      const tooltip =
+        getUnmountableTooltip(pvc) ??
+        (isExcluded ? null : getBlockedMountTooltip(pvc, currentWorkspaceName));
       options.push({
         content: pvc.name,
         value: pvc.name,
         isDisabled: isDisabled && !tooltip,
         isAriaDisabled: isDisabled && !!tooltip,
         selected: pvc.name === selectedPvcName,
-        description: buildPVCOptionDescription(pvc, excludedPvcNames),
-        ...(tooltip ? { tooltipProps: { content: tooltip } } : {}),
+        description: buildPVCOptionDescription(pvc, excludedPvcNames, currentWorkspaceName),
+        ...(tooltip
+          ? {
+              tooltipProps: {
+                content: <span data-testid={`pvc-option-tooltip-${pvc.name}`}>{tooltip}</span>,
+              },
+            }
+          : {}),
       });
     }
   }
@@ -278,9 +374,13 @@ export const buildPVCSelectOptions = (
   return options;
 };
 
-// A single "."-separated segment of a Kubernetes DNS subdomain name: lowercase
-// alphanumeric characters and "-", starting and ending with an alphanumeric character.
-const DNS_LABEL_REGEX = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+// Workspace names are restricted to DNS-1123 *labels* (no "."), not subdomains: the
+// controller uses the name as a label value and inside child resource generateNames
+// (e.g. Services, which must be DNS-1035 labels), so a dotted name is accepted by the
+// API but can never be reconciled. This is a frontend-only guard until the backend,
+// webhook and CRD enforce the same rule.
+const RESOURCE_NAME_CHARS_REGEX = /^[a-z0-9-]+$/;
+const RESOURCE_NAME_CHARS_MESSAGE = 'Only lowercase alphanumeric characters or "-" are allowed';
 
 export const validateName = (name: string): string | null => {
   if (!name) {
@@ -291,8 +391,8 @@ export const validateName = (name: string): string | null => {
     return `Must be no more than ${MAX_WORKSPACE_NAME_LENGTH} characters`;
   }
 
-  if (!/^[a-z0-9.-]+$/.test(name)) {
-    return 'Only lowercase alphanumeric characters, "-" or "." are allowed';
+  if (!RESOURCE_NAME_CHARS_REGEX.test(name)) {
+    return RESOURCE_NAME_CHARS_MESSAGE;
   }
 
   if (!/^[a-z0-9]/.test(name)) {
@@ -301,13 +401,6 @@ export const validateName = (name: string): string | null => {
 
   if (!/[a-z0-9]$/.test(name)) {
     return 'Must end with an alphanumeric character';
-  }
-
-  // A valid overall start/end doesn't guarantee a valid DNS subdomain: each "."-separated
-  // segment must independently start and end with an alphanumeric character too, which
-  // also rejects empty segments from consecutive dots (e.g. "foo..bar", "foo.-bar", "foo-.bar").
-  if (!name.split('.').every((label) => DNS_LABEL_REGEX.test(label))) {
-    return 'Each "."-separated segment must start and end with an alphanumeric character';
   }
 
   return null;
@@ -328,8 +421,8 @@ export const getResourceNameCriteria = (name: string): ResourceNameCriterion[] =
   },
   {
     key: 'chars',
-    label: 'Only lowercase alphanumeric characters, "-" or "." are allowed',
-    isValid: name.length > 0 && /^[a-z0-9.-]+$/.test(name),
+    label: RESOURCE_NAME_CHARS_MESSAGE,
+    isValid: RESOURCE_NAME_CHARS_REGEX.test(name),
   },
   {
     key: 'start',
@@ -340,11 +433,6 @@ export const getResourceNameCriteria = (name: string): ResourceNameCriterion[] =
     key: 'end',
     label: 'Must end with an alphanumeric character',
     isValid: /[a-z0-9]$/.test(name),
-  },
-  {
-    key: 'segments',
-    label: 'Each "."-separated segment must start and end with an alphanumeric character',
-    isValid: name.length > 0 && name.split('.').every((label) => DNS_LABEL_REGEX.test(label)),
   },
 ];
 
@@ -380,9 +468,10 @@ export const validateDisplayName = (displayName: string): string | null => {
  * dropped. Any remaining characters outside [0-9, a-Z, -, ., _, space] — including
  * non-Latin scripts (e.g. Chinese, Cyrillic), symbols, and emoji — are removed
  * rather than romanized; such display names fall back to the random word-pair
- * generator in generateResourceNameBase. Everything is lower-cased, spaces and
- * underscores become dashes, and leading/trailing "-" or "." are trimmed so the
- * slug is more likely to already satisfy validateName's start/end rule.
+ * generator in generateResourceNameBase. Everything is lower-cased, spaces,
+ * underscores and dots become dashes (resource names must not contain "."), and
+ * leading/trailing "-" are trimmed so the slug is more likely to already satisfy
+ * validateName's start/end rule.
  */
 export const slugifyDisplayName = (displayName: string): string =>
   displayName
@@ -390,8 +479,8 @@ export const slugifyDisplayName = (displayName: string): string =>
     .replace(/[\u0300-\u036f]/g, '') // Strip the combining marks, leaving the plain base letter
     .replace(/[^0-9a-zA-Z\-._ ]/g, '') // Drop anything else: non-Latin scripts, symbols, emoji
     .toLowerCase()
-    .replace(/[ _]/g, '-')
-    .replace(/^[-.]+|[-.]+$/g, '');
+    .replace(/[ _.]/g, '-')
+    .replace(/^-+|-+$/g, '');
 
 const RESOURCE_NAME_HASH_LENGTH = 4;
 const RESOURCE_NAME_HASH_CHARS = 'abcdefghijklmnopqrstuvwxyz0123456789';

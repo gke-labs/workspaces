@@ -1,9 +1,11 @@
 /* eslint-disable camelcase */
+import yaml from 'js-yaml';
 import { mockModArchResponse } from 'mod-arch-core';
 import { createWorkspaceKind } from '~/__tests__/cypress/cypress/pages/workspaceKinds/createWorkspaceKind';
 import { workspaceKinds } from '~/__tests__/cypress/cypress/pages/workspaceKinds/workspaceKinds';
 import { NOTEBOOKS_API_VERSION } from '~/__tests__/cypress/cypress/support/commands/api';
 import { FieldErrorType } from '~/generated/data-contracts';
+import type { WorkspacekindsWorkspaceKindCreate } from '~/generated/data-contracts';
 import {
   buildMockNamespace,
   buildMockWorkspaceKind,
@@ -51,6 +53,25 @@ const setupCreateWorkspaceKindTest = () => {
   return { mockNamespace };
 };
 
+// Deny the workspacekinds list request that the admin-route guard relies on. This is the
+// only workspacekinds list intercept registered for the restricted-access test, so no
+// earlier success mock can take precedence over the 403.
+const setupForbiddenWorkspaceKindsTest = () => {
+  const mockNamespace = buildMockNamespace({ name: DEFAULT_NAMESPACE });
+
+  cy.interceptApi(
+    'GET /api/:apiVersion/namespaces',
+    { path: { apiVersion: NOTEBOOKS_API_VERSION } },
+    mockModArchResponse([mockNamespace]),
+  ).as('getNamespaces');
+
+  cy.interceptApi(
+    'GET /api/:apiVersion/workspacekinds',
+    { path: { apiVersion: NOTEBOOKS_API_VERSION } },
+    { error: { code: '403', message: 'Forbidden' } },
+  ).as('getWorkspaceKindsForbidden');
+};
+
 describe('Create workspace kind', () => {
   before(() => {
     cy.fixture(VALID_WORKSPACE_KIND_FIXTURE).then((content) => {
@@ -74,6 +95,28 @@ describe('Create workspace kind', () => {
       createWorkspaceKind.findPageTitle();
       createWorkspaceKind.assertUploadFileFieldExists();
       createWorkspaceKind.verifyPageURL();
+    });
+
+    it('submits uploaded pause rules without a probe and surfaces API validation errors', () => {
+      const message = 'activityProbe must be configured when pause rules exist';
+      cy.interceptApi(
+        'POST /api/:apiVersion/workspacekinds',
+        { path: { apiVersion: NOTEBOOKS_API_VERSION } },
+        { error: { code: '422', message } },
+      ).as('createWithoutProbe');
+      const config = yaml.load(validWorkspaceKindYaml) as {
+        spec: WorkspacekindsWorkspaceKindCreate;
+      };
+      config.spec.activityRules = [
+        { config: { secondsSinceActive: 3600 }, effect: { pauseWorkspace: true } },
+      ];
+      createWorkspaceKind.visit();
+      createWorkspaceKind.uploadYamlContent(yaml.dump(config));
+      createWorkspaceKind.assertProbeDependencyError(false);
+      createWorkspaceKind.assertSubmitButtonEnabled();
+      createWorkspaceKind.clickSubmit();
+      cy.wait('@createWithoutProbe');
+      createWorkspaceKind.assertErrorAlertContainsMessage(message);
     });
 
     it('should cancel creation and navigate back to workspace kinds list', () => {
@@ -280,6 +323,27 @@ describe('Create workspace kind', () => {
 
       createWorkspaceKind.assertErrorAlertContainsMessage('Name is required: metadata.name');
       createWorkspaceKind.uploadYamlContent(validWorkspaceKindYaml);
+    });
+  });
+
+  describe('Restricted access', () => {
+    beforeEach(() => {
+      setupForbiddenWorkspaceKindsTest();
+    });
+
+    it('shows the restricted-access message and hides the form on a forbidden list request', () => {
+      // Navigate directly rather than via createWorkspaceKind.visit(), whose helper waits for
+      // the form page title that never renders when access is denied.
+      cy.visit('/workspacekinds/create');
+
+      cy.wait('@getWorkspaceKindsForbidden').its('response.statusCode').should('eq', 403);
+
+      cy.findByTestId('workspace-kinds-access-empty-state').should('be.visible');
+      cy.contains('WorkspaceKind management is restricted to administrators').should('be.visible');
+
+      createWorkspaceKind.findUploadFileField().should('not.exist');
+      createWorkspaceKind.findSubmitButton().should('not.exist');
+      cy.findByTestId('app-page-title').should('not.exist');
     });
   });
 });
