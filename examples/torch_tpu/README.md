@@ -17,7 +17,7 @@ This example demonstrates interactive single-device and multi-core neural networ
 | **Model** | 3-layer MLP (`784 -> 256 -> 128 -> 10`) implemented in PyTorch (`nn.Module`) with `bfloat16` precision |
 | **Hardware** | **1 TPU**: TPU v5 1x1 (`tpu_1`, 1 chip), **4 TPU**: TPU v5 2x2 (`tpu_4`, 4 chips) on a single host, or **8 TPU**: TPU v5 2x4 multi-host (2 hosts × 4 chips) |
 | **Parallelism** | Interactive execution via `torch.device("tpu")`; multi-core and multi-host scaling via `DistributedDataParallel` (DDP) with the `tpu_dist` collective backend |
-| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)), single-host distributed orchestrator ([`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)), multi-host distributed orchestrator via `ConfigMap` ([`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb)), and multi-host distributed orchestrator via shared `ReadWriteMany` Filestore volume ([`torch_tpu_multihost_rwx.ipynb`](torch_tpu_multihost_rwx.ipynb)) |
+| **Workflow** | Interactive single-TPU prototyping notebook ([`torch_tpu_single_chip.ipynb`](torch_tpu_single_chip.ipynb)), single-host distributed orchestrator ([`torch_tpu_multichip.ipynb`](torch_tpu_multichip.ipynb)), multi-host distributed orchestrator via `ConfigMap` ([`torch_tpu_multihost.ipynb`](torch_tpu_multihost.ipynb)), and multi-host distributed orchestrator via shared `ReadWriteMany` Filestore volume ([`torch_tpu_multihost_rwx.ipynb`](torch_tpu_multihost_rwx.ipynb)) |
 
 > [!TIP]
 > **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, TPU ComputeClasses, and `jupyterlab` WorkspaceKind are already configured. Jump directly to [Step 1: Create the TPU Workspace](#step-1-create-the-tpu-workspace) or [Step 2: Run the Notebook](#step-2-run-the-notebook).
@@ -27,7 +27,7 @@ This example demonstrates interactive single-device and multi-core neural networ
 ```mermaid
 flowchart TD
     subgraph Local["Your Laptop"]
-      VSC["Desktop VS Code<br/>(Jupyter Extension)<br/>Local torch_tpu_training.ipynb"]
+      VSC["Desktop VS Code<br/>(Jupyter Extension)<br/>Local torch_tpu_single_chip.ipynb"]
       BRW["Browser UI<br/>(JupyterLab)"]
     end
 
@@ -176,7 +176,7 @@ Run the notebook directly from your local machine without uploading any files:
 1. **Open local VS Code**:
    - Open this repository on your laptop in VS Code.
    - Ensure the **Jupyter** extension (`ms-toolsai.jupyter`) is installed.
-   - Open [`examples/torch_tpu/torch_tpu_training.ipynb`](torch_tpu_training.ipynb).
+   - Open [`examples/torch_tpu/torch_tpu_single_chip.ipynb`](torch_tpu_single_chip.ipynb).
 
 2. **Generate a connection token**:
    - In your browser, navigate to `https://${WORKSPACES_HOST}/workspaces/connections` and sign in with Google.
@@ -207,17 +207,17 @@ Run the notebook directly from your local machine without uploading any files:
 If you prefer using the browser:
 
 1. In the Kubeflow Workspaces UI, click **Connect** next to `torch-tpu-workspace`.
-2. Upload `torch_tpu_training.ipynb` and `torch_tpu_distributed.ipynb` into JupyterLab using the file browser upload button, or clone the repository:
+2. Upload `torch_tpu_single_chip.ipynb` and `torch_tpu_multichip.ipynb` into JupyterLab using the file browser upload button, or clone the repository:
    ```bash
    git clone <this-repo-url> /home/jovyan/gke-workspaces
    ```
-3. Open `torch_tpu_training.ipynb` (or `torch_tpu_distributed.ipynb`) and run the cells.
+3. Open `torch_tpu_single_chip.ipynb` (or `torch_tpu_multichip.ipynb`) and run the cells.
 
 ---
 
 ## What the Notebook Does
 
-The notebook ([`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)) walks through an end-to-end interactive and distributed PyTorch workflow on Cloud TPU:
+The notebook ([`torch_tpu_single_chip.ipynb`](torch_tpu_single_chip.ipynb)) walks through an end-to-end interactive and distributed PyTorch workflow on Cloud TPU:
 
 ### 0. Hardware Discovery & TorchTPU Initialization
 Verifies `torch_tpu` is present and initializes the TPU backend:
@@ -270,10 +270,10 @@ Evaluates model accuracy on the held-out test dataset and prints sample predicti
 Cloud TPU character devices (`/dev/vfio/*`) are claimed exclusively by whichever process first initializes the TPU runtime (such as calling `torch.device("tpu")`). Because `libtpu` and PJRT retain open file descriptors in the C++ layer for the entire lifetime of the process, standard Python garbage collection (`del model`, `del tensor`, `gc.collect()`) **cannot** release OS-level hardware file descriptors.
 
 To ensure seamless transitions between interactive single-core prototyping and multi-core distributed runs, the example implements automated lock management:
-1. **[`torch_tpu_training.ipynb`](torch_tpu_training.ipynb)**: Dedicated to interactive single-TPU prototyping (Sections 0–5).
+1. **[`torch_tpu_single_chip.ipynb`](torch_tpu_single_chip.ipynb)**: Dedicated to interactive single-TPU prototyping (Sections 0–5).
    - **Startup**: Section 0 runs a pre-flight lock check (`tpu_lock.preflight_check()`) that verifies hardware availability and clears any orphaned worker processes before initializing TorchTPU.
    - **Shutdown**: Section 7 provides a dedicated cleanup cell (`tpu_lock.release_current_kernel(restart=True)`) that restarts the kernel to cleanly release `/dev/vfio/*` devices for other notebooks or sessions, while preserving all rendered outputs.
-2. **[`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb)**: Dedicated to multi-core DDP (`torchrun`) across all attached TPU cores.
+2. **[`torch_tpu_multichip.ipynb`](torch_tpu_multichip.ipynb)**: Dedicated to multi-core DDP (`torchrun`) across all attached TPU cores.
    - **Startup**: Section 1 checks if external sessions hold TPU devices and verifies that the *orchestrator kernel itself* has not claimed the devices. (If the orchestrator kernel initialized TPU, child `torchrun` workers would crash with `Device or resource busy`).
    - **Execution**: Section 3 wraps `torchrun` in robust interruption handling (`KeyboardInterrupt`) to prevent orphaned child worker processes from dangling in the background.
    - **Shutdown**: Section 4 verifies that all worker processes exited and that all `/dev/vfio/*` device nodes are completely unlocked.
@@ -284,7 +284,7 @@ To ensure seamless transitions between interactive single-core prototyping and m
    ```
 
 ### 7. Multi-Core Execution with `torchrun`
-Inside [`torch_tpu_distributed.ipynb`](torch_tpu_distributed.ipynb), Section 2 writes `train_worker.py` dynamically via `%%writefile train_worker.py`. Then `torchrun` launches across the attached TPU cores:
+Inside [`torch_tpu_multichip.ipynb`](torch_tpu_multichip.ipynb), Section 2 writes `train_worker.py` dynamically via `%%writefile train_worker.py`. Then `torchrun` launches across the attached TPU cores:
 
 ```bash
 eval $(python3 -m torch.tpu.distributed.environment --nproc_per_node=4 | sed 's/^/export /')
@@ -383,7 +383,7 @@ When your repository exceeds the **1 MiB Kubernetes `ConfigMap` limit** (or incl
 | Workspace pod stuck in `Pending` with `0/N nodes are available` | The `tpu-v5-4-single-host` ComputeClass is missing. | Run `kubectl apply -f examples/compute-classes/tpu-compute-class.yaml` and verify with `kubectl get computeclass`. |
 | Workspace pod stuck in `Pending` for 10+ minutes with quota events | No TPU v5e Spot quota available in the region. | Check quota with `gcloud compute regions describe "${REGION}" --format="value(quotas)" \| tr ',' '\n' \| grep -i podslice`. Request `PREEMPTIBLE_TPU_LITE_PODSLICE_V5` quota in the Cloud Console. |
 | `RuntimeError: Expected one of cpu, cuda... at start of device string: tpu` | `torch_tpu` is not imported, or the workspace is running on a CPU pod config without attached TPU devices. | Ensure `import torch_tpu` runs before `torch.device("tpu")`, and verify the Workspace pod config is set to **`TPU v5 1x1`** or **`TPU v5 2x2`**. |
-| `[TorchTPU] Failed to acquire a TPU device node... already opened by another process` | 1. Another active notebook kernel (e.g. `torch_tpu_training.ipynb`) holds exclusive TPU access.<br>2. Orphaned worker processes from a previous run are lingering.<br>3. In `torch_tpu_distributed.ipynb`, the orchestrator kernel itself initialized `torch.device("tpu")`. | 1. In `torch_tpu_training.ipynb`, run Section 7 or restart the kernel (**Kernel** -> **Restart Kernel**).<br>2. Run `python3 tpu_lock.py --clear` or `fuser -k -9 /dev/vfio/*` to kill orphaned processes.<br>3. Restart the orchestrator notebook kernel before running `torchrun`. |
+| `[TorchTPU] Failed to acquire a TPU device node... already opened by another process` | 1. Another active notebook kernel (e.g. `torch_tpu_single_chip.ipynb`) holds exclusive TPU access.<br>2. Orphaned worker processes from a previous run are lingering.<br>3. In `torch_tpu_multichip.ipynb`, the orchestrator kernel itself initialized `torch.device("tpu")`. | 1. In `torch_tpu_single_chip.ipynb`, run Section 7 or restart the kernel (**Kernel** -> **Restart Kernel**).<br>2. Run `python3 tpu_lock.py --clear` or `fuser -k -9 /dev/vfio/*` to kill orphaned processes.<br>3. Restart the orchestrator notebook kernel before running `torchrun`. |
 | `ModuleNotFoundError: No module named 'torch_tpu'` | `torch_tpu` is not installed on the base image. | Use the custom TPU image (`images/build.sh --jupyterlab --tpu`) or install via `pip install torch_tpu==0.2.0 --extra-index-url https://download.pytorch.org/whl/cpu`. |
 | DDP job hangs during execution with `tpu_dist` | Process divergence: one rank evaluated `.item()` or branched conditionally while other ranks proceeded to a collective call. | Follow the Golden Rules: ensure all ranks run identical training steps and synchronize simultaneously. |
 | VS Code reports `unable to get issuer certificate` | Node.js on macOS does not trust the system keychain by default. | In VS Code `settings.json`, set `"http.systemCertificatesNode": true` and reload the window. |
