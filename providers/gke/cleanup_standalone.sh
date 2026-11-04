@@ -54,8 +54,8 @@ kubectl --context="${CONTEXT}" delete configmap jupyter-ipc-config -n "${TENANT_
 kubectl --context="${CONTEXT}" delete trainjobs --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete sparkconnects --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 kubectl --context="${CONTEXT}" delete sparkapplications --all -n "${TENANT_NAMESPACE}" --ignore-not-found || true
-kubectl --context="${CONTEXT}" delete deployment fashion-mnist-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
-kubectl --context="${CONTEXT}" delete service fashion-mnist-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete deployment fashion-mnist-inference minigpt-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
+kubectl --context="${CONTEXT}" delete service fashion-mnist-inference minigpt-inference -n "${TENANT_NAMESPACE}" --ignore-not-found || true
 
 # 2. Remove Kubeflow Spark Operator and Trainer
 if [[ -d "${DIST_DIR}/applications" ]]; then

@@ -280,7 +280,7 @@ def run_training(
         torchrun_cmd = [
             "python3",
             "-c",
-            "import subprocess, sys; from torch.tpu.distributed import environment; environment.set_tpu_launch_env(nproc_per_node=4); sys.exit(subprocess.call(['torchrun', '--nproc_per_node=4', '/workspace/train.py']))",
+            "import subprocess, sys, torch_tpu; from torch.tpu.distributed import set_tpu_launch_env; set_tpu_launch_env(nproc_per_node=4); sys.exit(subprocess.call(['torchrun', '--nproc_per_node=4', '/workspace/train.py']))",
         ]
         extra_env = {
             "ACCELERATOR": "tpu",
