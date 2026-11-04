@@ -1,0 +1,148 @@
+name: Publish Prebuilt Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target images to build and publish"
+        type: choice
+        options:
+          - all
+          - provider-images
+          - workspace-images
+          - codeserver-python
+          - jupyterlab
+          - spark-py312
+          - agent-sandbox-mcp-server
+        default: all
+      tag:
+        description: "Primary image tag (e.g. latest, v1.0.0)"
+        type: string
+        default: latest
+      latest:
+        description: "Also publish :latest (or :latest-<hw>) tags"
+        type: boolean
+        default: true
+  push:
+    branches:
+      - main
+    paths:
+      - "providers/gke/**"
+      - "images/**"
+      - "workspaces/**"
+      - "hack/build-and-publish-images.sh"
+      - ".github/workflows/publish-prebuilt-images.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-prebuilt-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  provider-images:
+    name: Provider Images
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'provider-images'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Publish Provider Images
+        run: |
+          CMD=(./hack/build-and-publish-images.sh --provider-images)
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.latest }}" = "false" ]; then
+              CMD+=(--no-latest)
+            fi
+            if [ -n "${{ inputs.tag }}" ]; then
+              CMD+=(--tag "${{ inputs.tag }}")
+            fi
+          fi
+          "${CMD[@]}"
+        env:
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  workspace-images:
+    name: Workspace · ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: codeserver-python (cpu)
+            target_group: codeserver-python
+            flags: --codeserver --hardware cpu
+          - name: codeserver-python (gpu)
+            target_group: codeserver-python
+            flags: --codeserver --hardware gpu
+          - name: codeserver-python (tpu)
+            target_group: codeserver-python
+            flags: --codeserver --hardware tpu
+          - name: jupyterlab (cpu)
+            target_group: jupyterlab
+            flags: --jupyterlab --hardware cpu
+          - name: jupyterlab (gpu)
+            target_group: jupyterlab
+            flags: --jupyterlab --hardware gpu
+          - name: jupyterlab (tpu)
+            target_group: jupyterlab
+            flags: --jupyterlab --hardware tpu
+          - name: spark-py312
+            target_group: spark-py312
+            flags: --spark
+          - name: agent-sandbox-mcp-server
+            target_group: agent-sandbox-mcp-server
+            flags: --mcp-server
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space (GPU/TPU)
+        if: contains(matrix.flags, 'gpu') || contains(matrix.flags, 'tpu')
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Publish ${{ matrix.name }}
+        run: |
+          CMD=(./hack/build-and-publish-images.sh ${{ matrix.flags }})
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ inputs.latest }}" = "false" ]; then
+              CMD+=(--no-latest)
+            fi
+            if [ -n "${{ inputs.tag }}" ]; then
+              CMD+=(--tag "${{ inputs.tag }}")
+            fi
+          fi
+          "${CMD[@]}"
+        env:
+          REGISTRY: ghcr.io/${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

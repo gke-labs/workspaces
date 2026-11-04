@@ -1,0 +1,1 @@
+build-and-publish-images.sh
