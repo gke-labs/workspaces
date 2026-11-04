@@ -493,12 +493,30 @@ build_and_tag_image() {
       "${tmp_build_dir}"
     rm -rf "${tmp_build_dir}"
 
+    push_with_retry() {
+      local img="$1"
+      local max_attempts=3
+      local attempt=1
+      local delay=5
+      while [[ "${attempt}" -le "${max_attempts}" ]]; do
+        echo "Pushing ${img} (attempt ${attempt}/${max_attempts})..."
+        if docker push "${img}"; then
+          return 0
+        fi
+        if [[ "${attempt}" -lt "${max_attempts}" ]]; then
+          echo "WARNING: Push for ${img} failed. Retrying in ${delay}s..." >&2
+          sleep "${delay}"
+        fi
+        attempt=$((attempt + 1))
+      done
+      echo "ERROR: Failed to push ${img} after ${max_attempts} attempts." >&2
+      return 1
+    }
+
     if [[ "${PUSH_IMAGE}" == "true" ]]; then
-      echo "Pushing ${v_image_uri}..."
-      docker push "${v_image_uri}"
+      push_with_retry "${v_image_uri}"
       if [[ "${v_image_uri}" != "${v_latest_uri}" ]]; then
-        echo "Pushing ${v_latest_uri}..."
-        docker push "${v_latest_uri}"
+        push_with_retry "${v_latest_uri}"
       fi
     fi
 
@@ -508,8 +526,8 @@ build_and_tag_image() {
       docker tag "${v_image_uri}" "${default_image_uri}"
       docker tag "${v_image_uri}" "${default_latest_uri}"
       if [[ "${PUSH_IMAGE}" == "true" ]]; then
-        docker push "${default_image_uri}"
-        docker push "${default_latest_uri}"
+        push_with_retry "${default_image_uri}"
+        push_with_retry "${default_latest_uri}"
       fi
     fi
   fi

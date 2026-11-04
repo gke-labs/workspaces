@@ -696,19 +696,35 @@ build_provider_image() {
       "${tags[@]}" \
       "${context_dir}"
 
+    push_with_retry() {
+      local img="$1"
+      local max_attempts=3
+      local attempt=1
+      local delay=5
+      while [[ "${attempt}" -le "${max_attempts}" ]]; do
+        echo "Pushing ${img} (attempt ${attempt}/${max_attempts})..."
+        if docker push "${img}"; then
+          return 0
+        fi
+        if [[ "${attempt}" -lt "${max_attempts}" ]]; then
+          echo "WARNING: Push for ${img} failed. Retrying in ${delay}s..." >&2
+          sleep "${delay}"
+        fi
+        attempt=$((attempt + 1))
+      done
+      echo "ERROR: Failed to push ${img} after ${max_attempts} attempts." >&2
+      return 1
+    }
+
     if [[ "${PUSH_IMAGE}" == "true" ]]; then
-      echo "Pushing ${primary_tag}..."
-      docker push "${primary_tag}"
+      push_with_retry "${primary_tag}"
       if [[ "${TAG_LATEST}" == "true" ]]; then
-        echo "Pushing ${latest_tag}..."
-        docker push "${latest_tag}"
+        push_with_retry "${latest_tag}"
       fi
       if [[ -n "${upstream_alias}" && "${ALIAS_WORKSPACES}" == "true" ]]; then
-        echo "Pushing ${REGISTRY_PATH}/${upstream_alias}:${IMAGE_TAG}..."
-        docker push "${REGISTRY_PATH}/${upstream_alias}:${IMAGE_TAG}"
+        push_with_retry "${REGISTRY_PATH}/${upstream_alias}:${IMAGE_TAG}"
         if [[ "${TAG_LATEST}" == "true" ]]; then
-          echo "Pushing ${REGISTRY_PATH}/${upstream_alias}:latest..."
-          docker push "${REGISTRY_PATH}/${upstream_alias}:latest"
+          push_with_retry "${REGISTRY_PATH}/${upstream_alias}:latest"
         fi
       fi
     fi
