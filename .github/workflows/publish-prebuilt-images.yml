@@ -79,7 +79,7 @@ jobs:
   workspace-images:
     name: Workspace · ${{ matrix.name }}
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
+    if: github.event_name == 'push' || inputs.target != 'provider-images'
     strategy:
       fail-fast: false
       matrix:
@@ -110,10 +110,11 @@ jobs:
             flags: --mcp-server
     steps:
       - name: Checkout repository
+        if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
         uses: actions/checkout@v4
 
       - name: Free runner disk space (GPU/TPU)
-        if: contains(matrix.flags, 'gpu') || contains(matrix.flags, 'tpu')
+        if: (github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group) && (contains(matrix.flags, 'gpu') || contains(matrix.flags, 'tpu'))
         run: |
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /usr/local/lib/android
@@ -122,9 +123,11 @@ jobs:
           sudo docker image prune -af || true
 
       - name: Set up Docker Buildx
+        if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
         uses: docker/setup-buildx-action@v3
 
       - name: Login to GitHub Container Registry
+        if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -132,6 +135,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and Publish ${{ matrix.name }}
+        if: github.event_name == 'push' || inputs.target == 'all' || inputs.target == 'workspace-images' || inputs.target == matrix.target_group
         run: |
           CMD=(./hack/build-and-publish-images.sh ${{ matrix.flags }})
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
