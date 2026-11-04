@@ -118,8 +118,8 @@ func (config Config) Validate() error {
 		return fmt.Errorf("exactly five component images are required")
 	}
 	for _, component := range []string{"controller", "backend", "frontend", "proxy", "snapshot"} {
-		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$`).MatchString(config.Images[component]) {
-			return fmt.Errorf("%s image must be pinned by sha256 digest", component)
+		if !regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:/-]*(@sha256:[a-f0-9]{64}|:[a-zA-Z0-9_.-]+)$`).MatchString(config.Images[component]) {
+			return fmt.Errorf("%s image must be a valid image reference (e.g. :tag or @sha256:digest)", component)
 		}
 	}
 	return nil

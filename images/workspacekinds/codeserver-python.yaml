@@ -12,26 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Template rendered with envsubst. Required variables:
+# Prebuilt WorkspaceKind using prebuilt images from GitHub Container Registry (ghcr.io).
+# Default images:
+#   CPU: ghcr.io/gke-labs/workspaces/codeserver-python:latest-cpu
+#   GPU: ghcr.io/gke-labs/workspaces/codeserver-python:latest-gpu
+#   TPU: ghcr.io/gke-labs/workspaces/codeserver-python:latest-tpu
 #
-#   REGION, PROJECT_ID, REPO_NAME, IMAGE_NAME   registry coordinates
-#   CPU_IMAGE_TAG, GPU_IMAGE_TAG, TPU_IMAGE_TAG exact image tag per variant
-#   GCS_BUCKET                                  shared bucket for notebooks
+# Optional environment variables (if templating with envsubst):
+#   GCS_BUCKET: shared GCS bucket name for notebooks
 #
-# The image tags are pinned rather than floating on :latest-* so a Workspace restarts
-# onto the image it was created with, and so a rebuild cannot change the runtime under
-# a running Workspace. build_codeserver_python.sh and deploy_standalone.sh set them for you.
-#
-# Because the tags are now immutable, imagePullPolicy is IfNotPresent rather than
-# Always. Always only earned its keep while these pointed at :latest-*, where the
-# contents could change behind a fixed tag. A pinned tag cannot, so Always just adds a
-# registry round-trip to every Pod start -- worth avoiding when the GPU image is ~7.5GB
-# and the node may already have it. If you ever repoint one of these at a mutable tag,
-# put Always back for that entry.
-#
-# Beware when rendering by hand: envsubst substitutes an unset variable with the empty
-# string, which yields `image: ".../codeserver-python:"` and a WorkspaceKind that cannot start
-# a Pod. Prefer the scripts, which print the tags they pin.
+# If you build your own custom images (see images/README.md),
+# you can substitute the image fields below with your custom registry path.
 apiVersion: kubeflow.org/v1beta1
 kind: WorkspaceKind
 metadata:
@@ -219,7 +210,7 @@ spec:
             value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
           - name: "REGISTRY"
-            value: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+            value: "ghcr.io/gke-labs/workspaces"
           - name: "GCS_BUCKET"
             value: "${GCS_BUCKET}"
           - name: "WORKSPACE_NAME"
@@ -244,7 +235,7 @@ spec:
                 - key: "accelerator"
                   value: "cpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${CPU_IMAGE_TAG}"
+              image: "ghcr.io/gke-labs/workspaces/codeserver-python:latest-cpu"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "codeserver"
@@ -259,7 +250,7 @@ spec:
                 - key: "accelerator"
                   value: "gpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${GPU_IMAGE_TAG}"
+              image: "ghcr.io/gke-labs/workspaces/codeserver-python:latest-gpu"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "codeserver"
@@ -274,7 +265,7 @@ spec:
                 - key: "accelerator"
                   value: "tpu"
             spec:
-              image: "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/${IMAGE_NAME}:${TPU_IMAGE_TAG}"
+              image: "ghcr.io/gke-labs/workspaces/codeserver-python:latest-tpu"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "codeserver"

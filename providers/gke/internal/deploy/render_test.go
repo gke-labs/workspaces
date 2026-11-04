@@ -37,7 +37,7 @@ func fixture() Config {
 
 func TestConfigValidation(t *testing.T) {
 	for _, mutate := range []func(*Config){
-		func(config *Config) { config.Images["proxy"] = "example.com/proxy:latest" },
+		func(config *Config) { config.Images["proxy"] = "invalid image reference with spaces!" },
 		func(config *Config) { config.Tenants = []string{"kube-system"} },
 		func(config *Config) { config.Tenants = []string{"team-a", "team-a"} },
 		func(config *Config) { config.IAPAudience = "/projects/123/*" },

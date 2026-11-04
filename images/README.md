@@ -2,6 +2,9 @@
 
 This directory is a dedicated, cloud-agnostic build workspace for creating custom container images for **Kubeflow Workspaces** and **Apache Spark** on Google Kubernetes Engine (GKE) or any standard Kubernetes cluster.
 
+> [!NOTE]
+> **Prebuilt Images Ready to Use**: Prebuilt workspace images are hosted on GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`) and are pre-configured in [`workspacekinds/`](workspacekinds/). You do **not** need to build these images or configure a custom registry unless you want to customize the runtime environment or host images in your own Google Cloud project.
+
 ---
 
 ## Table of Contents
@@ -25,6 +28,9 @@ This directory is a dedicated, cloud-agnostic build workspace for creating custo
   - [Home Directory Persistence (`$HOME` & `$HOME_TMP`)](#home-directory-persistence-home--home_tmp)
 - [Using Custom Images in Kubeflow WorkspaceKind](#using-custom-images-in-kubeflow-workspacekind)
   - [Ready-made WorkspaceKind templates](#ready-made-workspacekind-templates)
+  - [1. Using Prebuilt Images (Default)](#1-using-prebuilt-images-default)
+  - [2. Using Custom Built Images via REGISTRY (Bulk Substitution)](#2-using-custom-built-images-via-registry-bulk-substitution)
+  - [3. Adding Your Own Custom Workspace Image (e.g., Custom JupyterLab)](#3-adding-your-own-custom-workspace-image-eg-custom-jupyterlab)
   - [Accelerator prerequisites (GPU / TPU pod options)](#accelerator-prerequisites-gpu--tpu-pod-options)
 
 ---
@@ -80,9 +86,12 @@ All files placed inside [`samples/`](samples/) are automatically baked into work
 
 ---
 
-## Setting Up Google Cloud Artifact Registry
+## Setting Up Google Cloud Artifact Registry (Optional)
 
-Google Artifact Registry is Google Cloud's recommended container registry. Follow these steps to configure your registry before building and pushing images.
+> [!TIP]
+> **Optional Setup**: Prebuilt images are already published and ready in [`workspacekinds/`](workspacekinds/). Only follow this section if you want to set up your own Google Cloud Artifact Registry to build, push, and maintain custom workspace images.
+
+Google Artifact Registry is Google Cloud's recommended container registry. Follow these steps to configure your registry before building and pushing custom images.
 
 ### 1. Set Environment Variables & Construct REGISTRY
 
@@ -512,68 +521,37 @@ the [`examples/`](../examples/) walkthroughs expect to find in the cluster.
 > `APPLY_SAMPLE_WORKSPACEKIND=false` when deploying if you would rather the script never
 > registered the sample in the first place.
 
-They are templates, not final manifests: the image URIs contain placeholders that
-you fill in with `envsubst`. **Both templates require all eight variables below** —
-neither has a default for any of them.
+### 1. Using Prebuilt Images (Default)
 
-| Placeholder | Meaning | Who sets it | Example |
-| :--- | :--- | :--- | :--- |
-| `PROJECT_ID` | Google Cloud project that owns the registry | You — exported in [step 1](#1-set-environment-variables--construct-registry) | `my-project` |
-| `REGION` | Artifact Registry region | You — exported in [step 1](#1-set-environment-variables--construct-registry) | `us-west1` |
-| `REPO_NAME` | Artifact Registry repository name | You — exported in [step 1](#1-set-environment-variables--construct-registry) | `kubeflow-repo` |
-| `IMAGE_NAME` | Image name inside the repository; differs per template | You — set inline on the `envsubst` command below | `jupyterlab` or `codeserver-python` |
-| `CPU_IMAGE_TAG` / `GPU_IMAGE_TAG` / `TPU_IMAGE_TAG` | Tag per accelerator variant; must name tags `build.sh` actually pushed | You — set inline on the `envsubst` command below | `latest-cpu` / `latest-gpu` / `latest-tpu` |
-| `GCS_BUCKET` | Bucket name injected into every Workspace Pod as the `$GCS_BUCKET` environment variable | You — exported in the command below. Nothing here creates the bucket | `${PROJECT_ID}-${TENANT_NAMESPACE}-bucket` (the `deploy_standalone.sh` default) |
-
-> [!NOTE]
-> Both templates also inject a `REGISTRY` environment variable into every Workspace
-> Pod, built from `REGION`, `PROJECT_ID` and `REPO_NAME`. It resolves to the same
-> path as the `REGISTRY` you exported for `build.sh`, but it is a *pod* environment
-> variable, not a build input.
-
-> [!WARNING]
-> **A variable you forget will not produce an error.** `envsubst` replaces an unset
-> variable with an empty string and exits 0, so a missing `CPU_IMAGE_TAG` renders
-> `image: ".../jupyterlab:"` and a missing `REPO_NAME` renders
-> `image: "us-west1-docker.pkg.dev/my-project//jupyterlab:latest-cpu"`. `kubectl apply`
-> accepts both, and the WorkspaceKind looks healthy in `kubectl get workspacekinds`;
-> the failure surfaces only later, when a user creates a Workspace and its Pod can
-> never pull the image. Inspect the rendered image URIs before applying:
->
-> ```bash
-> IMAGE_NAME="jupyterlab" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" \
-> TPU_IMAGE_TAG="latest-tpu" envsubst < workspacekinds/jupyterlab.yaml | grep 'image:'
-> ```
->
-> Every line must end in a non-empty tag and contain no `//` after the hostname.
-
-Register the JupyterLab `WorkspaceKind`. The `export` lines repeat
-[step 1](#1-set-environment-variables--construct-registry) so this block also works
-in a fresh shell; adjust the values to your own:
+The manifests in [`workspacekinds/`](workspacekinds/) are pre-configured with the prebuilt images from GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`). You can apply them directly:
 
 ```bash
-export PROJECT_ID="my-project"
-export REGION="us-west1"
-export REPO_NAME="kubeflow-repo"
-export TENANT_NAMESPACE="kubeflow-user"
-export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
-
-IMAGE_NAME="jupyterlab" \
-CPU_IMAGE_TAG="latest-cpu" \
-GPU_IMAGE_TAG="latest-gpu" \
-TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < workspacekinds/jupyterlab.yaml | kubectl apply -f -
+kubectl apply -f workspacekinds/jupyterlab.yaml
+kubectl apply -f workspacekinds/codeserver-python.yaml
 ```
 
-Register the VS Code `WorkspaceKind`. This command reuses `PROJECT_ID`, `REGION`,
-`REPO_NAME` and `GCS_BUCKET` exported above, so run it in the same shell:
+If you configured a shared GCS bucket (`GCS_BUCKET`), you can inject it with `envsubst`:
 
 ```bash
-IMAGE_NAME="codeserver-python" \
-CPU_IMAGE_TAG="latest-cpu" \
-GPU_IMAGE_TAG="latest-gpu" \
-TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < workspacekinds/codeserver-python.yaml | kubectl apply -f -
+export GCS_BUCKET="my-project-kubeflow-user-bucket"
+envsubst '${GCS_BUCKET}' < workspacekinds/jupyterlab.yaml | kubectl apply -f -
+envsubst '${GCS_BUCKET}' < workspacekinds/codeserver-python.yaml | kubectl apply -f -
+```
+
+### 2. Using Custom Built Images via REGISTRY (Bulk Substitution)
+
+If you built your own custom images in your Google Cloud Artifact Registry (or private registry) using `./build.sh` following the steps above, you can point the WorkspaceKinds to your custom registry in bulk:
+
+```bash
+export REGISTRY="us-west1-docker.pkg.dev/my-project/kubeflow-repo"
+export GCS_BUCKET="my-project-kubeflow-user-bucket"
+
+# Substitute your custom registry into the WorkspaceKind manifests:
+sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" workspacekinds/jupyterlab.yaml | \
+  envsubst '${GCS_BUCKET}' | kubectl apply -f -
+
+sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" workspacekinds/codeserver-python.yaml | \
+  envsubst '${GCS_BUCKET}' | kubectl apply -f -
 ```
 
 Both commands read the templates through relative paths, so run them from this
@@ -591,6 +569,130 @@ kubectl get workspacekinds
 > [!TIP]
 > Prefer the immutable `v<timestamp>-<variant>` tags over `latest-*` for anything
 > you care about reproducing. `build.sh` prints the exact tags it pushed.
+
+### 3. Adding Your Own Custom Workspace Image (e.g., Custom JupyterLab)
+
+Beyond setting the `REGISTRY` environment variable to swap image repositories in bulk, you can easily plug in **your own proprietary or team-specific container images** (such as a custom JupyterLab environment with internal company libraries, specialized ML tools, or specific Python packages).
+
+#### Step 1: Container Requirements for Kubeflow Workspaces
+
+For a custom JupyterLab or VS Code image to work reliably with Kubeflow Workspaces:
+- **Port**: The application inside the container must listen on port **`8888`** for JupyterLab (or port **`8080`** for code-server).
+- **Subpath Prefix (`NB_PREFIX`)**: Kubeflow Workspaces routes traffic to each workspace through a reverse proxy path prefix (injected automatically as the `NB_PREFIX` environment variable, e.g. `/workspaces/user/my-workspace/`). JupyterLab must accept this base prefix:
+  `--ServerApp.base_url=${NB_PREFIX:-/}`
+- **Non-Root User**: The container should run as a non-root user (e.g., `jovyan` with UID `1000`) and use `/home/jovyan` for persistent workspace storage.
+
+#### Step 2: Build Your Custom Image (Extending the Prebuilt Base)
+
+The fastest way to build a custom workspace image is to start `FROM` the prebuilt GKE Workspaces image and layer your own tools on top:
+
+```dockerfile
+# Example: Dockerfile.custom-jupyter
+FROM ghcr.io/gke-labs/workspaces/jupyterlab:latest-cpu
+
+# (Optional) Install system packages as root
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    graphviz \
+    htop \
+ && rm -rf /var/lib/apt/lists/*
+
+# Switch back to jovyan to install team Python libraries
+USER jovyan
+RUN pip install --no-cache-dir \
+    polars \
+    duckdb \
+    langchain \
+    vllm
+```
+
+Build and push the image to your container registry (e.g., Google Cloud Artifact Registry):
+
+```bash
+export CUSTOM_IMAGE="us-central1-docker.pkg.dev/my-project/kubeflow-repo/my-custom-jupyter:v1.0"
+
+docker build -t "${CUSTOM_IMAGE}" -f Dockerfile.custom-jupyter .
+docker push "${CUSTOM_IMAGE}"
+```
+
+#### Step 3: Register the Image in `WorkspaceKind`
+
+Open [`workspacekinds/jupyterlab.yaml`](workspacekinds/jupyterlab.yaml) and add your custom image entry under `spec.podTemplate.options.imageConfig.values`:
+
+```yaml
+spec:
+  podTemplate:
+    options:
+      imageConfig:
+        spawner:
+          default: "my-custom-jupyter" # (Optional) Make your custom image the default selection
+        values:
+          # ------------------------------------------------------------------
+          # Your Custom Image Option
+          # ------------------------------------------------------------------
+          - id: "my-custom-jupyter"
+            spawner:
+              displayName: "JupyterLab (My Team Custom Data Science)"
+              description: "Python 3.12 with Polars, DuckDB, LangChain, and internal tools"
+              labels:
+                - key: "python_version"
+                  value: "3.12"
+                - key: "accelerator"
+                  value: "cpu" # Must match 'cpu', 'gpu', or 'tpu' for filterRules
+            spec:
+              image: "us-central1-docker.pkg.dev/my-project/kubeflow-repo/my-custom-jupyter:v1.0"
+              imagePullPolicy: "IfNotPresent"
+              ports:
+                - id: "jupyterlab"
+                  port: 8888
+
+          # Existing prebuilt image options (jupyterlab-cpu, jupyterlab-gpu, etc.) follow below...
+```
+
+> [!IMPORTANT]
+> **Label Alignment with `filterRules`**:
+> The `WorkspaceKind` contains filter rules that match the `accelerator` label (e.g., `value: "cpu"` or `value: "gpu"`) to the corresponding Pod hardware option. Always ensure the `accelerator` label on your custom image accurately matches its intended hardware variant.
+
+Apply the updated `WorkspaceKind` to your cluster:
+
+```bash
+kubectl apply -f workspacekinds/jupyterlab.yaml
+```
+
+#### Step 4: Ensure Cluster Pull Permissions
+
+For GKE to pull images from your private Google Cloud Artifact Registry:
+- **Same GCP Project**: If Artifact Registry is in the same GCP project as the GKE cluster, the GKE default node service account already has pull permissions.
+- **Cross-Project Registry**: If the registry is in a different GCP project, grant the `roles/artifactregistry.reader` role to the GKE node service account:
+  ```bash
+  gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
+    --location="${REGION}" --project="${REGISTRY_PROJECT_ID}" \
+    --member="serviceAccount:${GKE_NODE_SA}@${GKE_PROJECT_ID}.iam.gserviceaccount.com" \
+    --role="roles/artifactregistry.reader"
+  ```
+- **Third-Party Private Registries (Docker Hub, Quay, etc.)**: Create a Kubernetes `imagePullSecret` and reference it under `spec.podTemplate.podSpec.imagePullSecrets` in the `WorkspaceKind`.
+
+#### Step 5: Launching Workspaces with Your Custom Image
+
+- **Through the Kubeflow Web UI**: Users navigating to **Workspaces -> New Workspace** will now see your image option (`"JupyterLab (My Team Custom Data Science)"`) directly in the image selection drop-down menu.
+- **Declaratively via Kubernetes Manifest**: Users can also launch workspaces directly using a `Workspace` custom resource:
+
+```yaml
+apiVersion: kubeflow.org/v1beta1
+kind: Workspace
+metadata:
+  name: my-analysis
+  namespace: kubeflow-user
+spec:
+  kind:
+    name: jupyterlab
+  podTemplate:
+    options:
+      imageConfig:
+        id: "my-custom-jupyter"
+      podConfig:
+        id: "medium_cpu"
+```
 
 ### Accelerator prerequisites (GPU / TPU pod options)
 

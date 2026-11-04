@@ -38,14 +38,8 @@ export ADDRESS_NAME="${ADDRESS_NAME:-notebooks-gke-global}"
 export CERTIFICATE_NAME="${CERTIFICATE_NAME:-notebooks-gke}"
 export CERTIFICATE_MAP="${CERTIFICATE_MAP:-notebooks-gke}"
 export CONTEXT="${CONTEXT:-gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}}"
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-if [[ -z "${TAG:-}" ]]; then
-  if [[ "${BUILD_IMAGES:-true}" == "false" ]]; then
-    TAG=$(gcloud artifacts docker tags list "${REGISTRY}/gke-access-proxy" \
-      --project="${PROJECT_ID}" --format='value(tag)' --limit=1 2>/dev/null | head -n1)
-  fi
-  export TAG="${TAG:-pilot-$(date -u +%Y%m%d%H%M%S)}"
-fi
+export REGISTRY="${REGISTRY:-ghcr.io/gke-labs/workspaces}"
+export TAG="${TAG:-latest}"
 
 # Optional: Custom domain (e.g., "notebooks.example.com" or "workspaces.example.com").
 # If unset or empty, defaults automatically to "notebooks.<GLOBAL_EXTERNAL_IP>.sslip.io" (zero DNS setup required).
@@ -63,15 +57,9 @@ export IAP_SECRET_NAME="${IAP_SECRET_NAME:-}"
 export INSTALL_TRAINER="${INSTALL_TRAINER:-true}"
 export INSTALL_SPARK_OPERATOR="${INSTALL_SPARK_OPERATOR:-true}"
 
-# Optional: Build standalone core images (access-proxy, snapshot-addon, frontend, controller, backend).
-# Custom workspace images (JupyterLab / VS Code / Spark) are NOT built here; see ../../images/build.sh.
-export BUILD_IMAGES="${BUILD_IMAGES:-true}"
-
 # Optional: Register the example WorkspaceKinds from ../../images/workspacekinds/
-# (jupyterlab, codeserver) so users have something to launch immediately after the
-# deployment finishes. They are rendered by scripts/render_workspacekinds.py onto the
-# public upstream Kubeflow base images (no images/build.sh run needed; TPU options use
-# the CPU base image). Their GPU/TPU options use the ComputeClasses in
+# (jupyterlab, codeserver) using prebuilt workspace images so users have something to launch
+# immediately after the deployment finishes. Their GPU/TPU options use the ComputeClasses in
 # ../../examples/compute-classes/, applied when APPLY_COMPUTE_CLASSES=true.
 export APPLY_SAMPLE_WORKSPACEKIND="${APPLY_SAMPLE_WORKSPACEKIND:-true}"
 export SAMPLE_WORKSPACEKINDS="${SAMPLE_WORKSPACEKINDS:-${REPO_ROOT}/images/workspacekinds/jupyterlab.yaml ${REPO_ROOT}/images/workspacekinds/codeserver-python.yaml}"
@@ -147,8 +135,8 @@ echo "  PILOT_USERS:         ${PILOT_USERS}"
 echo "  TENANT_NAMESPACE:    ${TENANT_NAMESPACE}"
 echo "  REPO_NAME:           ${REPO_NAME}"
 echo "  REGISTRY:            ${REGISTRY}"
+echo "  TAG:                 ${TAG}"
 echo "  SNAPSHOT_GCS_BUCKET: ${SNAPSHOT_GCS_BUCKET}"
-echo "  BUILD_IMAGES:        ${BUILD_IMAGES}"
 echo "  INSTALL_TRAINER:     ${INSTALL_TRAINER}"
 echo "  INSTALL_SPARK:       ${INSTALL_SPARK_OPERATOR}"
 echo "  SAMPLE_WORKSPACEKIND:${APPLY_SAMPLE_WORKSPACEKIND}"
@@ -203,24 +191,16 @@ kubectl --context="${CONTEXT}" get crd \
   gcpbackendpolicies.networking.gke.io \
   healthcheckpolicies.networking.gke.io
 
-# Ensure Artifact Registry repository exists and GKE nodes can pull images
-if ! gcloud artifacts repositories describe "${REPO_NAME}" \
-    --location="${REGION}" \
-    --project="${PROJECT_ID}" >/dev/null 2>&1; then
-  echo "Creating Artifact Registry repository '${REPO_NAME}' in ${REGION}..."
-  gcloud artifacts repositories create "${REPO_NAME}" \
-    --repository-format=docker \
-    --location="${REGION}" \
-    --project="${PROJECT_ID}"
-fi
-
-GKE_SA="$(gcloud iam service-accounts list --project="${PROJECT_ID}" --filter="displayName:Compute Engine default service account" --format='value(email)' 2>/dev/null | head -n1 || true)"
-if [[ -n "${GKE_SA}" ]]; then
-  gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
-    --location="${REGION}" \
-    --project="${PROJECT_ID}" \
-    --member="serviceAccount:${GKE_SA}" \
-    --role="roles/artifactregistry.reader" >/dev/null 2>&1 || true
+# If using Google Artifact Registry, ensure GKE nodes can pull images
+if [[ "${REGISTRY}" =~ (pkg\.dev|gcr\.io) ]]; then
+  GKE_SA="$(gcloud iam service-accounts list --project="${PROJECT_ID}" --filter="displayName:Compute Engine default service account" --format='value(email)' 2>/dev/null | head -n1 || true)"
+  if [[ -n "${GKE_SA}" ]] && gcloud artifacts repositories describe "${REPO_NAME}" --location="${REGION}" --project="${PROJECT_ID}" >/dev/null 2>&1; then
+    gcloud artifacts repositories add-iam-policy-binding "${REPO_NAME}" \
+      --location="${REGION}" \
+      --project="${PROJECT_ID}" \
+      --member="serviceAccount:${GKE_SA}" \
+      --role="roles/artifactregistry.reader" >/dev/null 2>&1 || true
+  fi
 fi
 
 # ==============================================================================
@@ -278,30 +258,7 @@ for i in {1..60}; do
 done
 
 # ==============================================================================
-# Step 3: Build & Push Application Images
-# ==============================================================================
-if [[ "${BUILD_IMAGES}" == "true" ]]; then
-  echo "=================================================================="
-  echo "Step 3: Building & Pushing Standalone Workspaces Core Images..."
-  echo "=================================================================="
-  gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
-  docker build --platform=linux/amd64 -t "${REGISTRY}/gke-access-proxy:${TAG}" "${SCRIPT_DIR}"
-  docker build --platform=linux/amd64 -f "${SCRIPT_DIR}/snapshot.Dockerfile" \
-    -t "${REGISTRY}/gke-snapshot-addon:${TAG}" "${SCRIPT_DIR}"
-  docker build --platform=linux/amd64 -f "${SCRIPT_DIR}/frontend.Dockerfile" \
-    -t "${REGISTRY}/gke-frontend:${TAG}" "${REPO_ROOT}"
-  docker build --platform=linux/amd64 -f "${REPO_ROOT}/workspaces/controller/Dockerfile" \
-    -t "${REGISTRY}/gke-controller:${TAG}" "${REPO_ROOT}/workspaces/controller"
-  docker build --platform=linux/amd64 -f "${REPO_ROOT}/workspaces/backend/Dockerfile" \
-    -t "${REGISTRY}/gke-backend:${TAG}" "${REPO_ROOT}/workspaces"
-
-  for component in access-proxy snapshot-addon frontend controller backend; do
-    docker push "${REGISTRY}/gke-${component}:${TAG}"
-  done
-fi
-
-# ==============================================================================
-# Step 4: Reserve Global External IP, Configure Domain & Certificate Manager
+# Step 3: Reserve Global External IP, Configure Domain & Certificate Manager
 # ==============================================================================
 echo "=================================================================="
 echo "Step 4: Configuring Global External IP, Domain & Certificate Manager..."
@@ -487,16 +444,38 @@ if [[ -z "${CONTROL_PLANE_IP}" ]]; then
 fi
 export CONTROL_PLANE_CIDR="${CONTROL_PLANE_CIDR:-${CONTROL_PLANE_IP}/32}"
 
-PROXY_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-access-proxy:${TAG}" \
-  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
-SNAPSHOT_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-snapshot-addon:${TAG}" \
-  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
-FRONTEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-frontend:${TAG}" \
-  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
-CONTROLLER_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-controller:${TAG}" \
-  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
-BACKEND_IMAGE=$(gcloud artifacts docker images describe "${REGISTRY}/gke-backend:${TAG}" \
-  --project="${PROJECT_ID}" --format='value(image_summary.fully_qualified_digest)')
+resolve_image() {
+  local image_ref="$1"
+  if [[ "${image_ref}" == *"@sha256:"* ]]; then
+    echo "${image_ref}"
+    return 0
+  fi
+  if [[ "${image_ref}" =~ (pkg\.dev|gcr\.io) ]] && command -v gcloud >/dev/null 2>&1; then
+    local gar_digest
+    gar_digest=$(gcloud artifacts docker images describe "${image_ref}" \
+      --project="${PROJECT_ID:-}" --format='value(image_summary.fully_qualified_digest)' 2>/dev/null || true)
+    if [[ -n "${gar_digest}" ]]; then
+      echo "${gar_digest}"
+      return 0
+    fi
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    local d
+    d=$(docker buildx imagetools inspect "${image_ref}" 2>/dev/null | awk '/Digest:/{print $2; exit}' || true)
+    if [[ -n "${d}" ]]; then
+      local base="${image_ref%%:*}"
+      echo "${base}@${d}"
+      return 0
+    fi
+  fi
+  echo "${image_ref}"
+}
+
+export PROXY_IMAGE="${PROXY_IMAGE:-$(resolve_image "${REGISTRY}/gke-access-proxy:${TAG}")}"
+export SNAPSHOT_IMAGE="${SNAPSHOT_IMAGE:-$(resolve_image "${REGISTRY}/gke-snapshot-addon:${TAG}")}"
+export FRONTEND_IMAGE="${FRONTEND_IMAGE:-$(resolve_image "${REGISTRY}/gke-frontend:${TAG}")}"
+export CONTROLLER_IMAGE="${CONTROLLER_IMAGE:-$(resolve_image "${REGISTRY}/gke-controller:${TAG}")}"
+export BACKEND_IMAGE="${BACKEND_IMAGE:-$(resolve_image "${REGISTRY}/gke-backend:${TAG}")}"
 
 jq -n \
   --arg cidr "${CONTROL_PLANE_CIDR}" \
@@ -695,9 +674,8 @@ kubectl --context="${CONTEXT}" apply --server-side --field-manager=notebooks-gke
 
 # Register the example WorkspaceKinds from ../../images/workspacekinds/ so that the
 # tenant has ready-to-use Workspace options as soon as the deployment finishes.
-# scripts/render_workspacekinds.py points the custom image options at the public
-# upstream ghcr.io/kubeflow base images (TPU uses the CPU base image), so no custom
-# image build is required. GPU/TPU pod options select nodes through the GKE
+# Prebuilt workspace images from GitHub Container Registry (ghcr.io) are used directly.
+# GPU/TPU pod options select nodes through the GKE
 # ComputeClasses in ../../examples/compute-classes/ (supported on both Autopilot and
 # Standard), which are applied first so those options do not stay Pending.
 # To switch to the custom images later, build them with ../../images/build.sh and
@@ -718,11 +696,19 @@ if [[ "${APPLY_SAMPLE_WORKSPACEKIND}" == "true" ]]; then
     fi
   done
   if [[ ${#WORKSPACEKIND_TEMPLATES[@]} -gt 0 ]]; then
-    echo "Registering example WorkspaceKinds (upstream base images): ${WORKSPACEKIND_TEMPLATES[*]}"
-    python3 "${SCRIPT_DIR}/scripts/render_workspacekinds.py" "${WORKSPACEKIND_TEMPLATES[@]}" \
-      > "${SCRIPT_DIR}/rendered/ready/workspacekinds.json"
+    echo "Registering example WorkspaceKinds (prebuilt workspace images): ${WORKSPACEKIND_TEMPLATES[*]}"
+    mkdir -p "${SCRIPT_DIR}/rendered/ready"
+    : > "${SCRIPT_DIR}/rendered/ready/workspacekinds.yaml"
+    for template in "${WORKSPACEKIND_TEMPLATES[@]}"; do
+      echo "---" >> "${SCRIPT_DIR}/rendered/ready/workspacekinds.yaml"
+      if command -v envsubst >/dev/null 2>&1; then
+        sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" "${template}" | envsubst '${GCS_BUCKET}' >> "${SCRIPT_DIR}/rendered/ready/workspacekinds.yaml"
+      else
+        sed -e "s|\${GCS_BUCKET}|${GCS_BUCKET}|g" -e "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" "${template}" >> "${SCRIPT_DIR}/rendered/ready/workspacekinds.yaml"
+      fi
+    done
     kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
-      --field-manager=notebooks-gke-pilot -f "${SCRIPT_DIR}/rendered/ready/workspacekinds.json"
+      --field-manager=notebooks-gke-pilot -f "${SCRIPT_DIR}/rendered/ready/workspacekinds.yaml"
   fi
 fi
 

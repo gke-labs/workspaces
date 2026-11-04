@@ -11,10 +11,10 @@
   "iapAudience": "",
   "tenants": ["team-a"],
   "images": {
-    "controller": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
-    "backend": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
-    "frontend": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
-    "proxy": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST",
-    "snapshot": "REPLACE_WITH_IMAGE_AT_SHA256_DIGEST"
+    "controller": "ghcr.io/gke-labs/workspaces/gke-controller:latest",
+    "backend": "ghcr.io/gke-labs/workspaces/gke-backend:latest",
+    "frontend": "ghcr.io/gke-labs/workspaces/gke-frontend:latest",
+    "proxy": "ghcr.io/gke-labs/workspaces/gke-access-proxy:latest",
+    "snapshot": "ghcr.io/gke-labs/workspaces/gke-snapshot-addon:latest"
   }
 }

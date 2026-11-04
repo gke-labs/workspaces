@@ -191,9 +191,8 @@ export ADDRESS_NAME="notebooks-gke-global"        # Global static external IP na
 export CERTIFICATE_NAME="notebooks-gke"
 export CERTIFICATE_MAP="notebooks-gke"
 export CONTEXT="gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}"
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-export TAG="pilot-$(date -u +%Y%m%d%H%M%S)"
-export BUILD_IMAGES="true"                        # Build & push the five core platform images
+export REGISTRY="ghcr.io/gke-labs/workspaces"        # Registry hosting prebuilt core images
+export TAG="latest"
 export INSTALL_TRAINER="true"
 export INSTALL_SPARK_OPERATOR="true"
 export APPLY_SAMPLE_WORKSPACEKIND="true"
@@ -219,8 +218,8 @@ Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its 
 | `CERTIFICATE_NAME` | `notebooks-gke` | Certificate Manager certificate for `WORKSPACES_HOST`. The desktop certificate is always `${CERTIFICATE_NAME}-desktop`. |
 | `CERTIFICATE_MAP` | `notebooks-gke` | Certificate Manager map attached to the Gateway. |
 | `CONTEXT` | `gke_${PROJECT_ID}_${LOCATION}_${CLUSTER_NAME}` | kubectl context. |
-| `REGISTRY` | `${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}` | Destination registry for the core images. |
-| `TAG` | `pilot-$(date -u +%Y%m%d%H%M%S)` | Image tag. When `BUILD_IMAGES=false` and `TAG` is unset, the script resolves the newest existing `gke-access-proxy` tag instead. |
+| `REGISTRY` | `ghcr.io/gke-labs/workspaces` | Destination registry for the prebuilt core images. |
+| `TAG` | `latest` | Tag of prebuilt core images. |
 | `WORKSPACES_HOST` | *(empty)* | **Hostname #1 — the web dashboard.** Where users browse the Workspaces UI and open workspaces. When empty, defaults to `notebooks.<ADDRESS>.sslip.io`. Set this to your own domain — see [Option A2](#option-a2-what-to-do-if-you-have-your-own-custom-domain). |
 | `DESKTOP_HOST` | *(empty)* | **Hostname #2 — the remote-kernel endpoint.** A second, cluster-wide hostname on the *same* IP, used by the Jupyter extension in **VS Code running on your laptop** to reach a Jupyter kernel inside an already-running JupyterLab workspace. Not related to the `codeserver` WorkspaceKind, and not per-workspace. When empty, defaults to `connect.<ADDRESS>.sslip.io`. See [Section 8](#8-remote-jupyter-kernels-from-desktop-vs-code-the-connect-endpoint). |
 | `OAUTH_FILE` | *(empty)* | Path to a downloaded Web-application OAuth client JSON. Set only for Option B2. |
@@ -228,9 +227,10 @@ Every variable read by [`deploy_standalone.sh`](deploy_standalone.sh), with its 
 | `IAP_SECRET_NAME` | *(empty)* | Kubernetes Secret holding the OAuth client secret. Defaults to `iap-oauth` when `OAUTH_FILE` is set. |
 | `INSTALL_TRAINER` | `true` | Deploy Kubeflow Trainer (v2). |
 | `INSTALL_SPARK_OPERATOR` | `true` | Deploy Kubeflow Spark Operator. |
-| `BUILD_IMAGES` | `true` | Build & push the five core platform images (Section 3). |
-| `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the example `jupyterlab` and `codeserver` WorkspaceKinds (upstream base images) after tenant RBAC is applied. |
-| `SAMPLE_WORKSPACEKINDS` | `<repo-root>/images/workspacekinds/jupyterlab.yaml <repo-root>/images/workspacekinds/codeserver-python.yaml` | Space-separated WorkspaceKind templates rendered by [`scripts/render_workspacekinds.py`](scripts/render_workspacekinds.py) when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
+| `REGISTRY` | `ghcr.io/gke-labs/workspaces` | Container registry hosting the prebuilt standalone core images. |
+| `TAG` | `latest` | Tag of prebuilt standalone core images. |
+| `APPLY_SAMPLE_WORKSPACEKIND` | `true` | Register the example `jupyterlab` and `codeserver` WorkspaceKinds (using prebuilt workspace images) after tenant RBAC is applied. |
+| `SAMPLE_WORKSPACEKINDS` | `<repo-root>/images/workspacekinds/jupyterlab.yaml <repo-root>/images/workspacekinds/codeserver-python.yaml` | WorkspaceKind manifests applied when `APPLY_SAMPLE_WORKSPACEKIND=true`. |
 | `APPLY_COMPUTE_CLASSES` | `true` | With `APPLY_SAMPLE_WORKSPACEKIND=true`, also apply the GPU/TPU ComputeClasses used by the WorkspaceKinds' accelerator pod options. |
 | `COMPUTE_CLASSES_DIR` | `<repo-root>/examples/compute-classes` | Directory of ComputeClass manifests applied when `APPLY_COMPUTE_CLASSES=true`. |
 | `GCS_BUCKET` | `${PROJECT_ID}-${TENANT_NAMESPACE}-bucket` | Bucket name injected into every Workspace Pod as `$GCS_BUCKET`. Not created by the script. |
@@ -339,10 +339,14 @@ done
 
 ---
 
-## 3. Build & Push Application Images
+## 3. Core Platform Images (Optional)
 
-### Step 3.1: Build & Push Standalone Workspaces Core Images
-Build and push the five standalone core platform images (`gke-access-proxy`, `gke-snapshot-addon`, `gke-frontend`, `gke-controller`, `gke-backend`) and pin their registry digests. This is exactly what Step 3 of [`deploy_standalone.sh`](deploy_standalone.sh) does when `BUILD_IMAGES=true`:
+> [!NOTE]
+> **Prebuilt Images Ready**: The standalone deployment now uses prebuilt images hosted on GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`). You do **not** need to build these images to deploy the platform.
+> To build and publish your own images, use [`hack/build-and-publish-images.sh --provider-images`](../../hack/build-and-publish-images.sh).
+
+### Manual Build (Developers / Custom Forks)
+If you wish to build the five standalone core platform images manually (`gke-access-proxy`, `gke-snapshot-addon`, `gke-frontend`, `gke-controller`, `gke-backend`):
 
 ```bash
 make -C providers/gke test
@@ -780,23 +784,27 @@ kubectl --context="${CONTEXT}" get clustertrainingruntime
    ```
 
 3. **Register Example WorkspaceKinds**:
-   When `APPLY_SAMPLE_WORKSPACEKIND=true` (the default), the script registers the `jupyterlab` and `codeserver` WorkspaceKinds from [`../../images/workspacekinds/`](../../images/workspacekinds/) (`SAMPLE_WORKSPACEKINDS`) so users have something to launch immediately after deployment. [`scripts/render_workspacekinds.py`](scripts/render_workspacekinds.py) renders the templates without any custom image build:
-   - The `*-cpu`, `*-gpu` and `*-tpu` image options point at the public upstream `ghcr.io/kubeflow` base images the custom images are built from (`jupyter-scipy`, `jupyter-pytorch-cuda-full`, `codeserver-python`). There is no upstream TPU image, so the TPU option uses the **CPU** base image (no `libtpu`/`jax[tpu]` preinstalled). The imageConfig ids are unchanged, so re-applying the templates with custom images later upgrades existing Workspaces in place.
+   When `APPLY_SAMPLE_WORKSPACEKIND=true` (the default), the script registers the `jupyterlab` and `codeserver` WorkspaceKinds from [`../../images/workspacekinds/`](../../images/workspacekinds/) (`SAMPLE_WORKSPACEKINDS`) so users have something to launch immediately after deployment. Prebuilt workspace images from GitHub Container Registry (`ghcr.io/gke-labs/workspaces`) are used directly:
+   - The `*-cpu`, `*-gpu` and `*-tpu` image options point at prebuilt workspace images with preinstalled CUDA, JAX, PyTorch, and Kubeflow SDKs.
    - GPU/TPU pod options select nodes with `cloud.google.com/compute-class`, which works on both Autopilot and Standard clusters. When `APPLY_COMPUTE_CLASSES=true` (the default), the script first applies the ComputeClasses from [`../../examples/compute-classes/`](../../examples/compute-classes/) so those options can schedule.
 
    Templates that do not exist are skipped with a warning.
 
-   *To register the custom-image WorkspaceKinds instead, see [`../../images/README.md#ready-made-workspacekind-templates`](../../images/README.md#ready-made-workspacekind-templates); they use the same `metadata.name`s and pod options, and replace the rendered kinds.*
+   *To register custom-built WorkspaceKinds instead, see [`../../images/README.md#ready-made-workspacekind-templates`](../../images/README.md#ready-made-workspacekind-templates).*
 
    ```bash
    if [[ "${APPLY_COMPUTE_CLASSES}" == "true" ]]; then
      kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
        --field-manager=notebooks-gke-pilot -f "${COMPUTE_CLASSES_DIR}"
    fi
-   python3 providers/gke/scripts/render_workspacekinds.py ${SAMPLE_WORKSPACEKINDS} \
-     > providers/gke/rendered/ready/workspacekinds.json
+   mkdir -p providers/gke/rendered/ready
+   : > providers/gke/rendered/ready/workspacekinds.yaml
+   for template in ${SAMPLE_WORKSPACEKINDS}; do
+     echo "---" >> providers/gke/rendered/ready/workspacekinds.yaml
+     envsubst '${GCS_BUCKET} ${REGISTRY}' < "${template}" >> providers/gke/rendered/ready/workspacekinds.yaml
+   done
    kubectl --context="${CONTEXT}" apply --server-side --force-conflicts \
-     --field-manager=notebooks-gke-pilot -f providers/gke/rendered/ready/workspacekinds.json
+     --field-manager=notebooks-gke-pilot -f providers/gke/rendered/ready/workspacekinds.yaml
    ```
 
    > [!IMPORTANT]
