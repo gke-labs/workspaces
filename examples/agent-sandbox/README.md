@@ -123,19 +123,16 @@ export TENANT_NAMESPACE="kubeflow-user"
 export REPO_NAME="kubeflow-repo"
 
 # Optional:
-# export MCP_BUILD_FLAGS="--cloud-build"   # no local Docker
-# export BUILD_MCP_SERVER_IMAGE=false      # image already pushed on an earlier run
+# export BUILD_MCP_SERVER_IMAGE=true      # build & push custom image to your registry instead of prebuilt
 
 ./examples/agent-sandbox/deploy_agent_sandbox.sh
 ```
 
 The script:
 
-1. Gets cluster credentials, then **builds and pushes the MCP server image**
-   (`images/build.sh --mcp-server`) to
-   `${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/agent-sandbox-mcp-server:latest`.
-   Upstream publishes the MCP server's source but no image, so this repository
-   builds it.
+1. Uses the **prebuilt MCP server image** from GitHub Container Registry
+   (`ghcr.io/gke-labs/workspaces/agent-sandbox-mcp-server:latest`). (To build and
+   push your own image using `images/build.sh --mcp-server`, set `BUILD_MCP_SERVER_IMAGE=true`).
 2. Installs the Agent Sandbox operator (v1.0.3) if its CRDs are missing.
 3. Applies `ClusterRole/agent-sandbox-kubeflow-edit`. It aggregates into
    `kubeflow-edit`, so every Workspace (all kinds in this repo use
@@ -240,38 +237,16 @@ NODE_VERSION=22.14.0
 mkdir -p ~/.local
 curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
   | tar -xJ -C ~/.local --strip-components=1
-npm config set prefix "$HOME/.local"
-npm install -g @google/gemini-cli
+The prebuilt `codeserver` WorkspaceKind deployed by `deploy_standalone.sh` uses
+`ghcr.io/gke-labs/workspaces/codeserver-python:latest-cpu`, which already includes
+**Gemini Code Assist** (`Google.geminicodeassist`) and the **Gemini CLI** (`@google/gemini-cli`)
+pre-installed. You can verify immediately in the Workspace terminal:
+
+```bash
 gemini --version
 ```
 
-Gemini Code Assist is optional here; add the `Google.geminicodeassist` extension
-from the VS Code Extensions view if you want it.
-
-**Option B — build the custom `codeserver-python` image** so every new
-Workspace has Gemini preinstalled. From your workstation, with the Step 1
-variables and `GCS_BUCKET` exported (the same values used for
-`deploy_standalone.sh`):
-
-```bash
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
-
-# Build and push (CPU variant is enough for this example)
-./images/build.sh --codeserver --cpu --registry-path "${REGISTRY}"
-
-# Re-point the existing 'codeserver' WorkspaceKind at the custom image
-IMAGE_NAME="codeserver-python" CPU_IMAGE_TAG="latest-cpu" \
-GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < images/workspacekinds/codeserver-python.yaml | kubectl apply -f -
-```
-
-Then create a new Workspace (Step 2); existing ones keep their current image
-until restarted. The template also re-points the kind's GPU/TPU image options at
-`latest-gpu` / `latest-tpu`; if you use those options, drop `--cpu` to build all
-variants. `envsubst` turns any unset variable into an empty string, so
-check `PROJECT_ID`, `REGION`, `REPO_NAME` and `GCS_BUCKET` are exported first.
-Details: [`images/README.md`](../../images/README.md).
+*(If you launched on the generic upstream base image instead, install the CLI with `npm config set prefix "$HOME/.local" && npm install -g @google/gemini-cli`).*
 
 **2. Point Gemini at the MCP server.** In the Workspace terminal:
 
@@ -323,8 +298,8 @@ Environment variables read by [`deploy_agent_sandbox.sh`](deploy_agent_sandbox.s
 | `WARMPOOL_REPLICAS` | `1` | Idle sandboxes kept ready. |
 | `AGENT_SANDBOX_VERSION` | `v1.0.3` | Upstream release for the operator, sandbox runtime image and MCP server source. |
 | `SANDBOX_RUNTIME_IMAGE` | `registry.k8s.io/agent-sandbox/python-runtime-sandbox:${AGENT_SANDBOX_VERSION}` | Image each sandbox runs. |
-| `AGENT_SANDBOX_MCP_IMAGE` | `${REGISTRY}/agent-sandbox-mcp-server:latest` | MCP server image. Setting your own skips the build by default. |
-| `BUILD_MCP_SERVER_IMAGE` | `true` (`false` if `AGENT_SANDBOX_MCP_IMAGE` is set) | Build and push the MCP server image before deploying. |
+| `AGENT_SANDBOX_MCP_IMAGE` | `ghcr.io/gke-labs/workspaces/agent-sandbox-mcp-server:latest` | Prebuilt MCP server container image. |
+| `BUILD_MCP_SERVER_IMAGE` | `false` | Set `true` to build and push your own MCP server image using `images/build.sh`. |
 | `MCP_BUILD_FLAGS` | *(empty)* | Extra `images/build.sh` flags, e.g. `--cloud-build`. |
 
 Read by the walkthrough:

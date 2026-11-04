@@ -84,10 +84,9 @@ TPU_TOLERATIONS = [
 
 # Images
 #
-# REGISTRY has no default on purpose. A placeholder default (e.g.
-# ".../my-project/kubeflow-repo") only moves the failure to an ImagePullBackOff
-# several minutes later, which is much harder to diagnose than an immediate error.
-REGISTRY = os.environ.get("REGISTRY", "").rstrip("/")
+# Defaults to the prebuilt images hosted on GitHub Container Registry (ghcr.io).
+# Set REGISTRY or TAG to override with your custom images.
+REGISTRY = os.environ.get("REGISTRY", "ghcr.io/gke-labs/workspaces").rstrip("/")
 TAG = os.environ.get("TAG", "latest")
 SPARK_IMAGE = f"{REGISTRY}/spark-py312:{TAG}" if REGISTRY else None
 TPU_IMAGE = os.environ.get(

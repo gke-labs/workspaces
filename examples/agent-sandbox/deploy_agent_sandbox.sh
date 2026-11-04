@@ -53,17 +53,11 @@ export WARMPOOL_REPLICAS="${WARMPOOL_REPLICAS:-1}"
 # Use official release container image from https://github.com/kubernetes-sigs/agent-sandbox/releases#release-v1.0.3
 export SANDBOX_RUNTIME_IMAGE="${SANDBOX_RUNTIME_IMAGE:-registry.k8s.io/agent-sandbox/python-runtime-sandbox:${AGENT_SANDBOX_VERSION}}"
 
-# The MCP server image has no public build, so this script builds and pushes it to
-# ${REGISTRY} with ../../images/build.sh --mcp-server (needs Docker, or set
-# MCP_BUILD_FLAGS="--cloud-build"). Set BUILD_MCP_SERVER_IMAGE=false to reuse an image
-# that is already pushed. If you point AGENT_SANDBOX_MCP_IMAGE at your own image, the
-# build is skipped by default.
-if [[ -n "${AGENT_SANDBOX_MCP_IMAGE:-}" ]]; then
-  export BUILD_MCP_SERVER_IMAGE="${BUILD_MCP_SERVER_IMAGE:-false}"
-else
-  export BUILD_MCP_SERVER_IMAGE="${BUILD_MCP_SERVER_IMAGE:-true}"
-fi
-export AGENT_SANDBOX_MCP_IMAGE="${AGENT_SANDBOX_MCP_IMAGE:-${REGISTRY}/agent-sandbox-mcp-server:latest}"
+# Uses the prebuilt MCP server image from GitHub Container Registry (ghcr.io) by default.
+# To build and push your own MCP server image to ${REGISTRY}, set BUILD_MCP_SERVER_IMAGE=true
+# (needs Docker, or set MCP_BUILD_FLAGS="--cloud-build").
+export AGENT_SANDBOX_MCP_IMAGE="${AGENT_SANDBOX_MCP_IMAGE:-ghcr.io/gke-labs/workspaces/agent-sandbox-mcp-server:latest}"
+export BUILD_MCP_SERVER_IMAGE="${BUILD_MCP_SERVER_IMAGE:-false}"
 export MCP_BUILD_FLAGS="${MCP_BUILD_FLAGS:-}"
 
 if [[ -z "${PROJECT_ID}" ]]; then

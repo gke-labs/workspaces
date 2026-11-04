@@ -121,9 +121,10 @@ export CLUSTER_NAME="kubeflow-notebooks"
 export LOCATION="us-west1"
 export REGION="us-west1"
 export TENANT_NAMESPACE="kubeflow-user"
-export REPO_NAME="kubeflow-repo"
 export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+
+# Optional: REGISTRY defaults to prebuilt public images (ghcr.io/gke-labs/workspaces)
+# export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
 ```
 
 1. **Verify ComputeClasses**:

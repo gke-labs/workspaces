@@ -37,13 +37,9 @@ network disk** — every read and write is an ordinary object-storage call,
 authorized by Workload Identity.
 
 > [!TIP]
-> **Already completed the one-time platform setup?** If you already followed steps 1–6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, GCS bucket, `jupyterlab` WorkspaceKind, and TPU ComputeClass are already set up. You can skip the setup prerequisites and jump straight to [Create the Workspace](#7-create-the-workspace-with-the-right-options) or [Running it](#running-it).
+> **Already completed the one-time platform setup?** If you already followed steps 1–3 & 6 in the [Examples README](../README.md#start-here-one-time-setup-the-order-things-have-to-happen-in), your GKE cluster, GCS bucket, `jupyterlab` WorkspaceKind, and TPU ComputeClass are already set up.
 >
-> **One exception: the Spark image.** The custom images are optional in the one-time setup, but this example needs `spark-py312` for Stage 1. If you haven't pushed it yet, build it first (see [3. The Spark image is built and pushed](#3-the-spark-image-is-built-and-pushed)):
->
-> ```bash
-> ./images/build.sh --spark --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-> ```
+> All images used in this example (`jupyterlab:latest-cpu` and `spark-py312:latest`) are prebuilt and available publicly from GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`). You can skip setup prerequisites and jump straight to [Create the Workspace](#7-create-the-workspace-with-the-right-options) or [Running it](#running-it).
 
 ### Flow
 
@@ -201,42 +197,28 @@ kubectl get clustertrainingruntimes
 > complete. Re-run the deploy script with `INSTALL_TRAINER=true` and re-check.
 > Without the runtime the TrainJob is rejected and Stage 2 never starts a pod.
 
-### 3. The Spark image is built and pushed
+### 3. Container Images (Prebuilt Ready to Use)
 
-Stage 1 needs a custom Spark image, `spark-py312`. Build it with
-[`../../images/build.sh`](../../images/build.sh); details in
-[`../../images/README.md`](../../images/README.md).
+Stage 1 uses Apache Spark 4.0.1 on Python 3.12 (`spark-py312`), which is prebuilt and available publicly on GitHub Container Registry:
+`ghcr.io/gke-labs/workspaces/spark-py312:latest`
 
-```bash
-export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+The `pipeline.py` script automatically resolves this prebuilt image. You do **not** need to build or push this image yourself.
 
-./images/build.sh --spark --registry-path "${REGISTRY}"   # REQUIRED for Stage 1
-```
+> [!NOTE]
+> If you wish to build your own custom Spark image and host it in Google Cloud Artifact Registry, you can optionally build it with:
+> ```bash
+> export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+> ./images/build.sh --spark --registry-path "${REGISTRY}"
+> ```
+> See [`../../images/README.md`](../../images/README.md) for details.
 
-Verify:
-
-```bash
-gcloud artifacts docker images list "${REGISTRY}" --include-tags \
-  | grep spark-py312
-```
-
-> [!WARNING]
-> `spark-py312` is not optional and has no public substitute. Stage 1 runs
-> PySpark 4 with Python 3.12 on both driver and executors; the stock Apache Spark
-> images ship a different Python and the Spark Connect session will fail to start.
-
-The custom `jupyterlab` Workspace image is **optional**. The Workspace runs on
-the upstream base image by default, and the notebook's setup cell installs the
-missing SDKs (`kubeflow[spark]`) on first run. To use the custom image instead,
-build it with `./images/build.sh --jupyterlab --cpu --registry-path "${REGISTRY}"`
-and re-apply the WorkspaceKind as described in
-[`../../images/README.md`](../../images/README.md).
+The `jupyterlab` Workspace container is also prebuilt (`ghcr.io/gke-labs/workspaces/jupyterlab:latest-cpu`) and includes all required dependencies (`kubeflow[spark]`, PySpark 4, JAX, KFP) out of the box.
 
 ### 4. The `jupyterlab` WorkspaceKind is registered
 
 `deploy_standalone.sh` registers it by default from
-[`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml),
-using the upstream base images. Confirm it:
+[`../../images/workspacekinds/jupyterlab.yaml`](../../images/workspacekinds/jupyterlab.yaml)
+using the prebuilt images. Confirm it:
 
 ```bash
 kubectl get workspacekind jupyterlab
@@ -442,7 +424,7 @@ All defaults below are what the code actually does when the variable is unset.
 
 | Image | Used by | Notes |
 | :--- | :--- | :--- |
-| `${REGISTRY}/spark-py312:${TAG}` | Stage 1 Spark Connect driver + executors | You build this: `./images/build.sh --spark`. Apache Spark 4.0.1 on Python 3.12. |
+| `${REGISTRY}/spark-py312:${TAG}` (default `ghcr.io/gke-labs/workspaces/spark-py312:latest`) | Stage 1 Spark Connect driver + executors | Prebuilt Apache Spark 4.0.1 on Python 3.12. (Optional: build your own via `./images/build.sh --spark`). |
 | `us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest` | Stage 2 TPU training pods | Public Google image; contains JAX with TPU support. Override with `DEMO_TPU_IMAGE`. |
 | `python:3.12-slim` | Stage 3 inference pods | Public Docker Hub image. `serve.py` arrives via ConfigMap and the pod `pip install`s `numpy` + `google-cloud-storage` at startup. |
 

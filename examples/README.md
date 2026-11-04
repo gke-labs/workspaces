@@ -9,9 +9,11 @@ exact commands to run, what the output should look like, a troubleshooting table
 and cleanup instructions.
 
 > [!TIP]
-> **One-time platform setup (~20–30 min without custom images, ~35–60 min with them):** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–6**) **once**. After that, the cluster, storage, images, and templates are in place, and you can run any (or all) of the examples without repeating the setup.
+> **One-time platform setup (~20–30 min):** All examples share the same underlying cluster and platform. You only complete the setup steps (**steps 1–3 & 6**) **once**. After that, the cluster, storage, prebuilt images, and WorkspaceKinds are in place, and you can run any (or all) of the examples without repeating the setup.
 >
-> **Steps 4–5 (custom images, ~15–30 min) are optional.** Step 3 already registers the `jupyterlab` and `codeserver` WorkspaceKinds on the public upstream Kubeflow base images and applies the GPU/TPU ComputeClasses. You only need steps 4–5 if you want the example dependencies (JAX, PyTorch, `transformers`, Kubeflow SDKs, VS Code extensions, …) **preinstalled** instead of `pip install`-ing them inside your Workspace. The exception is `spark-py312` for [distributed](distributed/), a non-Workspace image with no public substitute. ([agent-sandbox](agent-sandbox/) also needs a non-Workspace image, `agent-sandbox-mcp-server`, but its deploy script builds it for you.)
+> **Prebuilt images are used by default.** Step 3 automatically registers the `jupyterlab` and `codeserver` WorkspaceKinds using prebuilt images from GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`) and applies the GPU/TPU ComputeClasses. These prebuilt images come with all dependencies (JAX, PyTorch, `transformers`, `torch_tpu`, `libtpu`, Kubeflow SDKs, VS Code extensions, etc.) preinstalled. Prebuilt images are also available for `spark-py312` (for [distributed](distributed/) and [minigpt](minigpt/)) and `agent-sandbox-mcp-server` (for [agent-sandbox](agent-sandbox/)).
+>
+> **Steps 4–5 are completely optional.** Only follow them if you want to build your own custom container images or host them in your own Google Cloud Artifact Registry.
 
 ---
 
@@ -38,17 +40,17 @@ Plus shared utilities and building blocks:
 
 ## Start here: One-time setup (the order things have to happen in)
 
-Every example assumes the platform underneath it already exists. **Steps 1–6 are a one-time setup**: work top to bottom through them **once** for your cluster. Once completed, your environment is ready for all examples — you do not repeat steps 1–6 when trying different examples.
+Every example assumes the platform underneath it already exists. **Steps 1–3 and 6 are the core one-time setup**: work top to bottom through them **once** for your cluster. Once completed, your environment is ready for all examples — you do not repeat them when trying different examples.
 
 ```mermaid
 flowchart TD
-    subgraph S1["One-time setup (steps 1–6, done once for all examples) — ~20–30 min"]
+    subgraph S1["One-time setup (steps 1–3 & 6, done once for all examples) — ~20–30 min"]
         A["1. Authenticate & create a GKE cluster<br/>(~10–15 min)"] --> B["2. Create a GCS data bucket<br/>(~1–2 min)"]
-        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh<br/>(~5–10 min)"]
-        C -. "optional: preinstalled deps" .-> D["4. Build custom images<br/>images/build.sh<br/>(~15–30 min)"]
-        D --> E["5. Register WorkspaceKinds<br/>images/workspacekinds/<br/>(~1 min)"]
-        E --> G["6. ComputeClasses<br/>(already applied by step 3)<br/>(~1 min)"]
-        C --> G
+        B --> C["3. Deploy the platform<br/>providers/gke/deploy_standalone.sh<br/>(registers WorkspaceKinds with prebuilt images)<br/>(~5–10 min)"]
+        C --> G["6. ComputeClasses<br/>(already applied by step 3)<br/>(~1 min)"]
+        C -. "optional: custom image build" .-> D["4. (Optional) Build custom images<br/>images/build.sh<br/>(~15–30 min)"]
+        D --> E["5. (Optional) Register custom WorkspaceKinds<br/>images/workspacekinds/<br/>(~1 min)"]
+        E --> G
     end
     subgraph S2["Per-example workflow (repeat for each example)"]
         H["7. Create a Workspace in the UI<br/>(~2–5 min)"] --> I["8. Upload and run an example<br/>(10–60+ min, varies)"]
@@ -272,16 +274,15 @@ This installs the Workspaces controller, backend, frontend, the IAP-authenticate
 access proxy, the Pod snapshot add-on, Kubeflow Trainer v2, the Spark Operator,
 and the GPU/TPU [ComputeClasses](compute-classes/). It also registers the
 `jupyterlab` and `codeserver` WorkspaceKinds from
-[`../images/workspacekinds/`](../images/workspacekinds/) so you have something to
-launch straight away. Their image options point at the **public upstream Kubeflow
-base images** (`jupyter-scipy`, `jupyter-pytorch-cuda-full`, `codeserver-python`;
-the TPU option uses the CPU image), so no image build is needed. Install anything
-an example needs that the base image lacks with `pip install --user` from a
-notebook cell or terminal inside the Workspace. `--user` puts it in `~/.local` on
-the home volume, so it persists across restarts. The first `--user` install in a
-new Workspace is not importable until you restart the kernel (or run
-`import site; site.addsitedir(site.getusersitepackages())`), because `~/.local`
-did not exist when the kernel started.
+[`../images/workspacekinds/`](../images/workspacekinds/) pre-configured with the
+**prebuilt container images from GitHub Container Registry** (`ghcr.io/gke-labs/workspaces/...`).
+These prebuilt images already include the complete runtime stacks:
+- **JupyterLab (CPU)**: `jax[cpu]`, `numpy`, `pandas`, `matplotlib`, `kfp`, `kubeflow[spark]`, `jupyter-server-proxy`
+- **JupyterLab (GPU)**: CUDA 12, PyTorch, `transformers`, `accelerate`, `jax[cuda12]`
+- **JupyterLab (TPU)**: Cloud TPU driver (`libtpu`), `torch_tpu`, `jax[tpu]`, PyTorch, Kubeflow SDKs
+- **VS Code (`codeserver`)**: Gemini Code Assist, Marimo, Python & Jupyter extensions
+
+Everything is ready to launch immediately without building any images or configuring a custom registry.
 
 #### Deployment Options
 
@@ -295,44 +296,39 @@ did not exist when the kernel started.
 ### 4. (Optional) Build custom images (~15–30 min)
 
 > [!NOTE]
-> Skip steps 4–5 if you are fine installing dependencies yourself inside the
-> Workspace; step 3 already gave you working `jupyterlab` and `codeserver`
-> WorkspaceKinds on the upstream base images. Do steps 4–5 when you want the
-> example stacks **preinstalled** (JAX, PyTorch, `transformers`, `libtpu`/`jax[tpu]`,
-> Kubeflow SDKs, Gemini Code Assist, …) so every new Workspace is ready without a
-> `pip install`. One image is required regardless, because it does not run as
-> the Workspace and has no public substitute: `spark-py312`
-> ([distributed](distributed/), `./build.sh --spark`). The
-> [agent-sandbox](agent-sandbox/) example also needs `agent-sandbox-mcp-server`,
-> but its deploy script builds and pushes that for you.
+> **Prebuilt Images Ready**: All examples run out-of-the-box on the prebuilt images hosted on GitHub Container Registry (`ghcr.io/gke-labs/workspaces/...`), including `spark-py312` and `agent-sandbox-mcp-server`.
+>
+> You only need to follow steps 4–5 if you want to **customize** the images (e.g. baking in internal company libraries, custom tools, or private datasets) or host them in your own Google Cloud Artifact Registry.
+
+To build and push custom images to your own Google Cloud Artifact Registry:
 
 ```bash
 cd images
-./build.sh --all --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+./build.sh --all --registry-path "${REGISTRY}"
 ```
 
-See [`../images/README.md`](../images/README.md). `--all` means the three
-workspace images — `codeserver-python`, `jupyterlab` and `spark-py312`. The
-`agent-sandbox-mcp-server` image is deliberately **not** in `--all`; the
-`agent-sandbox` example's `deploy_agent_sandbox.sh` builds it (`./build.sh --mcp-server`).
+See [`../images/README.md`](../images/README.md) for full options and customizations.
 
 <a id="5-optional-register-the-workspacekinds-that-expose-those-images"></a>
 ### 5. (Optional) Register the WorkspaceKinds that expose those images (~1 min)
 
-Register the ready-made templates for **JupyterLab** and **VS Code (code-server)**.
-They use the same names and option ids as the kinds registered in step 3, so this
-simply repoints them at your custom images:
+If you built custom images in your own registry in Step 4, update the `WorkspaceKind` resources to point at your registry:
 
 ```bash
 cd images
 
-# 1. Register JupyterLab WorkspaceKind
-IMAGE_NAME="jupyterlab" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < workspacekinds/jupyterlab.yaml | kubectl apply -f -
+export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
-# 2. Register VS Code (code-server) WorkspaceKind
-IMAGE_NAME="codeserver-python" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
-  envsubst < workspacekinds/codeserver-python.yaml | kubectl apply -f -
+# 1. Update JupyterLab WorkspaceKind
+sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" workspacekinds/jupyterlab.yaml | \
+  envsubst '${GCS_BUCKET}' | kubectl apply -f -
+
+# 2. Update VS Code (code-server) WorkspaceKind
+sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g" workspacekinds/codeserver-python.yaml | \
+  envsubst '${GCS_BUCKET}' | kubectl apply -f -
 ```
 
 Verify that both WorkspaceKinds are registered:
@@ -541,21 +537,22 @@ By default, files are placed in the remote user's home directory (`~`, matching 
 
 ## What each example needs
 
-The platform and components configured in the **one-time setup** (steps 1–6) provide everything these examples require. Custom images are optional except where marked **required**:
+The platform and components configured in the **one-time setup** (steps 1–3 & 6) provide everything these examples require. All examples run out-of-the-box using the prebuilt images (`ghcr.io/gke-labs/workspaces/...`):
 
-| | resumable-notebooks | distributed | tpu | agent-sandbox | ray |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Custom images from `images/build.sh` (optional unless marked **required**; otherwise `pip install` into the base image) | Not needed: CPU notebook runs on the base image as-is; GPU notebook installs `transformers` in its Step 0 cell | JupyterLab CPU + **`spark-py312` (required)** | JupyterLab TPU | VS Code (`codeserver-python`) CPU + `agent-sandbox-mcp-server` (required; built and pushed by `deploy_agent_sandbox.sh`) | JupyterLab CPU (with `jupyter-server-proxy`) |
-| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` |
-| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | none | none (standard CPU node pool) |
-| GKE Pod Snapshots + gVisor | ✅ | — | — | — | — (requires standard non-gVisor node pool) |
-| Kubeflow Trainer v2 | — | ✅ | — | — | — |
-| Kubeflow Spark Operator | — | ✅ | — | — | — |
-| Agent Sandbox operator | — | — | — | ✅ (installed by that example's deploy script) | — |
-| KubeRay operator | — | — | — | — | ✅ (GKE Ray add-on or Helm, in that example's Step 1) |
-| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | — | — |
-| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | — | — |
+| | resumable-notebooks | distributed | tpu | minigpt | agent-sandbox | ray |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Standalone platform deployed | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Container Images | Prebuilt `jupyterlab` (CPU/GPU) | Prebuilt `jupyterlab` (CPU) + `spark-py312` | Prebuilt `jupyterlab` (TPU) | Prebuilt `jupyterlab` (CPU/GPU/TPU) + `spark-py312` | Prebuilt `codeserver-python` (CPU) + `agent-sandbox-mcp-server` | Prebuilt `jupyterlab` (CPU) |
+| Image build required? | ❌ None (prebuilt) | ❌ None (prebuilt) | ❌ None (prebuilt) | ❌ None (prebuilt) | ❌ None (prebuilt) | ❌ None (prebuilt) |
+| WorkspaceKind | `jupyterlab-resumable` (in this example) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `jupyterlab` (from `images/workspacekinds/`) | `codeserver` (from `images/workspacekinds/`) | `jupyterlab` / `jupyterlab-resumable` |
+| ComputeClasses | `gpu-t4-spot` (GPU notebook) | `tpu-v5-8-multi-host` | `tpu-v5-4-single-host` | `gpu-t4-spot` / `tpu-v5-4-single-host` | none | none (standard CPU node pool) |
+| GKE Pod Snapshots + gVisor | ✅ | — | — | — | — | — (requires standard non-gVisor node pool) |
+| Kubeflow Trainer v2 | — | ✅ | — | ✅ | — | — |
+| Kubeflow Spark Operator | — | ✅ | — | ✅ | — | — |
+| Agent Sandbox operator | — | — | — | — | ✅ (installed by that example's deploy script) | — |
+| KubeRay operator | — | — | — | — | — | ✅ (GKE Ray add-on or Helm, in that example's Step 1) |
+| Cloud Storage bucket | snapshot bucket (created by the deploy script) | data bucket (you create it) | — | data bucket (you create it) | — | — |
+| Accelerator quota | T4 Spot | TPU v5e Spot | TPU v5e Spot | T4 Spot or TPU v5e Spot | — | — |
 
 ---
 

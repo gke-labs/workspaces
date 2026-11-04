@@ -480,7 +480,7 @@ mkdir -p ~/.jupyter/jupyter_server_config.d
 echo '{"ServerApp": {"jpserver_extensions": {"jupyter_server_proxy": true}}}' > ~/.jupyter/jupyter_server_config.d/jupyter_server_proxy.json
 /package/admin/s6/command/s6-svc -r /run/service/jupyterlab
 ```
-*(In the custom images built from `images/jupyterlab/requirements*.txt`, `jupyter-server-proxy` is installed by default. The custom images add it explicitly because the upstream base image that `deploy_standalone.sh` registers by default does not include it.)*
+*(In the prebuilt JupyterLab images on GitHub Container Registry, `jupyter-server-proxy` is installed by default.)*
 
 ### Resolving Port Conflicts (`bind: address already in use`)
 

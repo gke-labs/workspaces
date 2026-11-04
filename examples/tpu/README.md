@@ -116,41 +116,21 @@ If they are missing (for example you deployed with `APPLY_COMPUTE_CLASSES=false`
 kubectl apply -f examples/compute-classes/tpu-compute-class.yaml
 ```
 
-### 3. Get `jax[tpu]` into the Workspace
+### 3. Verify the `jupyterlab` WorkspaceKind is Registered
 
-`deploy_standalone.sh` registers the `jupyterlab` WorkspaceKind by default, and its **TPU image option (`jupyterlab-tpu`) runs the upstream CPU base image** (`jupyter-scipy`): there is no public TPU variant, so `jax[tpu]`/`libtpu` are **not** preinstalled (the Kubeflow SDK, `kubeflow 0.4.0`, already is). Pick one:
+`deploy_standalone.sh` registers the `jupyterlab` WorkspaceKind by default, and its TPU image option (`jupyterlab-tpu`) points directly to the **prebuilt TPU image** on GitHub Container Registry:
+`ghcr.io/gke-labs/workspaces/jupyterlab:latest-tpu`
 
-- **Option A — install in the workspace (no image build).** Run the notebook's Step 0 cell, or in a JupyterLab terminal:
+This image comes with `jax[tpu]`, `libtpu`, and supporting Kubeflow SDKs preinstalled. No image build or manual `pip install` is required.
 
-  ```bash
-  pip install --user "jax[tpu]==0.10.2"
-  ```
-
-  `--user` installs into `~/.local` on the home volume, so the packages survive workspace restarts. Restart the kernel afterwards.
-
-- **Option B — build the custom TPU image** (includes `jax[tpu]`, `libtpu`, and the Kubeflow SDK):
-
-  ```bash
-  export REGISTRY="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-
-  ./images/build.sh --jupyterlab --tpu --registry-path "${REGISTRY}"
-  gcloud artifacts docker images list "${REGISTRY}" --include-tags | grep -E 'jupyterlab.*tpu'
-  ```
-
-  Then re-apply the `jupyterlab` template so its image options point at your custom images (same kind name and option ids, updated in place). This repoints the CPU and GPU options too, so build those tags as well (`./images/build.sh --jupyterlab`) or they will fail to pull:
-
-  ```bash
-  cd images
-  IMAGE_NAME="jupyterlab" CPU_IMAGE_TAG="latest-cpu" GPU_IMAGE_TAG="latest-gpu" TPU_IMAGE_TAG="latest-tpu" \
-    envsubst < workspacekinds/jupyterlab.yaml | kubectl apply -f -
-  cd ..
-  ```
-
-Verify the WorkspaceKind exists:
+Verify that the `jupyterlab` WorkspaceKind exists:
 
 ```bash
 kubectl get workspacekinds jupyterlab
 ```
+
+> [!NOTE]
+> *(Optional)* If you wish to build your own custom TPU image in your own Artifact Registry, see [`../../images/README.md`](../../images/README.md).
 
 ---
 
@@ -165,7 +145,7 @@ In the Kubeflow Workspaces UI (`https://${WORKSPACES_HOST}/workspaces/`):
 | :--- | :--- | :--- |
 | **Workspace Name** | `tpu-workspace` | Unique name in your namespace |
 | **WorkspaceKind** | **`jupyterlab`** | |
-| **Image** | The TPU option (`jupyterlab-tpu`): **`jupyter-scipy:v1.11.0 (TPU)`** on the default kind, or **`jupyterlab (TPU)`** after you register the custom images | Default: CPU base image, install `jax[tpu]` yourself ([Prerequisites step 3](#3-get-jaxtpu-into-the-workspace)). Custom: JAX and `libtpu` preinstalled |
+| **Image** | The TPU option (`jupyterlab-tpu`): **`jupyterlab (TPU)`** | Prebuilt image `ghcr.io/gke-labs/workspaces/jupyterlab:latest-tpu` with JAX and `libtpu` preinstalled |
 | **Pod Config** | **`TPU v5 1x1`** (`tpu_1`) or **`TPU v5 2x2`** (`tpu_4`) | Requests 1 chip via `tpu-v5-1-single-host` or 4 chips via `tpu-v5-4-single-host` |
 
 3. Click **Create**.

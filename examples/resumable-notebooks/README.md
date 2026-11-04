@@ -188,27 +188,22 @@ kubectl get podsnapshotstorageconfigs
 
 ### 3. Workspace images (custom images optional)
 
-Neither notebook needs a custom image. The public upstream Kubeflow base images
-are enough:
+Both notebooks run out-of-the-box using the prebuilt images hosted on GitHub Container Registry:
 
-| Notebook | Base image | Extra dependencies |
+| Notebook | Prebuilt Image | Preinstalled Dependencies |
 | :--- | :--- | :--- |
-| CPU | `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0` | None (only `numpy`, already included) |
-| GPU | `ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0` | `transformers>=5`, installed by the notebook's **Step 0** cell (`pip install --user`, so it lands on the home PVC and survives restarts) |
+| CPU | `ghcr.io/gke-labs/workspaces/jupyterlab:latest-cpu` | `numpy`, `pandas`, `matplotlib`, `kfp`, `kubeflow[spark]` |
+| GPU | `ghcr.io/gke-labs/workspaces/jupyterlab:latest-gpu` | PyTorch, CUDA 12, `transformers`, `accelerate`, `jax[cuda12]` |
 
-These are the images the registration command below uses by default.
+These images are pre-configured in [`manifests/workspacekind-resumable.yaml`](manifests/workspacekind-resumable.yaml).
 
-If you would rather have everything preinstalled, build the custom JupyterLab CPU
-and GPU images with [`../../images/build.sh`](../../images/build.sh) (the GPU
-image ships `transformers`, `accelerate`, and JAX on CUDA) and note the tags it
-prints:
-
-```bash
-cd images
-./build.sh --jupyterlab --cpu --gpu --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
-```
-
-See [`../../images/README.md`](../../images/README.md) for the full reference.
+> [!NOTE]
+> *(Optional)* If you would rather build your own custom images and host them in your Google Cloud Artifact Registry, build them with [`../../images/build.sh`](../../images/build.sh):
+> ```bash
+> cd images
+> ./build.sh --jupyterlab --cpu --gpu --registry-path "${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}"
+> ```
+> See [`../../images/README.md`](../../images/README.md) for the full reference.
 
 ### 4. The GPU ComputeClass (GPU notebook only)
 
@@ -249,37 +244,18 @@ snapshot.workspaces.gke.io/enabled: "true"
 snapshot.workspaces.gke.io/storage-config: "kubeflow-pod-snapshot-storage-config"
 ```
 
-It contains three placeholders you must replace. Run this from the repository
-root. By default it uses the public upstream base images (see
-[Workspace images](#3-workspace-images-custom-images-optional)):
+It is pre-configured with the prebuilt CPU and GPU images (`ghcr.io/gke-labs/workspaces/jupyterlab:latest-{cpu,gpu}`).
+Inject your shared `GCS_BUCKET` using `envsubst`:
 
 ```bash
 export PROJECT_ID="my-project"
 export TENANT_NAMESPACE="kubeflow-user"
 export GCS_BUCKET="${PROJECT_ID}-${TENANT_NAMESPACE}-bucket"
 
-# Public upstream base images (no build needed)
-export CPU_IMAGE="ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-scipy:v1.11.0"
-export GPU_IMAGE="ghcr.io/kubeflow/kubeflow/notebook-servers/jupyter-pytorch-cuda-full:v1.11.0"
-
-# Or, if you built the custom images with images/build.sh:
-# export REGION="us-west1"
-# export REPO_NAME="kubeflow-repo"
-# export CPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-cpu"
-# export GPU_IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO_NAME}/jupyterlab:latest-gpu"
-
-sed -e "s|<YOUR_CPU_IMAGE>|${CPU_IMAGE}|g" \
-    -e "s|<YOUR_GPU_IMAGE>|${GPU_IMAGE}|g" \
-    -e "s|<YOUR_GCS_BUCKET>|${GCS_BUCKET}|g" \
-    examples/resumable-notebooks/manifests/workspacekind-resumable.yaml \
-  | kubectl apply -f -
+envsubst '${GCS_BUCKET}' < examples/resumable-notebooks/manifests/workspacekind-resumable.yaml | kubectl apply -f -
 ```
 
-> [!WARNING]
-> Do not run a bare `kubectl apply -f examples/resumable-notebooks/manifests`.
-> The unsubstituted `<YOUR_CPU_IMAGE>` placeholder is not a valid image
-> reference, and every Workspace created from the kind will fail to start with
-> `InvalidImageName`.
+*(Optional: If you built custom images in your own Artifact Registry, substitute your registry with `sed "s|ghcr.io/gke-labs/workspaces|${REGISTRY}|g"`).*
 
 Verify:
 

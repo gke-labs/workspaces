@@ -211,7 +211,7 @@ spec:
             value: "/home/jovyan/.local/bin:/usr/local/nvidia/bin:/usr/local/cuda/bin:/opt/conda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
           # Shared GCS bucket exposed to notebooks as $GCS_BUCKET.
           - name: "GCS_BUCKET"
-            value: "<YOUR_GCS_BUCKET>"
+            value: "${GCS_BUCKET}"
           - name: "WORKSPACE_NAME"
             valueFrom:
               fieldRef:
@@ -233,14 +233,12 @@ spec:
           - id: "jupyterlab-cpu"
             spawner:
               displayName: "jupyterlab (CPU)"
-              # Generic on purpose: <YOUR_CPU_IMAGE> may be the upstream base image or
-              # the custom image from images/build.sh, whose package sets differ.
               description: "JupyterLab (CPU image)"
               labels:
                 - key: "accelerator"
                   value: "cpu"
             spec:
-              image: "<YOUR_CPU_IMAGE>"
+              image: "ghcr.io/gke-labs/workspaces/jupyterlab:latest-cpu"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"
@@ -248,14 +246,12 @@ spec:
           - id: "jupyterlab-gpu"
             spawner:
               displayName: "jupyterlab (GPU)"
-              # Generic on purpose: <YOUR_GPU_IMAGE> may be the upstream
-              # jupyter-pytorch-cuda-full base image or the custom GPU image.
               description: "JupyterLab with PyTorch and CUDA (GPU image)"
               labels:
                 - key: "accelerator"
                   value: "gpu"
             spec:
-              image: "<YOUR_GPU_IMAGE>"
+              image: "ghcr.io/gke-labs/workspaces/jupyterlab:latest-gpu"
               imagePullPolicy: "IfNotPresent"
               ports:
                 - id: "jupyterlab"

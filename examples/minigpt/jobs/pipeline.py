@@ -82,15 +82,8 @@ def get_bucket_name() -> str:
 
 
 def get_registry() -> str:
-    """Returns the container registry URL, checking that the environment variable exists and is non-empty."""
-    reg = os.environ.get("REGISTRY", "").rstrip("/")
-    if not reg:
-        raise ValueError(
-            "Container registry environment variable 'REGISTRY' is not set.\n"
-            "Please configure your container registry, for example:\n"
-            "    export REGISTRY='<region>-docker.pkg.dev/<your-project>/<your-repo>'"
-        )
-    return reg
+    """Returns the container registry URL, defaulting to the prebuilt GHCR repository."""
+    return os.environ.get("REGISTRY", "ghcr.io/gke-labs/workspaces").rstrip("/")
 
 
 def get_spark_image() -> str:
