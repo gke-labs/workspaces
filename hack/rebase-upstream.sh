@@ -16,6 +16,7 @@
 # This script helps to sync custom changes in this repository against upstream.
 # By default, it uses a 3-way merge which cleanly merges upstream changes without
 # rewriting history or replaying ancient initial commits. A rebase mode is also supported.
+# Upstream .github/ workflows are skipped to prevent rerunning upstream verified workflows.
 #
 # Usage:
 #   ./hack/rebase-upstream.sh [--merge | --rebase] [upstream_remote] [upstream_branch]
@@ -118,6 +119,21 @@ resolve_compliance_conflicts() {
             fi
         fi
     done <<< "${conflicted_files}"
+
+    # Always keep local version for files in .github/ (skip upstream .github/)
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        if [[ "$file" == .github/* ]] || [[ "$file" == .github ]]; then
+            echo "Resolving conflict in $file: skipping upstream (preserving local version from ${LOCAL_HEAD:0:7})..."
+            if git cat-file -e "${LOCAL_HEAD}:${file}" 2>/dev/null; then
+                git checkout --ours -- "$file" 2>/dev/null || git checkout --theirs -- "$file" 2>/dev/null || true
+                git checkout "${LOCAL_HEAD}" -- "$file" 2>/dev/null || git show "${LOCAL_HEAD}:${file}" > "$file"
+                git add "$file"
+            else
+                git rm -f "$file" 2>/dev/null || rm -f "$file"
+            fi
+        fi
+    done <<< "${conflicted_files}"
 }
 
 sync_workspaces_to_upstream() {
@@ -126,6 +142,19 @@ sync_workspaces_to_upstream() {
         echo "Syncing workspaces/ to match ${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}..."
         git checkout "${UPSTREAM_REMOTE}/${UPSTREAM_BRANCH}" -- workspaces/
         git add workspaces/
+    fi
+}
+
+skip_github_upstream() {
+    if [ -n "$(git diff "${LOCAL_HEAD}" -- .github/)" ] || \
+       [ -n "$(git diff --cached "${LOCAL_HEAD}" -- .github/)" ]; then
+        echo "Skipping upstream .github/: restoring local .github/ from ${LOCAL_HEAD:0:7}..."
+        git rm -rf --cached --ignore-unmatch .github/ > /dev/null 2>&1 || true
+        rm -rf .github/
+        if git cat-file -e "${LOCAL_HEAD}:.github" 2>/dev/null; then
+            git checkout "${LOCAL_HEAD}" -- .github/
+            git add .github/
+        fi
     fi
 }
 
@@ -146,6 +175,7 @@ if [ "$STRATEGY" = "merge" ]; then
     fi
 
     sync_workspaces_to_upstream
+    skip_github_upstream
 
     # Check if merge needs committing
     if [ -f .git/MERGE_HEAD ]; then
@@ -175,6 +205,18 @@ elif [ "$STRATEGY" = "rebase" ]; then
             fi
         done
     fi
+
+    if [ -n "$(git diff "${LOCAL_HEAD}" -- .github/)" ]; then
+        echo "Resetting .github/ to match pre-sync ${LOCAL_HEAD:0:7} (skipping upstream .github/)..."
+        git rm -rf --cached --ignore-unmatch .github/ > /dev/null 2>&1 || true
+        rm -rf .github/
+        if git cat-file -e "${LOCAL_HEAD}:.github" 2>/dev/null; then
+            git checkout "${LOCAL_HEAD}" -- .github/
+            git add .github/
+            git commit --no-edit -m "chore: skip upstream .github/ and preserve local version"
+        fi
+    fi
+
     echo "Rebase complete."
 fi
 
