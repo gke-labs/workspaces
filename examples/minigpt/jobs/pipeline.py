@@ -31,7 +31,7 @@ import tempfile
 import time
 from typing import Dict, List, Optional, Tuple
 
-from kubernetes import client, config
+from kubernetes import client, config, watch
 from kubeflow.common.types import KubernetesBackendConfig
 from kubeflow.spark import Driver, Executor, SparkClient, Name, NodeSelector
 from kubeflow.trainer import CustomTrainerContainer, TrainerClient
@@ -228,6 +228,159 @@ def _create_code_configmap(job_name: str, core_v1: client.CoreV1Api) -> str:
     return cm_name
 
 
+def delete_training(job_name: str) -> None:
+    """Deletes a Kubeflow TrainJob and cleans up its associated ConfigMap."""
+    tc = _trainer_client()
+    core_v1, _ = _get_k8s_clients()
+    print(f"[Trainer] Deleting TrainJob '{job_name}'...", flush=True)
+    try:
+        tc.delete_job(name=job_name)
+        print(f"[Trainer] TrainJob '{job_name}' successfully deleted.", flush=True)
+    except Exception as e:
+        print(f"[Trainer] Warning: failed to delete TrainJob '{job_name}': {e}", flush=True)
+
+    cm_name = f"{job_name}-code"
+    try:
+        core_v1.delete_namespaced_config_map(name=cm_name, namespace=NAMESPACE)
+    except Exception:
+        pass
+
+
+def _print_failed_pod_logs(job_name: str, core_v1: client.CoreV1Api) -> None:
+    """Inspects and prints recent logs from any failed worker pods."""
+    try:
+        pods = core_v1.list_namespaced_pod(
+            namespace=NAMESPACE,
+            label_selector=f"jobset.sigs.k8s.io/jobset-name={job_name}",
+        ).items
+        for p in pods:
+            p_name = p.metadata.name
+            has_error = (p.status.phase in ("Failed", "Unknown"))
+            if p.status.container_statuses:
+                for cs in p.status.container_statuses:
+                    if cs.state.terminated and cs.state.terminated.exit_code != 0:
+                        has_error = True
+            if has_error:
+                print(f"[Trainer] Worker pod '{p_name}' encountered an error. Recent logs:", flush=True)
+                try:
+                    logs = core_v1.read_namespaced_pod_log(
+                        name=p_name,
+                        namespace=NAMESPACE,
+                        container="node",
+                        tail_lines=40,
+                    )
+                    print(logs, flush=True)
+                except Exception as log_err:
+                    print(f"  (Failed to read logs from {p_name}: {log_err})", flush=True)
+    except Exception:
+        pass
+
+
+def _stream_training_logs(
+    submitted_name: str,
+    core_v1: client.CoreV1Api,
+    tc: TrainerClient,
+    timeout: int = 1800,
+) -> None:
+    """Streams logs from the rank 0 worker pod in real time until training completes."""
+    print(f"[Trainer] Waiting for training pod(s) to initialize...", flush=True)
+    start_time = time.time()
+    last_status = None
+
+    while time.time() - start_time < timeout:
+        # Check TrainJob terminal status
+        try:
+            job = tc.get_job(submitted_name)
+            if job.status == "Complete":
+                return
+            elif job.status == "Failed":
+                _print_failed_pod_logs(submitted_name, core_v1)
+                raise RuntimeError(f"TrainJob '{submitted_name}' failed.")
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
+
+        # Look for the worker pods
+        try:
+            pod_list = core_v1.list_namespaced_pod(
+                namespace=NAMESPACE,
+                label_selector=f"jobset.sigs.k8s.io/jobset-name={submitted_name}",
+            ).items
+        except Exception:
+            pod_list = []
+
+        if not pod_list:
+            time.sleep(2)
+            continue
+
+        # Prefer node-0 (rank 0 master)
+        target_pod = None
+        for p in pod_list:
+            if "-node-0" in p.metadata.name:
+                target_pod = p
+                break
+        if not target_pod:
+            target_pod = pod_list[0]
+
+        pod_name = target_pod.metadata.name
+        phase = target_pod.status.phase or "Unknown"
+
+        # Inspect container state
+        container_ready = False
+        container_info = phase
+        if target_pod.status.container_statuses:
+            for cs in target_pod.status.container_statuses:
+                if cs.name == "node":
+                    if cs.state.running:
+                        container_ready = True
+                        container_info = "Running"
+                    elif cs.state.waiting:
+                        container_info = f"Waiting ({cs.state.waiting.reason or 'Starting'})"
+                    elif cs.state.terminated:
+                        container_ready = True
+                        container_info = f"Terminated ({cs.state.terminated.reason or 'Exited'})"
+                    break
+
+        current_status = f"[Trainer] Pod {pod_name}: {phase} - {container_info}"
+        if current_status != last_status:
+            print(current_status, flush=True)
+            last_status = current_status
+
+        if container_ready:
+            print(f"[Trainer] Streaming logs from {pod_name}...\n" + "=" * 70, flush=True)
+            resp = None
+            try:
+                resp = core_v1.read_namespaced_pod_log(
+                    name=pod_name,
+                    namespace=NAMESPACE,
+                    container="node",
+                    follow=True,
+                    _preload_content=False,
+                )
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").rstrip()
+                    print(line, flush=True)
+            except Exception:
+                pass
+            finally:
+                if resp:
+                    try:
+                        resp.release_conn()
+                    except Exception:
+                        pass
+            print("=" * 70, flush=True)
+
+            # Check final job status
+            try:
+                tc.wait_for_job_status(submitted_name, timeout=60, polling_interval=2)
+            except Exception:
+                pass
+            return
+
+        time.sleep(3)
+
+
 def run_training(
     accelerator: str = "tpu",
     epochs: int = 2,
@@ -373,28 +526,35 @@ def run_training(
 
     # 4. Submit TrainJob
     tc = _trainer_client()
-    submitted_name = tc.train(
-        runtime="torch-distributed",
-        trainer=trainer,
-        options=[
-            TrainerJobName(job_name),
-            TrainerCommand(torchrun_cmd),
-            accelerator_patch,
-        ],
-    )
-    print(f"[Trainer] Successfully submitted TrainJob '{submitted_name}'!")
+    submitted_name = None
+    try:
+        submitted_name = tc.train(
+            runtime="torch-distributed",
+            trainer=trainer,
+            options=[
+                TrainerJobName(job_name),
+                TrainerCommand(torchrun_cmd),
+                accelerator_patch,
+            ],
+        )
+        print(f"[Trainer] Successfully submitted TrainJob '{submitted_name}'!")
 
-    if wait:
-        print(f"[Trainer] Streaming logs for '{submitted_name}'...")
-        try:
-            for line in tc.get_job_logs(name=submitted_name, follow=True):
-                print(line, end="", flush=True)
-        except Exception:
-            pass
-        tc.wait_for_job_status(submitted_name, timeout=timeout, polling_interval=10)
-        print(f"[Trainer] TrainJob '{submitted_name}' finished successfully!")
+        if wait:
+            _stream_training_logs(submitted_name, core_v1, tc, timeout=timeout)
+            print(f"[Trainer] TrainJob '{submitted_name}' finished successfully!")
 
-    return submitted_name
+        return submitted_name
+
+    except (KeyboardInterrupt, SystemExit):
+        print(f"\n[Trainer] Training aborted by user.", flush=True)
+        if submitted_name:
+            delete_training(submitted_name)
+        else:
+            try:
+                core_v1.delete_namespaced_config_map(name=cm_name, namespace=NAMESPACE)
+            except Exception:
+                pass
+        raise
 
 
 # ------------------------------------------------------------------------------
