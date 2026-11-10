@@ -8,10 +8,12 @@ import {
   WorkspacekindsPodVolumeMountPaths,
   WorkspacekindsWorkspaceKindListItem,
   WorkspacesPodSecretMount,
+  WorkspacesPodMetadataMutate,
   WorkspacesPodTemplateOptionsMutate,
   WorkspacesPodVolumeMount,
   V1Toleration,
   WorkspacesWorkspaceListItem,
+  V1Beta1FilterRule,
 } from '~/generated/data-contracts';
 
 export interface WorkspaceColumnDefinition {
@@ -44,6 +46,8 @@ export interface WorkspaceFormProperties {
 
 export interface WorkspaceFormData {
   revision: string;
+  originalDisplayName: string | undefined;
+  podMetadata: WorkspacesPodMetadataMutate;
   kind: WorkspacekindsWorkspaceKindListItem | undefined;
   imageConfig: WorkspacesPodTemplateOptionsMutate['imageConfig'] | undefined;
   podConfig: WorkspacesPodTemplateOptionsMutate['podConfig'] | undefined;
@@ -122,10 +126,16 @@ export interface ActivityRuleEntry extends WorkspacekindsActivityRule {
   id: string;
 }
 
+export interface FilterRuleEntry extends V1Beta1FilterRule {
+  /** Stable UI identity; excluded from API and YAML serialization. */
+  id: string;
+}
+
 export interface WorkspaceKindFormData {
   properties: WorkspaceKindProperties;
   imageConfig: WorkspaceKindImageConfigData;
   podConfig: WorkspaceKindPodConfigData;
   podTemplate: WorkspaceKindPodTemplateData;
   activityRules?: ActivityRuleEntry[];
+  filterRules?: FilterRuleEntry[];
 }
